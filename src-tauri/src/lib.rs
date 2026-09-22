@@ -1,8 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use note_core::capture::Captured;
 use note_core::service::{AppInfo, HitRow, Hub, NoteDetail, NoteList};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+/// 速记窗标签，前端按它路由到 Capture 组件。
+const CAPTURE_LABEL: &str = "capture";
+
+/// 默认热键。刻意避开 Ctrl+N（新建惯例）与 Win+N（系统通知中心）。
+const CAPTURE_SHORTCUT: &str = "Alt+Shift+N";
 
 /// 壳只持有状态与命令注册。业务判断一律在 `note-core`——
 /// 因为 CLI / MCP 必须走到完全相同的代码（docs/03 §后端 = 本地服务层）。
@@ -40,6 +48,66 @@ fn with_hub<T: serde::Serialize>(
     let guard = state.0.lock().map_err(|e| e.to_string())?;
     let hub = guard.as_ref().ok_or_else(|| "尚未选择 Vault".to_string())?;
     f(hub).map_err(|e| e.to_string())
+}
+
+/// 唤起速记窗。已存在就复用——不重复建窗口，也不打断用户已经输入的内容。
+fn show_capture(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(w) = app.get_webview_window(CAPTURE_LABEL) {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, CAPTURE_LABEL, WebviewUrl::App("index.html".into()))
+        .title("速记")
+        .inner_size(620.0, 172.0)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .center()
+        .build()?;
+    Ok(())
+}
+
+/// 落盘同步返回（实测含 fsync 的 p95 是 5.93ms，在 8ms 预算内），
+/// 索引挪到后台线程（实测 p95 9.86ms，同步做速记窗就会发涩）。
+/// 命令返回即代表内容已落盘——关掉窗口不等于可能丢。
+#[tauri::command]
+fn capture_text(
+    app: AppHandle,
+    state: State<'_, Shared>,
+    text: String,
+    source_url: Option<String>,
+) -> Result<Captured, String> {
+    let cap = {
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        let hub = guard.as_mut().ok_or_else(|| "尚未选择 Vault".to_string())?;
+        hub.capture_write(&text, source_url.as_deref(), true)
+            .map_err(|e| e.to_string())?
+    };
+    let rel = cap.rel.clone();
+    let content = cap.content.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let st = app.state::<Shared>();
+        let indexed = match st.0.lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(hub) => hub.index_captured(&rel, &content).is_ok(),
+                None => false,
+            },
+            Err(_) => false,
+        };
+        // 前端靠它把"已存"变成"已可搜"；失败时下次 reindex 会兜底
+        let _ = app.emit("note://indexed", indexed);
+    });
+    Ok(cap)
+}
+
+#[tauri::command]
+fn hide_capture(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(CAPTURE_LABEL) {
+        let _ = w.hide();
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -108,10 +176,26 @@ pub fn run() {
             .build(),
     );
 
+    // 全局热键：主窗口开着或最小化都能唤起速记。注册失败（被别的程序占了）
+    // 只降级不致命——窗口里的按钮照样能记。
+    builder = builder.plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(|app, _shortcut, event| {
+                if event.state() == ShortcutState::Pressed {
+                    if let Err(e) = show_capture(app) {
+                        log::error!("打开速记窗失败：{e}");
+                    }
+                }
+            })
+            .build(),
+    );
+
     builder
         .manage(Shared(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             app_info,
+            capture_text,
+            hide_capture,
             list_notes,
             read_note,
             search_keyword,
@@ -139,6 +223,11 @@ pub fn run() {
                 if window_vibrancy::apply_mica(&w, None).is_err() {
                     log::info!("Mica 不可用，使用实色底");
                 }
+            }
+
+            // 字符串可直接注册（GlobalShortcut 对 &str 有实现），解析失败会返回 Err
+            if let Err(e) = app.global_shortcut().register(CAPTURE_SHORTCUT) {
+                log::warn!("注册全局热键 {CAPTURE_SHORTCUT} 失败：{e}");
             }
 
             if let Some(icon) = app.default_window_icon() {

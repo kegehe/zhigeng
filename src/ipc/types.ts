@@ -29,8 +29,19 @@ export type AppInfo = {
   indexNotes: number;
 };
 
+export type CapturedOut = {
+  rel: string;
+  id: string;
+  title: string;
+  contentHash: string;
+  created: string;
+  indexMs: number;
+};
+
 export type CommandName =
   | "app_info"
+  | "capture_text"
+  | "hide_capture"
   | "list_notes"
   | "read_note"
   | "vault_open"

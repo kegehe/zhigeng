@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::capture::Captured;
 use crate::index::{Index, KeywordHit};
 use crate::vault::{NoteKind, NoteStatus, Vault};
 use crate::{Error, Result};
@@ -144,6 +145,32 @@ impl Hub {
             .ok_or_else(|| Error::NotFound(rel.to_string()))?;
         self.index.index_file(file, content)?;
         Ok(hash)
+    }
+
+    /// 捕获一篇速记：落盘 + 立刻索引。GUI 走的是拆分后的两步版本。
+    pub fn capture(&mut self, raw: &str, source_url: Option<&str>) -> Result<Captured> {
+        let mut cap = self.capture_write(raw, source_url, true)?;
+        let t0 = std::time::Instant::now();
+        self.index_captured(&cap.rel, &cap.content)?;
+        cap.index_ms = t0.elapsed().as_millis() as u64;
+        Ok(cap)
+    }
+
+    /// 第一步：落盘（默认含 fsync）。速记窗只需等这一步。
+    pub fn capture_write(
+        &mut self,
+        raw: &str,
+        source_url: Option<&str>,
+        durable: bool,
+    ) -> Result<Captured> {
+        crate::capture::capture_text_opts(&self.vault, raw, source_url, durable)
+    }
+
+    /// 第二步：单篇增量索引。与落盘分开，这样速记窗不必等它（docs/04 §1）。
+    pub fn index_captured(&mut self, rel: &str, content: &str) -> Result<()> {
+        let file = self.vault.note_file(rel)?;
+        self.index.index_file(&file, content)?;
+        Ok(())
     }
 
     pub fn vault(&self) -> &Vault {

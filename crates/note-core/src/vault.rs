@@ -170,6 +170,13 @@ impl Vault {
     /// 原子写入：同目录临时文件 → 刷盘 → rename 覆盖。
     /// 崩溃只可能留下临时文件，绝不会把笔记写成半截（docs/02 §写入与外部修改）。
     pub fn write_atomic(&self, rel: &str, bytes: &[u8]) -> Result<String> {
+        self.write_atomic_opts(rel, bytes, true)
+    }
+
+    /// durable=false 只写到 OS 页缓存 + 原子改名：进程崩了不丢，
+    /// 但断电可能丢。用来量 fsync 的占比，不代表产品可以随便关。
+    #[doc(hidden)]
+    pub fn write_atomic_opts(&self, rel: &str, bytes: &[u8], durable: bool) -> Result<String> {
         let target = self.resolve(rel)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io {
@@ -183,7 +190,9 @@ impl Vault {
                 use std::io::Write;
                 let mut f = std::fs::File::create(&tmp)?;
                 f.write_all(bytes)?;
-                f.sync_all()?; // Windows 上即 FlushFileBuffers
+                if durable {
+                    f.sync_all()?; // Windows 上即 FlushFileBuffers
+                }
             }
             std::fs::rename(&tmp, &target)?;
             Ok(())
@@ -196,6 +205,34 @@ impl Vault {
             });
         }
         Ok(content_hash(bytes))
+    }
+
+    /// 单个文件的元数据。给捕获路径用：新写完一篇就立刻索引它，
+    /// 而不是 scan 整个库（2 万篇时 hash 全库要好几秒，必然超 8ms 预算）。
+    pub fn note_file(&self, rel: &str) -> Result<NoteFile> {
+        let abs = self.resolve(rel)?;
+        let md = std::fs::metadata(&abs).map_err(|e| Error::Io {
+            path: rel.to_string(),
+            source: e,
+        })?;
+        let bytes = std::fs::read(&abs).map_err(|e| Error::Io {
+            path: rel.to_string(),
+            source: e,
+        })?;
+        Ok(NoteFile {
+            rel: rel.to_string(),
+            abs,
+            status: status_of_rel(rel).unwrap_or(NoteStatus::Active),
+            kind: kind_of_rel(rel),
+            size: md.len(),
+            mtime_ms: md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            content_hash: content_hash(&bytes),
+        })
     }
 
     pub fn read(&self, rel: &str) -> Result<Vec<u8>> {

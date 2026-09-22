@@ -46,6 +46,16 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// 捕获一条速记（落 inbox/ 并立刻索引这一篇）
+    Capture {
+        /// Vault 目录
+        path: PathBuf,
+        /// 速记正文，可多行（--bench 时可省）
+        text: Option<String>,
+        /// 在临时库里连拍 N 条测捕获耗时，不碰 path 指向的真实 Vault
+        #[arg(long)]
+        bench: Option<usize>,
+    },
     /// 量同步 IPC 命令耗时（G6 的 8ms 红线）
     IpcBench {
         #[arg(long, default_value_t = 500)]
@@ -74,6 +84,7 @@ fn main() -> Result<()> {
         Cmd::Search { path, query, limit } => cmd_search(path, &query, limit),
         Cmd::Bench { notes, out } => cmd_bench(notes, out),
         Cmd::IpcBench { notes, iters } => cmd_ipc_bench(notes, iters),
+        Cmd::Capture { path, text, bench } => cmd_capture(&path, text.as_deref(), bench),
     }
 }
 
@@ -387,4 +398,105 @@ fn read_ipc_budget_ms() -> Result<f64> {
         }
     }
     Ok(8.0)
+}
+
+/// 捕获路径的实测入口：落盘 + 单篇增量索引，两项预算一起看
+/// （速记窗唤起 < 100ms 是端到端目标，同步命令 < 8ms 是这条内部的红线）。
+fn cmd_capture(path: &std::path::Path, text: Option<&str>, bench: Option<usize>) -> Result<()> {
+    use std::time::Instant;
+
+    let (dir, tmp) = match bench {
+        Some(n) => {
+            let d = std::env::temp_dir().join(format!("note-cap-{}", std::process::id()));
+            std::fs::create_dir_all(&d)?;
+            println!("bench 模式：忽略 {path:?}，用临时库 {}", d.display());
+            let _ = n;
+            (d, true)
+        }
+        None => (path.to_path_buf(), false),
+    };
+
+    let mut hub = note_core::service::Hub::open(&dir)?;
+
+    match bench {
+        Some(n) => {
+            // 三段分开量：带 fsync 的落盘 / 不带 fsync 的落盘 / 单篇增量索引。
+            // 目的是看清 8ms 预算到底被谁吃掉的，而不是笼统地说"要异步化"。
+            let mut fsync = Vec::with_capacity(n);
+            let mut cached = Vec::with_capacity(n);
+            let mut index = Vec::with_capacity(n);
+            {
+                // 预热：jieba 词典首载、WAL 建库、连接池冷启都是一次性的，
+                // 算进"每次捕获"的预算会把结论带偏
+                let w = hub.capture_write("预热条目不计入统计", None, true)?;
+                hub.index_captured(&w.rel, &w.content)?;
+            }
+            for i in 0..n {
+                let t = Instant::now();
+                hub.capture_write(&format!("捕获压测持久 {i}\n第二块"), None, true)?;
+                fsync.push(t.elapsed().as_secs_f64() * 1000.0);
+
+                let t = Instant::now();
+                hub.capture_write(&format!("捕获压测缓写 {i}\n第二块"), None, false)?;
+                cached.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            // 索引统一在落盘之后做，顺带验证"落盘顺序与索引顺序可以脱节"
+            for f in hub.vault().scan()? {
+                let content = String::from_utf8_lossy(&hub.vault().read(&f.rel)?).to_string();
+                let t = Instant::now();
+                hub.index_captured(&f.rel, &content)?;
+                index.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let q = |v: &[f64], p: f64| {
+                let mut w = v.to_vec();
+                w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                (
+                    w[((w.len() as f64 * p) as usize).min(w.len() - 1)],
+                    w[w.len() - 1],
+                )
+            };
+            println!("捕获分段基准（{n} 次）：");
+            for (name, v) in [
+                ("落盘 + fsync     ", &fsync),
+                ("落盘 仅页缓存    ", &cached),
+                ("单篇增量索引    ", &index),
+            ] {
+                let (p95, _) = q(v, 0.95);
+                let (p50only, _) = q(v, 0.5);
+                let (p90, _) = q(v, 0.9);
+                let mut top: Vec<f64> = v.to_vec();
+                top.sort_by(|a, b| b.partial_cmp(a).unwrap());
+                let top5 = top
+                    .iter()
+                    .take(5)
+                    .map(|x| format!("{x:.1}"))
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                println!(
+                    "  {name} p50 {p50only:>6.2}ms  p90 {p90:>6.2}ms  p95 {p95:>6.2}ms  最慢 5 次 {top5}"
+                );
+            }
+            let hits = hub.search_keyword("压测", 5)?;
+            println!("索引完成后立刻可搜：命中 {} 条", hits.len());
+            let budget = read_ipc_budget_ms()?;
+            if q(&fsync, 0.95).1 > budget {
+                println!(
+                    "→ 落盘(含 fsync) p95 已超 {budget:.1}ms 预算：速记窗必须\"先回显再落盘\"，\n  且落盘失败要能明确报错，不能静默丢内容"
+                );
+            }
+            if tmp {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+        None => {
+            let Some(text) = text.filter(|t| !t.trim().is_empty()) else {
+                anyhow::bail!("给一段速记正文，或用 --bench N 压测");
+            };
+            let c = hub.capture(text, None)?;
+            println!("已存 {}（id {}，索引 {}ms）", c.rel, c.id, c.index_ms);
+            let hits = hub.search_keyword(&c.title, 5)?;
+            println!("立刻搜索“{}”命中 {} 条", c.title, hits.len());
+        }
+    }
+    Ok(())
 }

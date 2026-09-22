@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppInfo, ListNotes, NoteDetail } from "./types";
+import type { AppInfo, CapturedOut, ListNotes, NoteDetail } from "./types";
 
 export const inTauri = () => "__TAURI_INTERNALS__" in window;
 
@@ -12,6 +12,9 @@ export const api = {
   listNotes: (limit = 200) => invoke<ListNotes>("list_notes", { limit }),
   readNote: (rel: string) => invoke<NoteDetail>("read_note", { rel }),
   vaultOpen: (path: string) => invoke<AppInfo>("vault_open", { path }),
+  /** 只等落盘（含 fsync，实测 p95 5.9ms）。索引在 Rust 侧后台补，别等它 */
+  captureText: (text: string, sourceUrl?: string) =>
+    invoke<CapturedOut>("capture_text", { text, sourceUrl: sourceUrl ?? null }),
   searchKeyword: (query: string, limit = 20) =>
     invoke<{ blockId: string; noteId: string; path: string; title: string; snippet: string; score: number }[]>(
       "search_keyword",
