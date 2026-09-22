@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d0dfeba1703eca4913fc7c3b5238a4016f7c3a6ab10652032ac1cfcc81f078c6 # shrinks to pieces = [Bullet("A", "")]

@@ -1,0 +1,38 @@
+# 构建产物
+/target
+**/target/
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 本地数据与密钥：任何情况下都不进版本库
+/.note/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!/.env.example
+secrets*.toml
+keyring-*
+
+# 基准与评测输出（结果快照按需单独提交）
+/bench-history/
+/eval/results/
+
+# 编辑器与系统
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 测试临时目录
+/tmp-vault/
+*.tmp
+
+# 一次性脚本与草稿
+/.scratch/

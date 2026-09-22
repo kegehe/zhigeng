@@ -1,0 +1,829 @@
+//! 索引层：SQLite schema、重建器、混合检索的关键词侧。
+//!
+//! 三条来自 docs/02 的铁律在这里落地：
+//! 1. `reindex = parse(all files)`，重建器与增量走同一份 `md-kernel`；
+//! 2. `index.db` 是派生物，删掉必须能完整重建（有测试保证）；
+//! 3. FTS5 与 vec 的 virtual table **不参与外键级联**，必须按"先取 rowid 再删主表"
+//!    的顺序手工清理，否则留下孤儿索引行让 AI 引用到已删内容。
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use md_kernel::{Block, Doc, Kind};
+use rusqlite::{params, Connection, Row};
+
+use crate::hash::content_hash_str;
+use crate::schema::SCHEMA;
+use crate::vault::{NoteFile, NoteKind, NoteStatus, Vault};
+use crate::{Error, Result};
+
+pub const SCHEMA_VERSION: i64 = 1;
+pub const MD_FORMAT_VERSION: i64 = 1;
+
+/// 切片预算（字符数近似 token：中文一字≈一 token，英文约 4 字符≈1 token）。
+const CHUNK_TARGET_CHARS: usize = 400;
+
+/// 打开（或创建）索引库。vec 扩展必须在任何连接建立前静态注册（ADR-003）。
+pub struct Index {
+    conn: Connection,
+}
+
+static VEC_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+impl Index {
+    pub fn open(vault: &Vault) -> Result<Self> {
+        let dir = vault.meta_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| Error::Io {
+            path: dir.display().to_string(),
+            source: e,
+        })?;
+        Self::open_path(&dir.join("index.db"))
+    }
+
+    pub fn open_path(path: &Path) -> Result<Self> {
+        VEC_REGISTERED.call_once(|| unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
+        });
+        let conn = Connection::open(path).map_err(|e| Error::Io {
+            path: path.display().to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::Other, e),
+        })?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let me = Self { conn };
+        me.ensure_schema()?;
+        Ok(me)
+    }
+
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    fn ensure_schema(&self) -> Result<()> {
+        self.conn.execute_batch(SCHEMA)?;
+        let got: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        match got {
+            None => {
+                self.set_meta(SCHEMA_VERSION, MD_FORMAT_VERSION)?;
+            }
+            Some(v) if v > SCHEMA_VERSION => {
+                // 索引是派生物：新版程序写过的库不能退回旧版读
+                return Err(Error::Io {
+                    path: "index.db".into(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("索引 schema 版本 {v} 高于本程序 {SCHEMA_VERSION}，请删除 index.db 重建"),
+                    ),
+                });
+            }
+            Some(v) => {
+                self.conn.pragma_update(None, "user_version", v)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_meta(&self, schema: i64, mdfmt: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta(key,value) VALUES('schema_version',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [schema.to_string()],
+        )?;
+        self.conn.execute(
+            "INSERT INTO meta(key,value) VALUES('md_format_version',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [mdfmt.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// 全量重建：清空派生表后逐篇索引。与增量走同一条 `index_file` 路径。
+    pub fn rebuild_all(&mut self, vault: &Vault) -> Result<RebuildStats> {
+        let t0 = std::time::Instant::now();
+        self.conn
+            .execute_batch("DELETE FROM blocks_fts; DELETE FROM chunks_fts; DELETE FROM notes;")?;
+        // vec 表按模型存在与否逐个清空
+        for name in self.vec_tables() {
+            self.conn.execute(&format!("DELETE FROM {name}"), [])?;
+        }
+        let mut stats = RebuildStats::default();
+        for f in vault.scan()? {
+            let src = String::from_utf8_lossy(&vault.read(&f.rel)?).to_string();
+            stats.merge(self.index_file(&f, &src)?);
+        }
+        stats.links = rebuild_links(&self.conn)?;
+        stats.elapsed_ms = t0.elapsed().as_millis() as u64;
+        Ok(stats)
+    }
+
+    /// 单篇重建（增量）。**顺序严格遵循 docs/02 §派生表的手工清理**。
+    pub fn index_file(&mut self, f: &NoteFile, src: &str) -> Result<RebuildStats> {
+        let doc = md_kernel::parse(src);
+        let note_id = note_id_of(&doc, &f.rel);
+        let mut stats = RebuildStats::default();
+        purge_by_key(&self.conn, &f.rel, &note_id)?;
+        insert_note(&self.conn, f, src, &doc, &note_id, &mut stats)?;
+        stats.notes = 1;
+        Ok(stats)
+    }
+
+    pub fn vec_tables(&self) -> Vec<String> {
+        vec_tables_of(&self.conn)
+    }
+
+    /// 关键词检索：jieba 预分词后的 BM25。隐私过滤在这里（SQL 层）完成，不靠 prompt。
+    pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<KeywordHit>> {
+        let seg = segment(query);
+        let match_expr = format!("\"{}\"", seg.replace('"', "\" \""));
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.note_id, substr(b.text,1,120), bm25(blocks_fts), n.path, n.title, b.type, n.status
+             FROM blocks_fts f
+             JOIN blocks b ON b.rowid = f.rowid
+             JOIN notes  n ON n.id = b.note_id
+             WHERE blocks_fts MATCH ?1
+               AND n.ai_private = 0 AND n.no_ai = 0
+               AND n.status <> 'archived'
+             ORDER BY bm25(blocks_fts)
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![match_expr, limit as i64], |r: &Row| {
+            Ok(KeywordHit {
+                block_id: r.get(0)?,
+                note_id: r.get(1)?,
+                snippet: r.get(2)?,
+                score: r.get(3)?,
+                path: r.get(4)?,
+                title: r.get(5)?,
+                kind: r.get(6)?,
+                status: r.get(7)?,
+            })
+        })?;
+        Ok(rows.filter_map(|x| x.ok()).collect())
+    }
+
+    /// 各表行数，用于"增量结果 == 全量重建结果"的逐表 diff。
+    pub fn table_counts(&self) -> Result<BTreeMap<String, i64>> {
+        let tables: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type='table'
+                 AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts_%'
+                 ORDER BY name",
+            )?;
+            let rows = stmt.query_map([], |r: &Row| r.get::<_, String>(0))?;
+            rows.filter_map(|x| x.ok()).collect()
+        };
+        let mut out = BTreeMap::new();
+        for t in tables {
+            let n: i64 = self
+                .conn
+                .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))?;
+            out.insert(t, n);
+        }
+        Ok(out)
+    }
+
+    /// 孤儿索引行：派生表里有、主表里没有。非零即红（docs/03 §可观测性）。
+    pub fn orphan_counts(&self) -> Result<Orphans> {
+        let fts = |t: &str, main: &str| -> Result<i64> {
+            Ok(self.conn.query_row(
+                &format!(
+                    "SELECT count(*) FROM {t} f LEFT JOIN {main} m ON m.rowid=f.rowid WHERE m.rowid IS NULL"
+                ),
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        };
+        Ok(Orphans {
+            blocks_fts: fts("blocks_fts", "blocks")?,
+            chunks_fts: fts("chunks_fts", "chunks")?,
+            chunks_no_blocks: self.conn.query_row(
+                "SELECT count(*) FROM chunks c LEFT JOIN blocks b ON b.id=c.start_block WHERE b.id IS NULL",
+                [],
+                |r| r.get(0),
+            )?,
+        })
+    }
+
+    /// md 与 db 的偏差：内容 hash 不一致或文件缺失。
+    pub fn drift(&self, vault: &Vault) -> Result<i64> {
+        let mut n = 0i64;
+        let mut stmt = self.conn.prepare("SELECT path, content_hash FROM notes")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r: &Row| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(|x| x.ok())
+            .collect();
+        drop(stmt);
+        for (rel, hash) in rows {
+            let on_disk = vault
+                .read(&rel)
+                .ok()
+                .map(|b| content_hash_str(&String::from_utf8_lossy(&b)));
+            if on_disk.as_deref() != Some(hash.as_str()) {
+                n += 1;
+            }
+        }
+        let indexed: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?;
+        let on_disk = vault.scan()?.len() as i64;
+        Ok(n + (on_disk - indexed).abs())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RebuildStats {
+    pub notes: usize,
+    pub blocks: usize,
+    pub chunks: usize,
+    pub links: usize,
+    pub unrecognized: usize,
+    pub elapsed_ms: u64,
+}
+
+impl RebuildStats {
+    fn merge(&mut self, o: RebuildStats) {
+        self.notes += o.notes;
+        self.blocks += o.blocks;
+        self.chunks += o.chunks;
+        self.links += o.links;
+        self.unrecognized += o.unrecognized;
+        self.elapsed_ms = self.elapsed_ms.max(o.elapsed_ms);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KeywordHit {
+    pub block_id: String,
+    pub note_id: String,
+    pub snippet: String,
+    pub score: f64,
+    pub path: String,
+    pub title: String,
+    pub kind: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Orphans {
+    pub blocks_fts: i64,
+    pub chunks_fts: i64,
+    pub chunks_no_blocks: i64,
+}
+
+impl Orphans {
+    pub fn is_clean(&self) -> bool {
+        *self
+            == Self {
+                blocks_fts: 0,
+                chunks_fts: 0,
+                chunks_no_blocks: 0,
+            }
+    }
+}
+
+/// 清理一篇笔记的全部派生与主表行。**顺序不可调换**（docs/02 §派生表的手工清理）：
+/// 先取 rowid → 删 virtual table → 删主表。反过来做就必然留下孤儿索引。
+fn purge_by_key(conn: &Connection, rel: &str, note_id: &str) -> Result<()> {
+    let ids: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT id FROM notes WHERE path=?1 OR id=?2")?;
+        let rows = stmt.query_map(params![rel, note_id], |r: &Row| r.get::<_, String>(0))?;
+        rows.filter_map(|x| x.ok()).collect()
+    };
+    for id in ids {
+        let block_rowids: Vec<i64> = {
+            let mut s = conn.prepare("SELECT rowid FROM blocks WHERE note_id=?1")?;
+            let r = s.query_map([&id], |x: &Row| x.get(0))?;
+            r.filter_map(|x| x.ok()).collect()
+        };
+        let chunk_ids: Vec<i64> = {
+            let mut s = conn.prepare("SELECT id FROM chunks WHERE note_id=?1")?;
+            let r = s.query_map([&id], |x: &Row| x.get(0))?;
+            r.filter_map(|x| x.ok()).collect()
+        };
+        for t in vec_tables_of(conn) {
+            for cid in &chunk_ids {
+                conn.execute(&format!("DELETE FROM {t} WHERE rowid=?1"), [*cid])?;
+            }
+        }
+        for cid in &chunk_ids {
+            conn.execute("DELETE FROM chunks_fts WHERE rowid=?1", [*cid])?;
+        }
+        for bid in &block_rowids {
+            conn.execute("DELETE FROM blocks_fts WHERE rowid=?1", [*bid])?;
+        }
+        conn.execute("DELETE FROM notes WHERE id=?1", [&id])?;
+    }
+    Ok(())
+}
+
+fn vec_tables_of(conn: &Connection) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_%'
+         AND name NOT LIKE '%_rows' AND name NOT LIKE '%_info' AND name NOT LIKE '%_chunks'",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |r: &Row| r.get::<_, String>(0)) else {
+        return Vec::new();
+    };
+    rows.filter_map(|x| x.ok()).collect()
+}
+
+/// 解析 + 落库。`reindex` 与增量走这一个函数（docs/02：重建器与解析器同源）。
+fn insert_note(
+    conn: &Connection,
+    f: &NoteFile,
+    src: &str,
+    doc: &Doc,
+    note_id: &str,
+    stats: &mut RebuildStats,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO notes(id,path,title,status,created_at,updated_at,content_hash,ai_private,no_ai,origin,note_kind)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![
+            note_id,
+            f.rel,
+            title_of(&doc, f),
+            status_str(f.status),
+            created_of(&doc),
+            f.mtime_ms,
+            content_hash_str(src),
+            ai_flag(&doc, "private"),
+            ai_flag(&doc, "no_ai"),
+            origin_of(&doc),
+            kind_str(f.kind),
+        ],
+    )?;
+
+    // 块：先做一次前序遍历拿到稳定 ID，再落库。
+    // 必须共用同一份 ID —— 之前 blocks 与 chunks 各自生成回退 ID，
+    // 结果 chunk 指向不存在的块，外键直接失败。
+    let plan = plan_blocks(doc, note_id);
+    let mut rows: Vec<(i64, String, String)> = Vec::new(); // (rowid, id, seg)
+    for pb in &plan {
+        let b = pb.block;
+        let text = b.plain_text();
+        let plain = if text.is_empty() {
+            md_kernel::plain_inline(&strip_fence_markers(&b.raw))
+        } else {
+            text
+        };
+        conn.execute(
+            "INSERT INTO blocks(id,note_id,parent_id,ordinal,type,heading_level,text,markdown,line_start,line_end,props_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                pb.id,
+                note_id,
+                pb.parent,
+                pb.ordinal,
+                b.kind.as_str(),
+                heading_level(&b.kind),
+                plain,
+                b.raw,
+                b.line_start as i64,
+                b.line_end as i64,
+                block_props(b),
+            ],
+        )?;
+        let rowid = conn.last_insert_rowid();
+        rows.push((rowid, pb.id.clone(), segment(&plain)));
+        stats.blocks += 1;
+        if matches!(b.kind, Kind::Raw | Kind::Html) {
+            stats.unrecognized += 1;
+        }
+    }
+
+    // FTS 用显式 rowid 与 blocks 对齐
+    for (rowid, _id, seg) in &rows {
+        conn.execute(
+            "INSERT INTO blocks_fts(rowid, seg) VALUES(?1, ?2)",
+            params![rowid, seg],
+        )?;
+    }
+
+    // 切片：只切根层块，保持"1..N 连续块"的语义
+    let chunks = build_chunks(&plan);
+    let mut chunk_rows: Vec<(i64, String, String)> = Vec::new();
+    for ch in &chunks {
+        conn.execute(
+            "INSERT INTO chunks(note_id,start_block,end_block,header_path,token_count,text,source_hash)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                note_id,
+                ch.start_block,
+                ch.end_block,
+                ch.header_path,
+                ch.text.chars().count() as i64,
+                ch.text,
+                content_hash_str(&ch.text),
+            ],
+        )?;
+        let rowid = conn.last_insert_rowid();
+        chunk_rows.push((rowid, ch.start_block.clone(), segment(&ch.text)));
+        stats.chunks += 1;
+    }
+    for (rowid, _s, seg) in &chunk_rows {
+        conn.execute(
+            "INSERT INTO chunks_fts(rowid, seg) VALUES(?1, ?2)",
+            params![rowid, seg],
+        )?;
+    }
+
+    // 链接：登记"指向谁"的原始文本，真正的 to_note 由 rebuild_links 统一解析。
+    // 必须遍历 plan（含自动分配的 ID），而不是只遍历有显式 ID 的块——
+    // 绝大多数块没有手写 ID，用 b.id 会静默漏掉它们的全部出站链接。
+    for pb in &plan {
+        for (target, anchor) in extract_links(&pb.block.content) {
+            conn.execute(
+                "INSERT OR IGNORE INTO link_targets(from_block, target, to_block, kind) VALUES(?1,?2,?3,?4)",
+                params![pb.id, target, anchor, link_kind(&target)],
+            )?;
+        }
+    }
+    stats.links = self_link_count(conn, note_id)?;
+    Ok(())
+}
+
+/// 笔记主键优先用 front-matter 的 id（改名换路径不变）。缺失时退化为路径派生值，
+/// 但绝不静默换主键——那会让历史链接指向空处。
+pub fn note_id_of(doc: &Doc, rel: &str) -> String {
+    doc.front_matter
+        .as_ref()
+        .and_then(|fm| {
+            fm.yaml.lines().find_map(|l| {
+                l.trim()
+                    .strip_prefix("id:")
+                    .map(|v| v.trim().trim_matches('"').to_string())
+            })
+        })
+        .filter(|v: &String| !v.is_empty() && v.starts_with("n-"))
+        .unwrap_or_else(|| format!("n-path-{}", stable_slug(rel)))
+}
+
+fn self_link_count(conn: &Connection, note_id: &str) -> Result<usize> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM links l JOIN blocks b ON b.id = l.from_block WHERE b.note_id=?1",
+        [note_id],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
+/// 全量解析链接图：把 `link_targets` 的原始写法映射到具体笔记。
+/// 匹配顺序：front-matter id → 完整相对路径 → 去扩展名的路径 → 文件名 → 标题。
+pub fn rebuild_links(conn: &Connection) -> Result<usize> {
+    conn.execute("DELETE FROM links", [])?;
+    let mut stmt = conn.prepare("SELECT id, path, title FROM notes")?;
+    let notes: Vec<(String, String, String)> = stmt
+        .query_map([], |r: &Row| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .filter_map(|x| x.ok())
+        .collect();
+    let mut lookup: BTreeMap<String, String> = BTreeMap::new();
+    for (id, path, title) in &notes {
+        let stem = path.trim_end_matches(".md").trim_end_matches(".markdown");
+        let file = stem.rsplit('/').next().unwrap_or(stem);
+        for key in [id.as_str(), path.as_str(), stem, file, title.as_str()] {
+            lookup.entry(key.to_string()).or_insert_with(|| id.clone());
+        }
+    }
+    let mut t = conn.prepare("SELECT from_block, target, to_block, kind FROM link_targets")?;
+    let targets: Vec<(String, String, Option<String>, String)> = t
+        .query_map([], |r: &Row| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .filter_map(|x| x.ok())
+        .collect();
+    let mut n = 0usize;
+    let mut unresolved = 0usize;
+    for (from_block, target, anchor, kind) in &targets {
+        let base = target.split('#').next().unwrap_or(target).trim();
+        let to_block = anchor.as_ref().filter(|a| a.starts_with("b-")).cloned();
+        match lookup.get(base) {
+            Some(to_note) => {
+                conn.execute(
+                    "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
+                     VALUES(?1,?2,?3,?4,'human',0)",
+                    params![from_block, to_note, to_block, kind],
+                )?;
+                n += 1;
+            }
+            None => {
+                // 悬空链接也要登记，UI 才能标红并提示补上（docs/02 §块 ID）
+                conn.execute(
+                    "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
+                     VALUES(?1,NULL,?2,?3,'human',1)",
+                    params![from_block, to_block, kind],
+                )?;
+                unresolved += 1;
+            }
+        }
+    }
+    Ok(n + unresolved)
+}
+
+/// 一次前序遍历得到的块清单：ID 规则只有一处，blocks 与 chunks 共用。
+pub struct Planned<'a> {
+    pub id: String,
+    pub parent: Option<String>,
+    pub ordinal: i64,
+    pub block: &'a Block,
+}
+
+fn plan_blocks<'a>(doc: &'a Doc, note_id: &str) -> Vec<Planned<'a>> {
+    fn go<'a>(
+        b: &'a Block,
+        note_id: &str,
+        parent: Option<&str>,
+        ord: &mut i64,
+        out: &mut Vec<Planned<'a>>,
+    ) {
+        *ord += 1;
+        let id = b.id.clone().unwrap_or_else(|| format!("{note_id}#{ord}"));
+        out.push(Planned {
+            id: id.clone(),
+            parent: parent.map(str::to_string),
+            ordinal: *ord,
+            block: b,
+        });
+        for c in &b.children {
+            go(c, note_id, Some(&id), ord, out);
+        }
+    }
+    let mut out = Vec::new();
+    let mut ord = 0i64;
+    for b in &doc.blocks {
+        go(b, note_id, None, &mut ord, &mut out);
+    }
+    out
+}
+
+fn strip_fence_markers(raw: &str) -> String {
+    raw.lines()
+        .filter(|l| !(l.trim_start().starts_with("```") || l.trim_start().starts_with("~~~")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn heading_level(kind: &Kind) -> Option<i64> {
+    match kind {
+        Kind::Heading { level, .. } => Some(*level as i64),
+        _ => None,
+    }
+}
+
+fn block_props(b: &Block) -> Option<String> {
+    let mut m = serde_json::Map::new();
+    if let Kind::Code { info, .. } = &b.kind {
+        m.insert("lang".into(), serde_json::Value::String(info.clone()));
+    }
+    if let Kind::Todo { checked } = &b.kind {
+        m.insert("checked".into(), serde_json::Value::Bool(*checked));
+    }
+    if let Kind::Callout { ty, folded, .. } = &b.kind {
+        m.insert("callout".into(), serde_json::Value::String(ty.clone()));
+        m.insert("folded".into(), serde_json::Value::Bool(*folded));
+    }
+    for (k, v) in &b.fields {
+        m.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
+    if m.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(m).to_string())
+    }
+}
+
+/// 切片：按根层块累积到 CHUNK_TARGET..CHUNK_MAX 字符，遇到标题重开并记录面包屑。
+fn build_chunks(plan: &[Planned]) -> Vec<Chunk> {
+    #[derive(Default)]
+    struct Acc {
+        start: Option<String>,
+        end: String,
+        text: String,
+    }
+    let mut out = Vec::new();
+    let mut acc = Acc::default();
+    let mut trail: Vec<(u8, String)> = Vec::new();
+
+    let flush = |acc: &mut Acc, out: &mut Vec<Chunk>, trail: &[(u8, String)]| {
+        if let Some(s) = acc.start.take() {
+            let header = trail
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" > ");
+            let text = if header.is_empty() {
+                acc.text.clone()
+            } else {
+                format!("{header}\n{}", acc.text)
+            };
+            out.push(Chunk {
+                start_block: s,
+                end_block: acc.end.clone(),
+                header_path: (!header.is_empty()).then_some(header),
+                text,
+            });
+        }
+        acc.text.clear();
+        let _ = trail;
+    };
+
+    for pb in plan.iter().filter(|p| p.parent.is_none()) {
+        let b = pb.block;
+        if let Kind::Heading { level, .. } = &b.kind {
+            flush(&mut acc, &mut out, &trail);
+            while let Some((l, _)) = trail.last() {
+                if *l >= *level {
+                    trail.pop();
+                } else {
+                    break;
+                }
+            }
+            trail.push((*level, b.content.clone()));
+        }
+        let piece = {
+            let t = b.plain_text();
+            if t.is_empty() {
+                md_kernel::plain_inline(&strip_fence_markers(&b.raw))
+            } else {
+                t
+            }
+        };
+        if piece.trim().is_empty() {
+            continue;
+        }
+        if acc.start.is_none() {
+            acc.start = Some(pb.id.clone());
+        }
+        acc.end = pb.id.clone();
+        acc.text.push_str(&piece);
+        acc.text.push('\n');
+        // 到目标长度就在块边界切一刀，避免 chunk 过长
+        if acc.text.chars().count() >= CHUNK_TARGET_CHARS {
+            flush(&mut acc, &mut out, &trail);
+        }
+    }
+    flush(&mut acc, &mut out, &trail);
+    out
+}
+
+#[derive(Debug, Clone)]
+struct Chunk {
+    start_block: String,
+    end_block: String,
+    header_path: Option<String>,
+    text: String,
+}
+
+/// 从正文抽出 wikilink，返回 (目标写法, 块级锚点)。
+/// 只取目标会把 `[[笔记#^b-xxx]]` 的锚点丢掉，AI 引用溯源会退化成指向整篇。
+fn extract_links(content: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut rest = content;
+    while let Some(a) = rest.find("[[") {
+        let tail = &rest[a + 2..];
+        let Some(b) = tail.find("]]") else { break };
+        let inner = &tail[..b];
+        let head = inner.split('|').next().unwrap_or("");
+        let (target, anchor) = match head.split_once('#') {
+            Some((t, a)) => (t, Some(a.trim_start_matches('^').to_string())),
+            None => (head, None),
+        };
+        let target = target.trim();
+        if !target.is_empty() {
+            out.push((target.to_string(), anchor.filter(|a| !a.is_empty())));
+        }
+        rest = &tail[b + 2..];
+    }
+    out
+}
+
+fn link_kind(target: &str) -> &'static str {
+    if target.contains('.') {
+        "asset"
+    } else {
+        "ref"
+    }
+}
+
+fn title_of(doc: &Doc, f: &NoteFile) -> String {
+    if let Some(fm) = &doc.front_matter {
+        if let Some(t) = fm.yaml.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix("title:")
+                .map(|v| v.trim().trim_matches('"').to_string())
+        }) {
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+    if let Some(h) = doc
+        .blocks
+        .iter()
+        .find(|b| matches!(b.kind, Kind::Heading { .. }))
+    {
+        return h.content.clone();
+    }
+    Path::new(&f.rel)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| f.rel.clone())
+}
+
+fn created_of(doc: &Doc) -> String {
+    doc.front_matter
+        .as_ref()
+        .and_then(|fm| {
+            fm.yaml.lines().find_map(|l| {
+                l.trim()
+                    .strip_prefix("created:")
+                    .map(|v| v.trim().to_string())
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn ai_flag(doc: &Doc, key: &str) -> i64 {
+    let Some(fm) = doc.front_matter.as_ref() else {
+        return 0;
+    };
+    let mut in_ai = false;
+    for l in fm.yaml.lines() {
+        let t = l.trim_end();
+        if !l.starts_with(' ') && !l.starts_with('\t') {
+            in_ai = t.trim_end_matches(':') == "ai";
+            continue;
+        }
+        if !in_ai {
+            continue;
+        }
+        if let Some(v) = t.trim().strip_prefix(&format!("{key}:")) {
+            let v = v.trim().trim_matches('"').to_ascii_lowercase();
+            return i64::from(v == "true" || v == "yes" || v == "1");
+        }
+    }
+    0
+}
+
+fn origin_of(doc: &Doc) -> &'static str {
+    let has = |k: &str| {
+        doc.front_matter
+            .as_ref()
+            .map(|fm| fm.yaml.lines().any(|l| l.trim_start().starts_with(k)))
+            .unwrap_or(false)
+    };
+    if has("source_url:") {
+        "clipped"
+    } else {
+        "human"
+    }
+}
+
+fn status_str(s: NoteStatus) -> &'static str {
+    match s {
+        NoteStatus::Inbox => "inbox",
+        NoteStatus::Active => "active",
+        NoteStatus::Archived => "archived",
+    }
+}
+
+fn kind_str(k: NoteKind) -> &'static str {
+    match k {
+        NoteKind::Note => "note",
+        NoteKind::View => "view",
+    }
+}
+
+fn stable_slug(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// 中文分词。FTS5 的 unicode61 不分中文词，必须先分词再入库。
+/// 中文分词。FTS5 的 unicode61 不分中文词，必须先分词再入库（docs/02）。
+/// 词典加载有成本，用 OnceLock 全局复用。
+pub fn segment(text: &str) -> String {
+    static JIEBA: std::sync::OnceLock<jieba_rs::Jieba> = std::sync::OnceLock::new();
+    let jieba = JIEBA.get_or_init(jieba_rs::Jieba::new);
+    jieba
+        .cut(text, false)
+        .into_iter()
+        .map(|t| t.word)
+        .filter(|w| !w.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}

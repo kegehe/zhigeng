@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = ["crates/md-kernel", "crates/note-core", "crates/note-cli"]
+# src-tauri 与 note-mcp 建立后加进 members；先把它们排除在默认构建外，
+# 否则每次 cargo build 都要编译整个 Tauri 依赖树。
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["note_service"]
+repository = "note_service"
+
+[workspace.dependencies]
+md-kernel = { path = "crates/md-kernel" }
+note-core = { path = "crates/note-core" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rusqlite = { version = "0.40", features = ["bundled", "array", "functions"] }
+sqlite-vec = "0.1.9"
+jieba-rs = "0.11"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["gfm"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.9"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+notify = "8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+toml = "0.9"
+walkdir = "2"
+chrono = { version = "0.4", features = ["serde"] }
+criterion = "0.7"
+proptest = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+correctness = "deny"
+dbg_macro = "deny"
+todo = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

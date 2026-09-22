@@ -1,0 +1,23 @@
+[package]
+name = "note-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "note 命令行入口：import / reindex / search / bench / eval"
+
+[[bin]]
+name = "note"
+path = "src/main.rs"
+
+[dependencies]
+note-core = { workspace = true }
+md-kernel = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

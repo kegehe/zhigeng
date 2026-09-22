@@ -1,0 +1,16 @@
+[package]
+name = "md-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Markdown ↔ 块树双向转换，G1/G5 的唯一实现点。不依赖 SQLite、不依赖 Tauri。"
+
+[dependencies]
+rand = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

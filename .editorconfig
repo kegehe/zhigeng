@@ -1,0 +1,22 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.rs]
+indent_size = 4
+
+[*.{ts,tsx,js,jsx,json,css,html}]
+indent_size = 2
+
+[*.{md,yml,yaml,toml}]
+indent_size = 2
+# 中文文档与 markdown 示例里会出现行尾双空格（硬换行），不能裁
+trim_trailing_whitespace = false
+
+[*.md]
+end_of_line = lf
