@@ -366,6 +366,25 @@ fn insert_note(
         ],
     )?;
 
+    // 视图定义只是查询，不是知识内容：登记存在即可，不切块、不进向量与全文索引、不参与
+    // AI 召回——否则"待补清单"这类视图会被自己的查询结果反复污染（docs/02）。
+    if matches!(f.kind, NoteKind::View) {
+        conn.execute(
+            "INSERT OR REPLACE INTO notes(id,path,title,note_kind,status,created_at,updated_at,content_hash,ai_private,no_ai,origin,rev)
+             VALUES(?1,?2,?3,'view','active',?4,?5,?6,1,1,'human',0)",
+            params![
+                note_id,
+                f.rel,
+                title_of(doc, f),
+                created_of(doc),
+                f.mtime_ms,
+                content_hash_str(src),
+            ],
+        )?;
+        stats.notes = 1;
+        return Ok(());
+    }
+
     // 块：先做一次前序遍历拿到稳定 ID，再落库。
     // 必须共用同一份 ID —— 之前 blocks 与 chunks 各自生成回退 ID，
     // 结果 chunk 指向不存在的块，外键直接失败。
