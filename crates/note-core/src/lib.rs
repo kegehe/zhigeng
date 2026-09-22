@@ -6,6 +6,7 @@
 pub mod hash;
 pub mod index;
 pub mod schema;
+pub mod service;
 pub mod vault;
 
 /// 重新导出，避免上层直接依赖 md-kernel 的版本细节。

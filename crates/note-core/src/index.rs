@@ -846,3 +846,67 @@ pub fn segment(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+// ---------------------------------------------------------------------------
+// 读侧查询：服务层与 UI 用的窄接口。都是单表查询，预算 8ms（G6）。
+// ---------------------------------------------------------------------------
+
+impl Index {
+    pub fn count_notes(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM notes", [], |r| r.get(0))?)
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// 笔记列表：默认按更新时间倒序。视图定义排在最后（它不是内容）。
+    pub fn list_notes(&self, limit: usize) -> Result<Vec<crate::service::NoteRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, title, status, note_kind, updated_at
+             FROM notes 
+             ORDER BY (note_kind='view'), updated_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r: &Row| {
+            Ok(crate::service::NoteRow {
+                rel: r.get(0)?,
+                title: r.get(1)?,
+                status: r.get(2)?,
+                kind: r.get(3)?,
+                updated_ms: r.get(4)?,
+                size: 0,
+            })
+        })?;
+        Ok(rows.filter_map(|x| x.ok()).collect())
+    }
+
+    /// 单篇的块序列（渲染用）。返回 (标题, 块)。
+    pub fn note_blocks(&self, rel: &str) -> Result<(String, Vec<crate::service::BlockRow>)> {
+        let title: String =
+            self.conn
+                .query_row("SELECT title FROM notes WHERE path=?1", [rel], |r| r.get(0))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT b.id, b.type, b.text, b.heading_level, b.line_start
+             FROM blocks b JOIN notes n ON n.id = b.note_id
+             WHERE n.path = ?1
+             ORDER BY b.ordinal",
+        )?;
+        let rows = stmt.query_map([rel], |r: &Row| {
+            Ok(crate::service::BlockRow {
+                id: r.get(0)?,
+                r#type: r.get(1)?,
+                text: r.get(2)?,
+                heading_level: r.get(3)?,
+                line_start: r.get(4)?,
+            })
+        })?;
+        Ok((title, rows.filter_map(|x| x.ok()).collect()))
+    }
+}

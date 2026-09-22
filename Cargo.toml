@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/md-kernel", "crates/note-core", "crates/note-cli"]
+members = ["crates/md-kernel", "crates/note-core", "crates/note-cli", "src-tauri"]
+# 默认构建不含壳：否则每次 cargo build 都要编译整个 Tauri 依赖树（docs/03）
+default-members = ["crates/md-kernel", "crates/note-core", "crates/note-cli"]
 # src-tauri 与 note-mcp 建立后加进 members；先把它们排除在默认构建外，
 # 否则每次 cargo build 都要编译整个 Tauri 依赖树。
 

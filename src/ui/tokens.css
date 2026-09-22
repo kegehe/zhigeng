@@ -1,0 +1,197 @@
+/*
+ * 设计 token —— 本仓库唯一允许出现颜色/尺寸字面量的文件（docs/06 §4）。
+ * 组件只准引用语义 token；新增 token 先在此登记语义与亮/暗两套值。
+ */
+@import "tailwindcss";
+
+/* 主题切换用 data-theme，不用 Tailwind 默认的 .dark class：
+   "跟随系统"由 JS 决定实际值，CSS 只认最终属性，避免两套优先级打架 */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  color-scheme: light;
+
+  /* ---- 面 ---- */
+  --bg-base: oklch(98.5% 0.002 260);
+  --bg-raised: oklch(99.6% 0.001 260);
+  --bg-sunken: oklch(96.2% 0.004 260);
+  --bg-hover: oklch(97.2% 0.003 260);
+  --bg-active: oklch(94.6% 0.005 260);
+  --bg-backdrop: oklch(20% 0.01 260 / 0.32);
+
+  /* ---- 文 ---- */
+  --text-primary: oklch(24% 0.012 260);
+  --text-secondary: oklch(48% 0.014 260);
+  --text-disabled: oklch(64% 0.012 260);
+  --text-on-accent: oklch(99% 0.004 265);
+
+  /* ---- 强调与状态 ---- */
+  --accent: oklch(55% 0.17 265);
+  --accent-hover: oklch(61% 0.17 265);
+  --accent-soft: oklch(55% 0.17 265 / 0.1);
+  --success: oklch(55% 0.13 155);
+  --warning: oklch(66% 0.14 78);
+  --danger: oklch(55% 0.2 25);
+  --success-soft: oklch(55% 0.13 155 / 0.12);
+  --warning-soft: oklch(66% 0.14 78 / 0.14);
+  --danger-soft: oklch(55% 0.2 25 / 0.1);
+
+  /* ---- 线与环 ---- */
+  --border-subtle: oklch(90% 0.005 260);
+  --border-strong: oklch(80% 0.008 260);
+  --focus-ring: oklch(55% 0.17 265 / 0.55);
+
+  /* ---- 字阶（行高不对称，正文 1.75 是排版底线）---- */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 15.5px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-mono: 13.5px;
+  --leading-body: 1.75;
+  --leading-ui: 1.5;
+  --font-ui: "Inter Variable", "Inter", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+
+  /* ---- 间距：只用 4px 栅格，出现 13/15px 即为缺陷 ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ---- 排版约束 ---- */
+  --measure: 46rem; /* 正文 65–75 字符 */
+  --gap-para: 1.15em;
+  --gap-list: 0.35em;
+  --gap-h-top: 1.8em;
+  --gap-h-bottom: 0.6em;
+
+  /* ---- 圆角 ---- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+
+  /* ---- 阴影：暗色下几乎不可见，必须与边框同用 ---- */
+  --shadow-1: 0 1px 2px oklch(20% 0.02 260 / 0.08);
+  --shadow-2: 0 6px 20px -6px oklch(20% 0.02 260 / 0.22);
+  --shadow-3: 0 24px 60px -12px oklch(20% 0.02 260 / 0.34);
+
+  /* ---- 层级：禁止组件里写裸数字 ---- */
+  --z-base: 0;
+  --z-sticky: 100;
+  --z-overlay: 500;
+  --z-popover: 600;
+  --z-toast: 700;
+  --z-modal: 800;
+
+  /* ---- 动效：只动 transform / opacity ---- */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 240ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-base: oklch(17% 0.006 260);
+  --bg-raised: oklch(21% 0.007 260);
+  --bg-sunken: oklch(14% 0.006 260);
+  --bg-hover: oklch(24% 0.008 260);
+  --bg-active: oklch(27.5% 0.009 260);
+  --bg-backdrop: oklch(8% 0.01 260 / 0.5);
+
+  --text-primary: oklch(93% 0.004 260);
+  --text-secondary: oklch(68% 0.012 260);
+  --text-disabled: oklch(52% 0.01 260);
+  --text-on-accent: oklch(18% 0.02 265);
+
+  --accent: oklch(70% 0.14 265);
+  --accent-hover: oklch(76% 0.14 265);
+  --accent-soft: oklch(70% 0.14 265 / 0.14);
+  --success: oklch(72% 0.12 155);
+  --warning: oklch(78% 0.12 78);
+  --danger: oklch(68% 0.16 25);
+  --success-soft: oklch(72% 0.12 155 / 0.14);
+  --warning-soft: oklch(78% 0.12 78 / 0.16);
+  --danger-soft: oklch(68% 0.16 25 / 0.14);
+
+  --border-subtle: oklch(26% 0.008 260);
+  --border-strong: oklch(34% 0.01 260);
+  --focus-ring: oklch(70% 0.14 265 / 0.6);
+
+  /* 暗面下阴影要更狠才看得见，但仍靠边框承担主要分隔 */
+  --shadow-1: 0 1px 2px oklch(0% 0 0 / 0.4);
+  --shadow-2: 0 6px 22px -6px oklch(0% 0 0 / 0.55);
+  --shadow-3: 0 24px 60px -12px oklch(0% 0 0 / 0.7);
+}
+
+/* 让 Tailwind 工具类引用语义 token：inline 保证生成的是 var(...)，
+   换主题时不必重新构建 */
+@theme inline {
+  --color-base: var(--bg-base);
+  --color-raised: var(--bg-raised);
+  --color-sunken: var(--bg-sunken);
+  --color-hover: var(--bg-hover);
+  --color-active: var(--bg-active);
+  --color-backdrop: var(--bg-backdrop);
+  --color-fg: var(--text-primary);
+  --color-fg-2: var(--text-secondary);
+  --color-fg-disabled: var(--text-disabled);
+  --color-on-accent: var(--text-on-accent);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-success-soft: var(--success-soft);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger-soft: var(--danger-soft);
+  --color-line: var(--border-subtle);
+  --color-line-strong: var(--border-strong);
+
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-base: var(--text-base);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --text-2xl: var(--text-2xl);
+  --text-mono: var(--text-mono);
+
+  --font-ui: var(--font-ui);
+  --font-mono: var(--font-mono);
+
+  --spacing: 4px;
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-full: var(--radius-full);
+
+  --shadow-1: var(--shadow-1);
+  --shadow-2: var(--shadow-2);
+  --shadow-3: var(--shadow-3);
+
+  --ease-out-strong: var(--ease-out);
+  --ease-in-strong: var(--ease-in);
+}
+
+/* 无障碍：把动画时长归零。这里允许 !important，因为必须压过组件内联动效 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

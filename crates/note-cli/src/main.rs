@@ -46,6 +46,13 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// 量同步 IPC 命令耗时（G6 的 8ms 红线）
+    IpcBench {
+        #[arg(long, default_value_t = 500)]
+        notes: usize,
+        #[arg(long, default_value_t = 200)]
+        iters: usize,
+    },
     /// 解析一篇笔记，校验字节级无损往返并输出块树
     Parse {
         file: PathBuf,
@@ -66,6 +73,7 @@ fn main() -> Result<()> {
         Cmd::Reindex { path, dry_run } => cmd_reindex(path, dry_run),
         Cmd::Search { path, query, limit } => cmd_search(path, &query, limit),
         Cmd::Bench { notes, out } => cmd_bench(notes, out),
+        Cmd::IpcBench { notes, iters } => cmd_ipc_bench(notes, iters),
     }
 }
 
@@ -294,4 +302,89 @@ fn write_diff_sample(a: &str, b: &str) {
             return;
         }
     }
+}
+
+/// 量同步 IPC 命令的真实耗时。G6 的红线是 8ms，而 UI 侧只负责不阻塞，
+/// 真正决定能不能守住的是这几个 handler 的成本（docs/03 §后端调用纪律）。
+fn cmd_ipc_bench(notes: usize, iters: usize) -> Result<()> {
+    use std::time::Instant;
+
+    let dir = std::env::temp_dir().join(format!("note-ipcbench-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let budget = read_ipc_budget_ms()?;
+    {
+        let v = Vault::open(&dir)?;
+        for i in 0..notes {
+            let body = format!(
+                "---\nid: n-ipc{i:05}\ntitle: IPC 基准笔记 {i}\n---\n\n第 {i} 篇正文，讲分节渲染与检索配额。 ^b-ipc{i:05}\n\n- 条目甲\n- 条目乙\n",
+            );
+            v.write_atomic(&format!("notes/ipc/{i:05}.md"), body.as_bytes())?;
+        }
+    }
+    let hub = note_core::service::Hub::open(&dir)?;
+
+    let pick = {
+        let list = hub.list_notes(10)?;
+        list.notes
+            .first()
+            .map(|n| n.rel.clone())
+            .context("基准库里没有笔记")?
+    };
+
+    let mut measured: Vec<(&str, Vec<f64>)> = Vec::new();
+    macro_rules! bench {
+        ($name:literal, $body:expr) => {{
+            let mut samples = Vec::with_capacity(iters);
+            for _ in 0..iters {
+                let t = Instant::now();
+                let _ = $body?;
+                samples.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            measured.push(($name, samples));
+        }};
+    }
+    bench!("app_info", hub.app_info());
+    bench!("list_notes(200)", hub.list_notes(200));
+    bench!("read_note", hub.read_note(&pick));
+    bench!("search_keyword", hub.search_keyword("分节渲染", 20));
+
+    let mut failed = false;
+    println!("IPC 基准：{notes} 篇 / 每项 {iters} 次，红线 p95 < {budget:.1}ms");
+    for (name, mut s) in measured {
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f64| s[((s.len() as f64 * p) as usize).min(s.len() - 1)];
+        let over = q(0.95) > budget;
+        failed |= over;
+        println!(
+            "  {:<18} p50 {:>6.2}ms  p95 {:>6.2}ms  max {:>6.2}ms  {}",
+            name,
+            q(0.5),
+            q(0.95),
+            s[s.len() - 1],
+            if over { "超线" } else { "ok" }
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    if failed {
+        anyhow::bail!("有同步命令超过 8ms 预算：该改异步 + 事件流，而不是给 UI 加 loading");
+    }
+    Ok(())
+}
+
+/// 预算从 perf-budget.json 读，避免文档与代码两处数字各说各话。
+fn read_ipc_budget_ms() -> Result<f64> {
+    let candidates = [
+        std::path::PathBuf::from("perf-budget.json"),
+        std::path::PathBuf::from("../perf-budget.json"),
+        std::path::PathBuf::from("../../perf-budget.json"),
+    ];
+    for p in candidates {
+        if let Ok(raw) = std::fs::read_to_string(&p) {
+            let v: serde_json::Value = serde_json::from_str(&raw)?;
+            if let Some(n) = v.get("同步IPC调用_p95_ms").and_then(|x| x.as_f64()) {
+                return Ok(n);
+            }
+        }
+    }
+    Ok(8.0)
 }

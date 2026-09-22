@@ -1,0 +1,34 @@
+[package]
+name = "note-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "note 桌面壳：窗口、托盘、IPC 注册。业务逻辑一律在 note-core。"
+
+# 壳不参与默认构建：否则每次 cargo build 都要编译整个 Tauri 依赖树。
+# 用 cargo build -p note-app 显式构建。
+
+[lib]
+name = "note_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+note-core = { workspace = true }
+md-kernel = { workspace = true }
+tauri = { version = "2.11", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2.4"
+tauri-plugin-log = "2.9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+window-vibrancy = "0.8"
+
+[lints]
+workspace = true

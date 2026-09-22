@@ -1,0 +1,193 @@
+/* 基础层：reset、排版、焦点环、滚动条。禁止在这里出现字面量颜色（token 除外）。 */
+@import "./tokens.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: var(--leading-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 桌面应用里不该有橡皮筋滚动与文本选择意外扩散 */
+  overscroll-behavior: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  user-select: text;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: default;
+}
+
+/* 焦点：绝不用 outline:none 一去了之（docs/06 §4） */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* 滚动条做成"存在感极低但可用" */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-disabled);
+  background-clip: content-box;
+}
+::selection {
+  background: var(--accent-soft);
+}
+
+/* 正文排版：行长与不对称间距是观感的七成来源 */
+.measure {
+  max-inline-size: var(--measure);
+  margin-inline: auto;
+}
+.prose-note p {
+  margin: 0 0 var(--gap-para);
+  line-height: var(--leading-body);
+}
+.prose-note h1,
+.prose-note h2,
+.prose-note h3 {
+  margin: var(--gap-h-top) 0 var(--gap-h-bottom);
+  line-height: 1.35;
+  text-wrap: balance;
+}
+.prose-note h1 {
+  font-size: var(--text-2xl);
+}
+.prose-note h2 {
+  font-size: var(--text-xl);
+}
+.prose-note h3 {
+  font-size: var(--text-lg);
+}
+.prose-note ul,
+.prose-note ol {
+  margin: 0 0 var(--gap-para);
+  padding-inline-start: var(--space-6);
+}
+.prose-note li {
+  margin: 0 0 var(--gap-list);
+  line-height: var(--leading-body);
+}
+.prose-note code {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
+  background: var(--bg-sunken);
+  border-radius: var(--radius-sm);
+  padding: 0 0.3em;
+}
+.prose-note pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  overflow-x: auto; /* 代码块超宽横向滚动，不换行 */
+  line-height: 1.7;
+}
+.prose-note pre code {
+  background: none;
+  padding: 0;
+}
+.prose-note blockquote {
+  margin: 0 0 var(--gap-para);
+  padding-inline-start: var(--space-4);
+  border-inline-start: 3px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+
+/* Windows 材质（Mica/Acrylic）在降级档下关闭；也用于旧机器掉帧时的兜底 */
+[data-effects="off"] .surface {
+  background: var(--bg-raised) !important;
+  backdrop-filter: none;
+}
+
+.surface {
+  background: color-mix(in oklab, var(--bg-raised) 72%, transparent);
+}
+
+/* 标题栏：自绘（decorations:false），整条可拖 */
+.titlebar {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  user-select: none;
+}
+.titlebar .title {
+  flex: 1;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.win-btn {
+  width: 46px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  transition: background var(--dur-1) var(--ease-out);
+}
+.win-btn:hover {
+  background: var(--bg-hover);
+}
+.win-btn.close:hover {
+  background: var(--danger);
+  color: var(--text-on-accent);
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-sunken),
+    color-mix(in oklab, var(--bg-sunken) 60%, var(--bg-raised)),
+    var(--bg-sunken)
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s var(--ease-out) infinite;
+  border-radius: var(--radius-sm);
+}
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
