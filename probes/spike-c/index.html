@@ -1,0 +1,448 @@
+<!doctype html>
+<!--
+  Spike C 原型：验证"3000 块长文档"在两种渲染策略下的真实成本差。
+  这是一次性验证代码，允许丢弃；不进产品（docs/05 §M0 拆解）。
+
+  A = 全部挂载（ProseMirror 今天的真实行为：3000 个 DOM 块节点全在文档里）
+  B = 分节挂载（可视节 + 相邻节为 contenteditable，其余节静态文本；IntersectionObserver 切换）
+-->
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>Spike C · 长文档分节渲染</title>
+    <style>
+      :root {
+        --bg-base: oklch(98.5% 0.002 260);
+        --text-primary: oklch(24% 0.012 260);
+        --text-secondary: oklch(50% 0.014 260);
+        --space-4: 16px;
+        --measure: 46rem;
+        --text-base: 15.5px;
+      }
+      body {
+        margin: 0;
+        background: var(--bg-base);
+        color: var(--text-primary);
+        font: var(--text-base) / 1.75 system-ui, "Noto Sans SC", sans-serif;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        display: flex;
+        gap: var(--space-4);
+        align-items: center;
+        padding: 12px 24px;
+        background: #ffffffee;
+        border-bottom: 1px solid #0000001a;
+        backdrop-filter: blur(8px);
+      }
+      main {
+        max-inline-size: var(--measure);
+        margin-inline: auto;
+        padding: 24px 16px 40vh;
+      }
+      .blk { min-block-size: 1.2em; }
+      h2 { font-size: 22px; line-height: 1.4; margin: 1.8em 0 0.6em; }
+      p { margin: 0 0 1.15em; }
+      .static { white-space: pre-wrap; color: var(--text-secondary); }
+      .caret { outline: 2px solid #2563eb33; outline-offset: 2px; }
+      pre#out { font-size: 12px; white-space: pre-wrap; }
+      button { padding: 6px 12px; border-radius: 6px; border: 1px solid #0003; background: #fff; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Spike C</strong>
+      <button id="btnA">A · 全部挂载</button>
+      <button id="btnB">B · 分节挂载</button>
+      <button id="btnRun">跑基准（当前模式）</button>
+      <span id="status"></span>
+    </header>
+    <main id="root"></main>
+    <pre id="out"></pre>
+
+    <script type="module">
+      const SECTIONS = 30;
+      const PER_SECTION = 100; // 30 * 100 = 3000 块
+      const root = document.getElementById("root");
+      const out = document.getElementById("out");
+      const status = document.getElementById("status");
+
+      const WORDS = "分节渲染策略需要实测才知道代价在哪：DOM 规模、重排范围、以及每次输入后的样式重算。";
+      function doc() {
+        const d = [];
+        for (let s = 0; s < SECTIONS; s++) {
+          d.push({ t: "h2", text: `第 ${s + 1} 节 触发点清单` });
+          for (let i = 0; i < PER_SECTION - 1; i++) {
+            d.push({ t: "p", text: `${WORDS}（第 ${i + 1} 条）`, sec: s });
+          }
+        }
+        return d;
+      }
+      const BLOCKS = doc();
+
+      // ---------- 两种挂载策略 ----------
+      function mountAll() {
+        root.innerHTML = "";
+        const ed = document.createElement("div");
+        ed.contentEditable = "true";
+        ed.id = "editor";
+        for (const b of BLOCKS) {
+          const n = document.createElement(b.t === "h2" ? "h2" : "p");
+          n.className = "blk";
+          n.textContent = b.text;
+          ed.append(n);
+        }
+        root.append(ed);
+        return { nodes: ed.querySelectorAll("*").length, editors: 1 };
+      }
+
+      let observer = null;
+      const sections = new Map(); // idx -> {el, mounted, blocks}
+
+      function bySection() {
+        const m = new Map();
+        BLOCKS.forEach((b, i) => {
+          const key = b.t === "h2" ? (m.size || 0) : [...m.keys()].pop() ?? 0;
+          if (b.t === "h2") m.set(m.size, []);
+          (m.get([...m.keys()].pop()) ?? []).push(b);
+        });
+        return m;
+      }
+
+      function mountSectioned() {
+        root.innerHTML = "";
+        sections.clear();
+        observer?.disconnect();
+        const groups = bySection();
+        const mount = (idx, on) => {
+          const rec = sections.get(idx);
+          if (!rec || rec.mounted === on) return;
+          if (on) {
+            rec.el.innerHTML = "";
+            rec.el.contentEditable = "true";
+            rec.el.className = "blk";
+            for (const b of rec.blocks) {
+              const n = document.createElement(b.t === "h2" ? "h2" : "p");
+              n.className = "blk";
+              n.textContent = b.text;
+              rec.el.append(n);
+            }
+          } else {
+            rec.el.removeAttribute("contenteditable");
+            rec.el.className = "blk static";
+            rec.el.textContent = rec.blocks.map((b) => b.text).join("\n");
+          }
+          rec.mounted = on;
+        };
+        let i = 0;
+        for (const [_, blocks] of groups) {
+          const el = document.createElement("section");
+          el.dataset.sec = i;
+          root.append(el);
+          sections.set(i, { el, blocks, mounted: false });
+          i++;
+        }
+        observer = new IntersectionObserver(
+          (es) => {
+            const visible = new Set(es.filter((e) => e.isIntersecting).map((e) => +e.target.dataset.sec));
+            const want = new Set(visible);
+            for (const v of visible) {
+              want.add(v - 1);
+              want.add(v + 1);
+            }
+            for (const idx of sections.keys()) mount(idx, want.has(idx));
+          },
+          { rootMargin: "1200px 0px" }
+        );
+        for (const { el } of sections.values()) observer.observe(el);
+        // 初始：先把第一节挂上，保证有可编辑区
+        mount(0, true);
+        for (const idx of [1, 2]) mount(idx, true);
+        return { nodes: root.querySelectorAll("*").length, editors: 3 };
+      }
+
+      let mode = "A";
+      const build = () => {
+        const r = mode === "A" ? mountAll() : mountSectioned();
+        status.textContent = `模式 ${mode} · DOM 节点 ${r.nodes} · 编辑器实例 ${r.editors}`;
+        return r;
+      };
+      btnA.onclick = () => { mode = "A"; build(); };
+      btnB.onclick = () => { mode = "B"; build(); };
+      btnRun.onclick = () => run().then((j) => { out.textContent = JSON.stringify(j, null, 2); });
+
+      // ---------- 度量 ----------
+      const raf2 = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      function pickEditable() {
+        if (mode === "A") return document.getElementById("editor");
+        const mid = [...sections.values()].find((s) => s.mounted);
+        return mid ? mid.el.querySelector("p") : null;
+      }
+
+      async function measureTyping(n = 40) {
+        const target = pickEditable();
+        if (!target) return null;
+        target.focus();
+        const sel = getSelection();
+        sel.removeAllRanges();
+        const r = document.createRange();
+        r.selectNodeContents(target);
+        r.collapse(false);
+        sel.addRange(r);
+        const samples = [];
+        for (let i = 0; i < n; i++) {
+          const t0 = performance.now();
+          document.execCommand("insertText", false, "字");
+          await raf2();
+          samples.push(performance.now() - t0);
+        }
+        // 不做 selectAll/delete 清理：选中 3000 个块本身就是极贵的操作，
+        // 会污染读数。每次测量前都重新 probeMount，内容自然复位。
+        return { ...quantiles(samples), ops: n, domNodes: root.querySelectorAll("*").length };
+      }
+
+      async function measureScroll(steps = 60) {
+        const longBefore = longCount;
+        const samples = [];
+        for (let i = 0; i < steps; i++) {
+          const t0 = performance.now();
+          window.scrollBy(0, 900);
+          await raf2();
+          samples.push(performance.now() - t0);
+        }
+        return { ...quantiles(samples), longtasks: longCount - longBefore };
+      }
+
+      function quantiles(a) {
+        const s = [...a].sort((x, y) => x - y);
+        const q = (p) => +s[Math.min(s.length - 1, Math.floor(s.length * p))].toFixed(2);
+        return { p50: q(0.5), p95: q(0.95), max: +s.at(-1).toFixed(2) };
+      }
+
+      let longCount = 0;
+      new PerformanceObserver((l) => { longCount += l.getEntries().length; }).observe({ entryTypes: ["longtask"] });
+
+      async function run() {
+        const t0 = performance.now();
+        const info = build();
+        await raf2();
+        const mountMs = +(performance.now() - t0).toFixed(1);
+        await new Promise((r) => setTimeout(r, 200));
+        const typing = await measureTyping();
+        const scroll = await measureScroll();
+        const heap = performance.memory ? +(performance.memory.usedJSHeapSize / 1048576).toFixed(1) : null;
+        const res = {
+          mode,
+          blocks: BLOCKS.length,
+          domNodes: info.nodes,
+          mountMs,
+          typingMs: typing,
+          scrollMs: scroll,
+          heapMB: heap,
+        };
+        status.textContent = `模式 ${mode} · ${JSON.stringify(res.typingMs)} 输入 / 滚动长任务 ${scroll.longtasks}`;
+        return res;
+      }
+      window.run = run;
+      window.setMode = (m) => { mode = m; return build(); };
+      // 细粒度入口：浏览器驱动有 15s 上限，必须能一项一项测
+      window.probeMount = (m) => {
+        mode = m;
+        const t0 = performance.now();
+        const info = build();
+        return { ...info, mountMs: +(performance.now() - t0).toFixed(1) };
+      };
+      window.probeTyping = (n) => measureTyping(n ?? 8);
+      window.probeScroll = (n) => measureScroll(n ?? 15);
+      window.probeHeap = () =>
+        performance.memory ? +(performance.memory.usedJSHeapSize / 1048576).toFixed(1) : null;
+
+      // 自跑模式：驱动工具单次调用上限 15s，因此把测量放进页面内异步链，
+      // 立即返回，稍后再读累积结果。
+      window.__log = { typing: [], scroll: [], longtasks: 0, done: false };
+      function focusForTyping(at = "last") {
+        const target = pickEditable();
+        if (!target) return false;
+        // at="first" 时把光标放在文档第一个文本块：在那里打字会让下方全部内容位移，
+        // 是重排最贵的场景；at="last" 是重排最便宜的场景。只测 last 会低估问题。
+        const node =
+          at === "first"
+            ? (mode === "A"
+                ? document.querySelector("#editor h2, #editor p")
+                : [...sections.values()].find((s) => s.mounted)?.el.querySelector("h2,p"))
+            : target;
+        node.scrollIntoView({ block: "center" });
+        node.focus?.();
+        const sel = getSelection();
+        sel.removeAllRanges();
+        const r = document.createRange();
+        r.selectNodeContents(node);
+        r.collapse(false);
+        sel.addRange(r);
+        return true;
+      }
+      window.startRun = ({ ops = 12, scrollSteps = 12 } = {}) => {
+        const log = (window.__log = { typing: [], scroll: [], longtasks: 0, done: false });
+        if (!focusForTyping()) {
+          log.error = "没有可编辑目标";
+          log.done = true;
+          return log;
+        }
+        const t0 = performance.now();
+        let i = 0;
+        const typeNext = () => {
+          if (i++ >= ops) {
+            window.scrollTo(0, 0);
+            let k = 0;
+            const scrollNext = () => {
+              if (k++ >= scrollSteps) {
+                log.done = true;
+                log.totalMs = +(performance.now() - t0).toFixed(1);
+                return;
+              }
+              const s0 = performance.now();
+              window.scrollBy(0, 900);
+              requestAnimationFrame(() =>
+                requestAnimationFrame(() => {
+                  log.scroll.push(+(performance.now() - s0).toFixed(2));
+                  setTimeout(scrollNext, 30);
+                })
+              );
+            };
+            setTimeout(scrollNext, 30);
+            return;
+          }
+          const a = performance.now();
+          document.execCommand("insertText", false, "字");
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              log.typing.push(+(performance.now() - a).toFixed(2));
+              setTimeout(typeNext, 40);
+            })
+          );
+        };
+        setTimeout(typeNext, 60);
+        return { started: true, mode, domNodes: root.querySelectorAll("*").length };
+      };
+      // 测法二：不依赖 rAF（窗口被遮挡时帧会饥饿，前一轮的 43s 异常值就是这么来的）。
+      // 每次输入后强制同步布局，直接量"输入引发的重排成本"，这才是我们关心的机制。
+      window.startRun2 = ({ ops = 20, at = "last" } = {}) => {
+        const log = (window.__log = { typing: [], scroll: [], longtasks: 0, done: false });
+        log.visibility = document.visibilityState;
+        log.at = at;
+        if (!focusForTyping(at)) {
+          log.error = "没有可编辑目标";
+          log.done = true;
+          return log;
+        }
+        let i = 0;
+        const step = () => {
+          if (i++ >= ops) {
+            log.done = true;
+            return;
+          }
+          const a = performance.now();
+          document.execCommand("insertText", false, "字");
+          void document.body.offsetHeight; // 强制同步布局
+          log.typing.push(+(performance.now() - a).toFixed(2));
+          setTimeout(step, 5);
+        };
+        setTimeout(step, 20);
+        return { started: true, mode, visibility: document.visibilityState };
+      };
+
+      // 测法三：窗口 hidden 时 rAF 饥饿、caret-into-view 会等合成帧，前两种测法都拿到了
+      // 秒级假尖峰。这里只量"纯重排成本"：直接改文本节点（不产生选区滚动、不等帧），
+      // 然后强制同步布局。A/B 用完全相同的操作，差值即 DOM 规模带来的差异。
+      function firstTextNode() {
+        const host =
+          mode === "A"
+            ? document.querySelector("#editor p")
+            : [...sections.values()].find((s) => s.mounted)?.el.querySelector("p");
+        if (!host) return null;
+        return host.firstChild && host.firstChild.nodeType === 3 ? host.firstChild : host;
+      }
+      window.startRun3 = ({ ops = 30 } = {}) => {
+        const log = (window.__log = { typing: [], scroll: [], done: false, visibility: document.visibilityState });
+        const t = firstTextNode();
+        if (!t || t.nodeType !== 3) {
+          log.error = "找不到文本节点";
+          log.done = true;
+          return log;
+        }
+        let i = 0;
+        const step = () => {
+          if (i++ >= ops) {
+            // 再量一次"从顶部跳到底部"的滚动定位成本（分节模式在这里要挂/卸节）
+            const jumps = [];
+            for (let k = 0; k < 6; k++) {
+              const a0 = performance.now();
+              window.scrollTo(0, k % 2 ? document.body.scrollHeight : 0);
+              void document.body.offsetHeight;
+              jumps.push(+(performance.now() - a0).toFixed(2));
+              if (observer) {
+                // IntersectionObserver 回调是异步的，同步等待无法触发；
+                // 这里只量同步可见的部分，挂载成本另测
+              }
+            }
+            log.scroll = jumps;
+            log.done = true;
+            return;
+          }
+          const a = performance.now();
+          t.appendData("字");
+          void document.body.offsetHeight;
+          log.typing.push(+(performance.now() - a).toFixed(2));
+          setTimeout(step, 20);
+        };
+        setTimeout(step, 20);
+        return { started: true, mode, visibility: document.visibilityState };
+      };
+      // 单独量分节模式的挂载成本：把一个节从静态文本换成可编辑块
+      window.probeSectionMountCost = (reps = 10) => {
+        const out = [];
+        const groups = [...sections.keys()];
+        for (let i = 0; i < reps; i++) {
+          const idx = groups[(i + 3) % groups.length];
+          const rec = sections.get(idx);
+          if (!rec) break;
+          const a = performance.now();
+          rec.el.removeAttribute("contenteditable");
+          rec.el.className = "blk static";
+          rec.el.textContent = rec.blocks.map((b) => b.text).join("\n");
+          void document.body.offsetHeight;
+          const b0 = performance.now();
+          rec.el.innerHTML = "";
+          rec.el.contentEditable = "true";
+          rec.el.className = "blk";
+          for (const bb of rec.blocks) {
+            const n = document.createElement(bb.t === "h2" ? "h2" : "p");
+            n.className = "blk";
+            n.textContent = bb.text;
+            rec.el.append(n);
+          }
+          void document.body.offsetHeight;
+          out.push([+(b0 - a).toFixed(2), +(performance.now() - b0).toFixed(2)]);
+        }
+        return { unmountMountMs: out, sectionBlocks: 100 };
+      };
+
+      window.readRun = () => {
+        const l = window.__log;
+        return {
+          mode,
+          done: l.done,
+          error: l.error,
+          totalMs: l.totalMs,
+          domNodes: root.querySelectorAll("*").length,
+          editors: root.querySelectorAll('[contenteditable="true"]').length,
+          typing: l.typing.length ? { ...quantiles(l.typing), raw: l.typing } : null,
+          scroll: l.scroll.length ? { ...quantiles(l.scroll), raw: l.scroll } : null,
+          heapMB: window.probeHeap(),
+        };
+      };
+      build();
+    </script>
+  </body>
+</html>
