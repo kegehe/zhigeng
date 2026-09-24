@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppInfo, CapturedOut, ListNotes, NoteDetail, NoteSource, TrashRow } from "./types";
+import type {
+  AppInfo,
+  CapturedOut,
+  EditDoc,
+  ListNotes,
+  NoteDetail,
+  NoteSource,
+  TrashRow,
+} from "./types";
 
 /**
  * 写命令失败时给的是结构化负载 `{kind, message}`（冲突要能分支出来），
@@ -34,6 +42,8 @@ export const api = {
       "search_keyword",
       { query, limit }
     ),
+  /** 行内编辑器要的块结构：每块带精确源切片，未改动的块由前端原样回写 */
+  noteEditDoc: (rel: string) => invoke<EditDoc>("note_edit_doc", { rel }),
   /** 原文 + hash。hash 要原样带回 saveNote，服务端才判得出"磁盘这份还是不是你看到的那份" */
   readRaw: (rel: string) => invoke<NoteSource>("read_raw", { rel }),
   saveNote: (rel: string, content: string, expectHash?: string) =>

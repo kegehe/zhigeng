@@ -7,7 +7,7 @@ import type { AppInfo, ListNotes, NoteDetail, TrashRow } from "./ipc/types";
 
 type Theme = "system" | "light" | "dark";
 /** 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。 */
-type Mode = "view" | "edit" | "rename" | "trash";
+type Mode = "view" | "source" | "rename" | "trash";
 
 function useTheme() {
   const [theme, setTheme] = useState<Theme>("system");
@@ -64,7 +64,8 @@ export function App() {
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
-  const unsaved = mode === "edit" && draft !== savedDraft;
+  const editing = mode === "source";
+  const unsaved = editing && draft !== savedDraft;
 
   const apply = useCallback(async (app: AppInfo) => {
     setInfo(app);
@@ -179,16 +180,16 @@ export function App() {
 
   // 停手 800ms 就存。手动 Ctrl+S 仍然留着——有人不信自动保存
   useEffect(() => {
-    if (mode !== "edit" || draft === savedDraft) return;
+    if (!editing || draft === savedDraft) return;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => void persist(), 800);
     return () => {
       if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     };
-  }, [draft, savedDraft, mode, persist]);
+  }, [draft, savedDraft, editing, persist]);
 
   const openNote = async (rel: string) => {
-    if (mode === "edit" && !(await persist())) {
+    if (editing && !(await persist())) {
       setFlash("这篇还没存下来——先处理冲突提示");
       return;
     }
@@ -222,7 +223,7 @@ export function App() {
       setSavedDraft(src.content);
       setBaseHash(src.hash);
       setSaveState("clean");
-      setMode("edit");
+      setMode("source");
     } catch (e) {
       setError(describeError(e).message);
     }
@@ -298,7 +299,7 @@ export function App() {
   const createNote = async () => {
     const title = newTitle.trim();
     if (!title) return;
-    if (mode === "edit" && !(await persist())) return;
+    if (editing && !(await persist())) return;
     try {
       const rel = await api.noteCreate(title);
       setNewTitle("");
@@ -313,7 +314,7 @@ export function App() {
   };
 
   const openTrash = async () => {
-    if (mode === "edit" && !(await persist())) return;
+    if (editing && !(await persist())) return;
     try {
       setTrash(await api.listTrash());
       setMode("trash");
@@ -487,7 +488,7 @@ export function App() {
                 {selected ? (
                   <>
                     <div className="mb-4 flex items-center gap-2 text-xs">
-                      {mode === "edit" ? (
+                      {editing ? (
                         <>
                           <button className={btnPrimary} onClick={() => void leaveEdit()}>
                             完成 (Esc)
@@ -567,7 +568,7 @@ export function App() {
                     ) : null}
                     {flash ? <p className="mb-4 text-xs text-fg-2">{flash}</p> : null}
 
-                    {mode === "edit" ? (
+                    {mode === "source" ? (
                       <textarea
                         autoFocus
                         spellCheck={false}

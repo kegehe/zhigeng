@@ -44,6 +44,24 @@ export type NoteSource = {
   hash: string;
 };
 
+/** 与 `note_core::service::EditBlock` 对应。raw 是精确源切片，未改动的块靠它字节级回写 */
+export type EditBlock = {
+  kind: string;
+  id: string | null;
+  raw: string;
+  gapBefore: string;
+  content: string;
+  level: number | null;
+  checked: boolean | null;
+  children: EditBlock[];
+};
+
+export type EditDoc = {
+  frontMatter: string;
+  trailingGap: string;
+  blocks: EditBlock[];
+};
+
 export type TrashRow = {
   batch: string;
   rel: string;
@@ -58,6 +76,7 @@ export type CommandName =
   | "list_notes"
   | "list_trash"
   | "note_create"
+  | "note_edit_doc"
   | "note_move"
   | "note_rename"
   | "note_restore"

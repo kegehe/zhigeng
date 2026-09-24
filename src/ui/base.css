@@ -201,4 +201,29 @@
   to {
     background-position: -200% 0;
   }
+  /* 行内块编辑器：列表符号与待办框由 data-marker 带出来，
+     这样"看到的前缀"与"写回文件的前缀"是同一份判定，不会显示一套写另一套 */
+  .block-editor .ProseMirror {
+    min-height: 60vh;
+    cursor: text;
+  }
+  .block-editor [data-md-item] {
+    position: relative;
+  }
+  .block-editor [data-md-item]::before {
+    content: attr(data-marker);
+    position: absolute;
+    inset-inline-start: 0;
+    color: var(--text-secondary);
+  }
+  .block-editor [data-md-raw] {
+    font-family: var(--font-mono);
+    font-size: var(--text-mono);
+    white-space: pre-wrap;
+    background: var(--bg-sunken);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: var(--space-4);
+    color: var(--text-secondary);
+  }
 }
