@@ -151,11 +151,15 @@ export function App() {
     return list.map((n) => ({ rel: n.rel, title: n.title, sub: n.rel, ms: n.updatedMs }));
   }, [searching, hits, list]);
 
+  /** 编辑态下任何"会换掉当前内容"的动作都先挡下——静默丢草稿是最恶劣的失败方式 */
+  const blockedByDraft = () => {
+    if (!dirty) return false;
+    setFlash("先保存或取消当前修改（Ctrl+S / Esc）");
+    return true;
+  };
+
   const openNote = async (rel: string) => {
-    if (dirty) {
-      setFlash("先保存或取消当前修改（Ctrl+S / Esc）");
-      return;
-    }
+    if (blockedByDraft()) return;
     setMode("view");
     setFlash(null);
     try {
@@ -243,7 +247,7 @@ export function App() {
 
   const createNote = async () => {
     const title = newTitle.trim();
-    if (!title) return;
+    if (!title || blockedByDraft()) return;
     try {
       const rel = await api.noteCreate(title);
       setNewTitle("");
@@ -259,6 +263,7 @@ export function App() {
   };
 
   const openTrash = async () => {
+    if (blockedByDraft()) return;
     try {
       setTrash(await api.listTrash());
       setMode("trash");

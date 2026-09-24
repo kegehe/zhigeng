@@ -25,6 +25,8 @@ export function Capture() {
   }, []);
 
   const submit = useCallback(async () => {
+    // Enter 没有守卫的话，手快连按两下就会落两篇——按钮是禁用了，键盘路径也得禁
+    if (phase === "saving" || phase === "saved") return;
     const body = text.trim();
     if (!body) {
       // 空内容不落盘，也不关窗——用户按回车多半是手滑

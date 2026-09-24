@@ -199,3 +199,64 @@ fn 回收站的恢复参数不能越出Vault() {
     assert!(hub.note_restore("..", "../outside.md").is_err());
     assert!(hub.note_restore("a/../../b", "notes/甲.md").is_err());
 }
+
+#[test]
+fn 没有_id_的笔记改名后不留孤儿行() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    // 手写或从 Obsidian 导入的笔记没有 front-matter id，这类才是大多数
+    hub.save_note("notes/无id.md", "# 无 id\n\n正文甲\n").unwrap();
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
+
+    hub.note_rename("notes/无id.md", "换了名字").unwrap();
+    let list = hub.list_notes(10).unwrap().notes;
+    assert_eq!(list.len(), 1, "改名后残留旧行: {list:?}");
+    assert_eq!(hub.drift().unwrap(), 0, "md 与 db 已漂移");
+}
+
+#[test]
+fn 写路径拒绝落在应用私有目录与非_md_目标() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.save_note("notes/甲.md", "正文
+").unwrap();
+    // 少了这道闸，save_note(".note/index.db") 能把整个索引覆盖掉
+    assert!(matches!(
+        hub.save_note(".note/index.db", "x"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(
+        hub.note_move("notes/甲.md", ".note/甲.md"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(
+        hub.note_move("notes/甲.md", "notes/甲.txt"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(hub.note_create("   "), Err(note_core::Error::Invalid(_))));
+    // 被拒的操作不能留下任何痕迹
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
+    assert_eq!(hub.drift().unwrap(), 0);
+}
+
+#[test]
+fn 保存被引用的笔记不能弄丢别人的入链() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let target = hub.note_create("被引用者").unwrap();
+    hub.save_note("notes/引用方.md", "看 [[被引用者]]。
+").unwrap();
+    let conn = open_index(&hub);
+    assert_eq!(link_stats(&conn), (1, 0), "前置条件：链接已解析");
+
+    // index_file 会先删 notes 行再插回来，而 links.to_note 是 ON DELETE CASCADE
+    hub.save_note(&target, "---
+id: n-being001
+title: \"被引用者\"
+---
+
+改了一版正文
+")
+        .unwrap();
+    assert_eq!(link_stats(&conn), (1, 0), "保存目标笔记之后，引用方的入链不该消失");
+}

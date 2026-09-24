@@ -63,6 +63,18 @@ enum Cmd {
         #[arg(long, default_value_t = 200)]
         iters: usize,
     },
+    /// 量写路径耗时：保存 / 移动 / 删除 / 恢复（G6 的 8ms 红线同样管这些）
+    WriteBench {
+        #[arg(long, default_value_t = 2000)]
+        notes: usize,
+        #[arg(long, default_value_t = 40)]
+        iters: usize,
+    },
+    /// 把写路径拆成四段分别计时，用来定位超线出在哪一步
+    WriteProfile {
+        #[arg(long, default_value_t = 2000)]
+        notes: usize,
+    },
     /// 解析一篇笔记，校验字节级无损往返并输出块树
     Parse {
         file: PathBuf,
@@ -85,6 +97,8 @@ fn main() -> Result<()> {
         Cmd::Bench { notes, out } => cmd_bench(notes, out),
         Cmd::IpcBench { notes, iters } => cmd_ipc_bench(notes, iters),
         Cmd::Capture { path, text, bench } => cmd_capture(&path, text.as_deref(), bench),
+        Cmd::WriteBench { notes, iters } => cmd_write_bench(notes, iters),
+        Cmd::WriteProfile { notes } => cmd_write_profile(notes),
     }
 }
 
@@ -379,6 +393,142 @@ fn cmd_ipc_bench(notes: usize, iters: usize) -> Result<()> {
     if failed {
         anyhow::bail!("有同步命令超过 8ms 预算：该改异步 + 事件流，而不是给 UI 加 loading");
     }
+    Ok(())
+}
+
+/// 写路径基准。每条操作名义上只碰一篇笔记，但索引里有按**笔记总数**放大的步骤
+/// （链接查找表要扫 notes 全表，删除/移动还要全量重解析链接图）。
+/// 这条命令就是用来在规模下把它们抓出来的——别等用户改个名卡住才发现。
+fn cmd_write_bench(notes: usize, iters: usize) -> Result<()> {
+    use std::time::Instant;
+
+    let dir = std::env::temp_dir().join(format!("note-writebench-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    {
+        let v = Vault::open(&dir)?;
+        for i in 0..notes {
+            let body = format!(
+                "---\nid: n-wb{i:05}\ntitle: 写基准 {i}\n---\n\n第 {i} 篇正文，讲分节渲染。见 [[写基准 {}]]。 ^b-wb{i:05}a\n",
+                (i + 1) % notes
+            );
+            v.write_atomic(&format!("notes/{i:05}.md"), body.as_bytes())?;
+        }
+    }
+    let mut hub = note_core::service::Hub::open(&dir)?;
+    let rel = "notes/00000.md";
+    let alt = "notes/00000-移开.md";
+    let content = String::from_utf8_lossy(&hub.vault().read(rel)?).to_string();
+    let budget = read_ipc_budget_ms()?;
+
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let mut save = Vec::new();
+    let mut moved = Vec::new();
+    let mut deleted = Vec::new();
+    let mut restored = Vec::new();
+    for _ in 0..iters {
+        let t = Instant::now();
+        hub.save_note(rel, &content)?;
+        save.push(ms(t));
+
+        // 一次来回，报单次移动的成本
+        let t = Instant::now();
+        hub.note_move(rel, alt)?;
+        hub.note_move(alt, rel)?;
+        moved.push(ms(t) / 2.0);
+
+        let t = Instant::now();
+        hub.note_trash(rel)?;
+        deleted.push(ms(t));
+
+        // 恢复在 UI 里必然带着列回收站，一起量
+        let t = Instant::now();
+        let batch = hub.list_trash()?[0].batch.clone();
+        hub.note_restore(&batch, rel)?;
+        restored.push(ms(t));
+    }
+
+    println!("写路径基准：{notes} 篇 / 每项 {iters} 次，红线 p95 < {budget:.1}ms");
+    let mut failed = false;
+    for (name, mut s) in [
+        ("save_note", save),
+        ("note_move", moved),
+        ("note_trash", deleted),
+        ("list_trash+restore", restored),
+    ] {
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f64| s[((s.len() as f64 * p) as usize).min(s.len() - 1)];
+        let over = q(0.95) > budget;
+        failed |= over;
+        println!(
+            "  {:<20} p50 {:>7.2}ms  p95 {:>7.2}ms  max {:>7.2}ms  {}",
+            name,
+            q(0.5),
+            q(0.95),
+            s[s.len() - 1],
+            if over { "超线" } else { "ok" }
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    if failed {
+        anyhow::bail!("写路径超过 8ms 预算：要么挪到异步，要么把全表步骤改成按篇");
+    }
+    Ok(())
+}
+
+/// 把一次保存拆开量，定位超线到底出在哪一步。上面那条只给总数，改之前得先知道改谁。
+fn cmd_write_profile(notes: usize) -> Result<()> {
+    use note_core::index::Index;
+    use std::time::Instant;
+
+    let dir = std::env::temp_dir().join(format!("note-writeprof-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let mut v = Vault::open(&dir)?;
+    for i in 0..notes {
+        let body = format!(
+            "---\nid: n-wp{i:05}\ntitle: 分段基准 {i}\n---\n\n第 {i} 篇正文。见 [[分段基准 {}]]。 ^b-wp{i:05}a\n",
+            (i + 1) % notes
+        );
+        v = {
+            v.write_atomic(&format!("notes/{i:05}.md"), body.as_bytes())?;
+            v
+        };
+    }
+    let mut idx = Index::open(&v)?;
+    idx.rebuild_all(&v)?;
+    let rel = "notes/00000.md";
+    let file = v.note_file(rel)?;
+    let content = String::from_utf8_lossy(&v.read(rel)?).to_string();
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+
+    // 每步跑 20 次取中位数，避免把冷缓存当成本
+    let mut acc = vec![0f64; 4];
+    for _ in 0..20 {
+        let t = Instant::now();
+        v.write_atomic(rel, content.as_bytes())?;
+        acc[0] += ms(t);
+        let t = Instant::now();
+        idx.index_file(&file, &content)?;
+        acc[1] += ms(t);
+        let t = Instant::now();
+        idx.rebuild_links_of_note(rel)?;
+        acc[2] += ms(t);
+        let t = Instant::now();
+        idx.rebuild_links()?;
+        acc[3] += ms(t);
+    }
+    let names = [
+        "write_atomic（含 fsync）",
+        "index_file（单篇重建）",
+        "rebuild_links_of_note",
+        "rebuild_links（全量）",
+    ];
+    println!("写路径分段：{notes} 篇，20 次合计");
+    for (n, a) in names.iter().zip(&acc) {
+        println!("  {n:<26} {:>8.1}ms  单次 {:>7.2}ms", a, a / 20.0);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 

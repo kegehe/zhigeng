@@ -127,12 +127,58 @@ impl Index {
     }
 
     /// 单篇重建（增量）。**顺序严格遵循 docs/02 §派生表的手工清理**。
+    ///
+    /// 关键约束：**不许顺手删掉 `notes` 行**。`links.to_note` 是 `ON DELETE CASCADE`，
+    /// 删一次就把所有指向这篇笔记的反链带走了，而引用方一个字都没改。所以：
+    /// 认得出同一篇（id 相同）就原地更新；认不出但路径上压着一行旧 id（用户改了
+    /// front-matter 的 id）就把入链迁移到新行，再清旧行。
     pub fn index_file(&mut self, f: &NoteFile, src: &str) -> Result<RebuildStats> {
         let doc = md_kernel::parse(src);
         let note_id = note_id_of(&doc, &f.rel);
         let mut stats = RebuildStats::default();
-        purge_by_key(&self.conn, &f.rel, &note_id)?;
+
+        let stale: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM notes WHERE path=?1 AND id<>?2",
+                params![f.rel, note_id],
+                |r| r.get(0),
+            )
+            .ok();
+        // `notes.path` 是 UNIQUE，所以占位的那行必须先让路；又不能让它的入链跟着
+        // 级联消失，于是先记下这些 links 行、置空、插完新行再指回来。
+        let stale_links: Vec<i64> = match &stale {
+            Some(old) => {
+                let mut s = self
+                    .conn
+                    .prepare("SELECT id FROM links WHERE to_note=?1")?;
+                let r = s.query_map([old], |x: &Row| x.get::<_, i64>(0))?;
+                r.filter_map(|x| x.ok()).collect()
+            }
+            None => Vec::new(),
+        };
+        if let Some(old) = &stale {
+            self.conn.execute(
+                "UPDATE links SET to_note=NULL, broken=1 WHERE to_note=?1",
+                [old],
+            )?;
+            purge_children(&self.conn, old)?;
+            self.conn.execute("DELETE FROM notes WHERE id=?1", [old])?;
+        }
+        let mine: bool = self
+            .conn
+            .query_row("SELECT 1 FROM notes WHERE id=?1", [&note_id], |_| Ok(true))
+            .unwrap_or(false);
+        if mine {
+            purge_children(&self.conn, &note_id)?;
+        }
         insert_note(&self.conn, f, src, &doc, &note_id, &mut stats)?;
+        for lid in stale_links {
+            self.conn.execute(
+                "UPDATE links SET to_note=?1, broken=0 WHERE id=?2",
+                params![note_id, lid],
+            )?;
+        }
         stats.notes = 1;
         Ok(stats)
     }
@@ -146,6 +192,69 @@ impl Index {
     /// 全量重解析链接图。删除/恢复会让别人的入链悬空，只有全量能把它退回 `broken=1`。
     pub fn rebuild_links(&mut self) -> Result<usize> {
         rebuild_links(&self.conn)
+    }
+
+    /// 把指向某篇笔记的入链标成悬空（而不是随 `notes` 行级联消失）。
+    /// 删除与移动的前半段用它的旧身份，恢复/移动的后半段用 `resolve_broken_to` 接回来。
+    pub fn break_incoming_links(&mut self, rel: &str) -> Result<usize> {
+        let Ok(id) = self
+            .conn
+            .query_row("SELECT id FROM notes WHERE path=?1", [rel], |r| {
+                r.get::<_, String>(0)
+            })
+        else {
+            return Ok(0);
+        };
+        let n = self.conn.execute(
+            "UPDATE links SET to_note=NULL, broken=1 WHERE to_note=?1",
+            [&id],
+        )?;
+        Ok(n)
+    }
+
+    /// 重新解析"当前悬空、且写法正好指向这篇笔记"的链接。
+    /// 只扫 `link_targets.target` 的那几个等值/前缀形式，代价与全库笔记数无关。
+    pub fn resolve_broken_to(&mut self, rel: &str) -> Result<usize> {
+        let Some(id) = self
+            .conn
+            .query_row("SELECT id FROM notes WHERE path=?1", [rel], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+        else {
+            return Ok(0);
+        };
+        let stem = rel.trim_end_matches(".md").trim_end_matches(".markdown");
+        let file = stem.rsplit('/').next().unwrap_or(stem);
+        let mut n = 0usize;
+        for key in [id.as_str(), rel, stem, file] {
+            n += self.conn.execute(
+                "UPDATE links SET to_note=?3, broken=0
+                 WHERE broken=1 AND to_note IS NULL
+                   AND from_block IN (
+                     SELECT from_block FROM link_targets
+                     WHERE target=?1 OR target LIKE ?1 || '#%')",
+                params![key, key, id],
+            )?;
+        }
+        // 按标题写的链接
+        let title: Option<String> = self
+            .conn
+            .query_row("SELECT title FROM notes WHERE id=?1", [&id], |r| {
+                r.get(0)
+            })
+            .ok();
+        if let Some(t) = title.filter(|t| !t.is_empty()) {
+            n += self.conn.execute(
+                "UPDATE links SET to_note=?2, broken=0
+                 WHERE broken=1 AND to_note IS NULL
+                   AND from_block IN (
+                     SELECT from_block FROM link_targets
+                     WHERE target=?1 OR target LIKE ?1 || '#%')",
+                params![t, id],
+            )?;
+        }
+        Ok(n)
     }
 
     /// 只重算一篇笔记**发出**的链接。`links.to_note` 存的是 id，所以改名/移动不会
@@ -163,7 +272,6 @@ impl Index {
             "DELETE FROM links WHERE from_block IN (SELECT id FROM blocks WHERE note_id=?1)",
             [&note_id],
         )?;
-        let lookup = link_lookup(&self.conn)?;
         let rows: Vec<(String, String, Option<String>, String)> = {
             let mut s = self.conn.prepare(
                 "SELECT lt.from_block, lt.target, lt.to_block, lt.kind
@@ -175,9 +283,21 @@ impl Index {
             })?;
             r.filter_map(|x| x.ok()).collect()
         };
+        if rows.is_empty() {
+            // 绝大多数保存不写链接。这里提前退出，省掉下面的目标解析
+            return Ok(0);
+        }
         let mut n = 0usize;
         for (from, target, anchor, kind) in &rows {
-            insert_resolved(&self.conn, &lookup, from, target, anchor.as_ref(), kind)?;
+            let base = target.split('#').next().unwrap_or(target).trim().to_string();
+            let to = find_target(&self.conn, &base)?;
+            put_link(
+                &self.conn,
+                from,
+                to.as_deref(),
+                anchor.as_ref().filter(|a| a.starts_with("b-")).cloned(),
+                kind,
+            )?;
             n += 1;
         }
         Ok(n)
@@ -346,29 +466,42 @@ fn purge_by_key(conn: &Connection, rel: &str, note_id: &str) -> Result<()> {
         rows.filter_map(|x| x.ok()).collect()
     };
     for id in ids {
-        let block_rowids: Vec<i64> = {
-            let mut s = conn.prepare("SELECT rowid FROM blocks WHERE note_id=?1")?;
-            let r = s.query_map([&id], |x: &Row| x.get(0))?;
-            r.filter_map(|x| x.ok()).collect()
-        };
-        let chunk_ids: Vec<i64> = {
-            let mut s = conn.prepare("SELECT id FROM chunks WHERE note_id=?1")?;
-            let r = s.query_map([&id], |x: &Row| x.get(0))?;
-            r.filter_map(|x| x.ok()).collect()
-        };
-        for t in vec_tables_of(conn) {
-            for cid in &chunk_ids {
-                conn.execute(&format!("DELETE FROM {t} WHERE rowid=?1"), [*cid])?;
-            }
-        }
-        for cid in &chunk_ids {
-            conn.execute("DELETE FROM chunks_fts WHERE rowid=?1", [*cid])?;
-        }
-        for bid in &block_rowids {
-            conn.execute("DELETE FROM blocks_fts WHERE rowid=?1", [*bid])?;
-        }
+        purge_children(conn, &id)?;
         conn.execute("DELETE FROM notes WHERE id=?1", [&id])?;
     }
+    Ok(())
+}
+
+/// 清掉一篇笔记的块、切片与它们的派生表行，**但保留 `notes` 行本身**。
+///
+/// 重新索引同一篇笔记时必须走这里：`links.to_note` 是 `ON DELETE CASCADE`，
+/// 删一次 `notes` 行就把所有指向它的反链一起带走了，而引用方的文本一个字都没变。
+fn purge_children(conn: &Connection, note_id: &str) -> Result<()> {
+    let block_rowids: Vec<i64> = {
+        let mut s = conn.prepare("SELECT rowid FROM blocks WHERE note_id=?1")?;
+        let r = s.query_map([note_id], |x: &Row| x.get(0))?;
+        r.filter_map(|x| x.ok()).collect()
+    };
+    let chunk_ids: Vec<i64> = {
+        let mut s = conn.prepare("SELECT id FROM chunks WHERE note_id=?1")?;
+        let r = s.query_map([note_id], |x: &Row| x.get(0))?;
+        r.filter_map(|x| x.ok()).collect()
+    };
+    for t in vec_tables_of(conn) {
+        for cid in &chunk_ids {
+            conn.execute(&format!("DELETE FROM {t} WHERE rowid=?1"), [*cid])?;
+        }
+    }
+    for cid in &chunk_ids {
+        conn.execute("DELETE FROM chunks_fts WHERE rowid=?1", [*cid])?;
+    }
+    for bid in &block_rowids {
+        conn.execute("DELETE FROM blocks_fts WHERE rowid=?1", [*bid])?;
+    }
+    // blocks / chunks 自己有 ON DELETE CASCADE，但只在上层删 notes 时才会触发；
+    // 这里要原地留着 notes 行，所以得自己删。
+    conn.execute("DELETE FROM chunks WHERE note_id=?1", [note_id])?;
+    conn.execute("DELETE FROM blocks WHERE note_id=?1", [note_id])?;
     Ok(())
 }
 
@@ -394,9 +527,16 @@ fn insert_note(
     note_id: &str,
     stats: &mut RebuildStats,
 ) -> Result<()> {
+    // 必须是 DO UPDATE 而不是 INSERT OR REPLACE：REPLACE 的语义是"先删后插"，
+    // 删那一下会顺着 links.to_note 的 CASCADE 把别人的反链带走。
     conn.execute(
-        "INSERT OR REPLACE INTO notes(id,path,title,status,created_at,updated_at,content_hash,ai_private,no_ai,origin,note_kind)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        "INSERT INTO notes(id,path,title,status,created_at,updated_at,content_hash,ai_private,no_ai,origin,note_kind)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         ON CONFLICT(id) DO UPDATE SET
+           path=excluded.path, title=excluded.title, status=excluded.status,
+           created_at=excluded.created_at, updated_at=excluded.updated_at,
+           content_hash=excluded.content_hash, ai_private=excluded.ai_private,
+           no_ai=excluded.no_ai, origin=excluded.origin, note_kind=excluded.note_kind",
         params![
             note_id,
             f.rel,
@@ -575,12 +715,22 @@ fn insert_resolved(
     kind: &str,
 ) -> Result<()> {
     let base = target.split('#').next().unwrap_or(target).trim();
-    let to_block = anchor.filter(|a| a.starts_with("b-")).cloned();
-    match lookup.get(base) {
-        Some(to_note) => conn.execute(
+    put_link(conn, from_block, lookup.get(base).map(String::as_str), anchor.filter(|a| a.starts_with("b-")).cloned(), kind)
+}
+
+/// 写一行解析结果。`to_note=None` 即悬空。
+fn put_link(
+    conn: &Connection,
+    from_block: &str,
+    to_note: Option<&str>,
+    to_block: Option<String>,
+    kind: &str,
+) -> Result<()> {
+    match to_note {
+        Some(to) => conn.execute(
             "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
              VALUES(?1,?2,?3,?4,'human',0)",
-            params![from_block, to_note, to_block, kind],
+            params![from_block, to, to_block, kind],
         )?,
         None => conn.execute(
             "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
@@ -589,6 +739,41 @@ fn insert_resolved(
         )?,
     };
     Ok(())
+}
+
+/// 把一条 `[[写法]]` 解析到具体笔记。键的优先级与 `link_lookup` 一致：
+/// front-matter id → 完整路径 → 去扩展名路径 → 文件名 → 标题。
+///
+/// 刻意不建全库查找表：那玩意每保存一次就要扫全库并插两万遍 BTreeMap
+/// （实测 2000 篇时 11.6ms，单这一步就吃掉 8ms 预算的一大半）。
+/// 这里改成按目标做索引查询，代价与库的规模无关。
+fn find_target(conn: &Connection, base: &str) -> Result<Option<String>> {
+    let exact: Option<String> = conn
+        .query_row(
+            "SELECT id FROM notes
+             WHERE id=?1 OR path=?1 OR title=?1 OR path=?1||'.md' OR path=?1||'.markdown'
+             LIMIT 1",
+            [base],
+            |r| r.get(0),
+        )
+        .ok();
+    if exact.is_some() {
+        return Ok(exact);
+    }
+    // 只写文件名的 wikilink（`[[甲]]` 指向 `notes/甲.md`）。LIKE 用不上索引，
+    // 所以只取候选再在 Rust 里判等——`_` 在 LIKE 里是通配符，直接采信会误配。
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM notes
+         WHERE path LIKE '%/'||?1||'.md' OR path LIKE '%/'||?1||'.markdown'",
+    )?;
+    let rows = stmt.query_map([base], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows.flatten() {
+        let tail = row.1.rsplit('/').next().unwrap_or(&row.1);
+        if tail == format!("{base}.md") || tail == format!("{base}.markdown") {
+            return Ok(Some(row.0));
+        }
+    }
+    Ok(None)
 }
 
 /// 全量解析链接图：把 `link_targets` 的原始写法映射到具体笔记。

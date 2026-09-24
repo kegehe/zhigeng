@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS notes (
   rev          INTEGER NOT NULL DEFAULT 0,
   device_id    TEXT
 );
+-- title 没有索引，而链接可以只按标题写（[[某笔记的标题]]）。
+-- path 已由 UNIQUE 建了隐式索引，再建一个是白付写放大。
+CREATE INDEX IF NOT EXISTS notes_title_idx ON notes(title);
 
 CREATE TABLE IF NOT EXISTS blocks (
   id            TEXT PRIMARY KEY,
@@ -37,7 +40,6 @@ CREATE TABLE IF NOT EXISTS blocks (
   props_json    TEXT
 );
 CREATE INDEX IF NOT EXISTS blocks_note_idx ON blocks(note_id, ordinal);
-
 CREATE TABLE IF NOT EXISTS chunks (
   id          INTEGER PRIMARY KEY,
   note_id     TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -101,6 +103,8 @@ CREATE TABLE IF NOT EXISTS link_targets (
   kind       TEXT NOT NULL,
   PRIMARY KEY (from_block, target, kind)
 );
+-- 恢复/新建一篇笔记时，要找出"之前指向它而当时解析失败"的链接。没有这个索引就是全表扫。
+CREATE INDEX IF NOT EXISTS link_targets_target_idx ON link_targets(target);
 
 CREATE TABLE IF NOT EXISTS suggestions (
   id           TEXT PRIMARY KEY,

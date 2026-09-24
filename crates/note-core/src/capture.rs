@@ -121,29 +121,47 @@ pub fn new_note_rel(vault: &Vault, title: &str) -> String {
 }
 
 /// 只改 front-matter 里的 `title:`，其余字节原样不动。
-/// 没有 front-matter 或没有 title 行时返回原文——改名不该给用户凭空造一段 YAML。
+///
+/// 刻意走 `md_kernel::parse` 而不是自己找 `---`：手写实现会把"CRLF 文件"整批漏掉
+/// （改名后文件名变了、标题没变，正是 D15 要避免的"看着没生效"），也会把正文里
+/// 的一条 `---` 分隔线误当 front-matter 结尾而改写到正文中去。解析器已经知道
+/// front-matter 的精确切片，复用它即可，别再留第二份判定规则。
 pub fn set_front_title(content: &str, title: &str) -> String {
-    let Some(rest) = content.strip_prefix("---\n") else {
+    let doc = md_kernel::parse(content);
+    let Some(fm) = doc.front_matter else {
         return content.to_string();
     };
-    let Some(end) = rest.find("\n---\n") else {
+    let Some(pos) = fm.raw.find(&fm.yaml) else {
         return content.to_string();
     };
-    let fm = &rest[..end];
-    if !fm.lines().any(|l| l.starts_with("title:")) {
+    let yaml = &fm.raw[pos..pos + fm.yaml.len()];
+    // 逐行原位替换：只重写 title 那一行的正文部分，行尾（含 CR）与其余字节一律照抄，
+    // 这样闭合 `---` 前的那个换行不会被"重拼整段"拼丢。
+    let mut rebuilt = String::new();
+    let mut hit = false;
+    for line in yaml.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let cr = body.ends_with('\r');
+        let core = if cr { &body[..body.len() - 1] } else { body };
+        if !hit && core.trim_start().starts_with("title:") {
+            let indent = &core[..core.len() - core.trim_start().len()];
+            rebuilt.push_str(&format!("{indent}title: {}", yaml_quote(title)));
+            if cr {
+                rebuilt.push('\r');
+            }
+            if line.ends_with('\n') {
+                rebuilt.push('\n');
+            }
+            hit = true;
+        } else {
+            rebuilt.push_str(line);
+        }
+    }
+    if !hit {
         return content.to_string();
     }
-    let new_fm: Vec<String> = fm
-        .lines()
-        .map(|l| {
-            if l.starts_with("title:") {
-                format!("title: {}", yaml_quote(title))
-            } else {
-                l.to_string()
-            }
-        })
-        .collect();
-    format!("---\n{}\n{}", new_fm.join("\n"), &rest[end + 1..])
+    let new_raw = format!("{}{}{}", &fm.raw[..pos], rebuilt, &fm.raw[pos + fm.yaml.len()..]);
+    format!("{new_raw}{}", &content[fm.raw.len()..])
 }
 
 /// 目标路径：`inbox/YYYY-MM-DD-<slug>.md`，重名自动加序号，绝不覆盖已有笔记。
@@ -342,5 +360,32 @@ mod tests {
         let body = String::from_utf8(v.read(&c.rel).unwrap()).unwrap();
         assert!(!body.contains('\r'), "残留 CR: {body:?}");
         assert!(!body.contains('\u{feff}'));
+    }
+    #[test]
+    fn 改标题只动_frontmatter_且各种写法都不误伤() {
+        let lf = "---\nid: n-a1\ntitle: \"旧\"\ncreated: 2026-09-24\n---\n\n正文\n";
+        let got = set_front_title(lf, "新名字");
+        assert_eq!(
+            got,
+            "---\nid: n-a1\ntitle: \"新名字\"\ncreated: 2026-09-24\n---\n\n正文\n",
+            "{got:?}"
+        );
+
+        // CRLF：以前这里整批漏掉——文件名改了、标题没改，正是 D15 要避免的"看着没生效"
+        let crlf = lf.replace('\n', "\r\n");
+        let got = set_front_title(&crlf, "新名字");
+        assert!(got.contains("title: \"新名字\"\r\n"), "{got:?}");
+        assert_eq!(
+            got.matches('\r').count(),
+            crlf.matches('\r').count(),
+            "CR 数量变了：{got:?}"
+        );
+
+        // 没有 front-matter：原样返回，不给用户凭空造一段 YAML
+        assert_eq!(set_front_title("只有一段正文\n", "新名字"), "只有一段正文\n");
+
+        // 没有闭合分隔线就不是 front-matter（`---` 只是正文里的一条线），原样返回
+        let unclosed = "---\n这是一条分隔线\n\ntitle: 这是正文里的冒号\n";
+        assert_eq!(set_front_title(unclosed, "新名字"), unclosed);
     }
 }

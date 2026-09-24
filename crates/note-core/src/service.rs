@@ -105,6 +105,28 @@ pub struct TrashRow {
     pub updated_ms: i64,
 }
 
+/// 写路径只准落在"会被扫描器当成笔记"的位置。
+///
+/// 少了这道闸，`save_note(".note/index.db")` 能把整个索引覆盖掉，而写到没有扩展名
+/// 的路径则会在库里留下一条 md 侧永远复现不了的行——两者都直接违反 G1。
+fn check_note_rel(rel: &str) -> Result<()> {
+    let first = rel
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if first.is_empty() || first.starts_with('.') {
+        return Err(Error::Invalid(format!("笔记不能落在应用私有目录: {rel}")));
+    }
+    let low = rel.to_ascii_lowercase();
+    if !(low.ends_with(".md") || low.ends_with(".markdown")) {
+        return Err(Error::Invalid(format!("笔记必须是 .md 文件: {rel}")));
+    }
+    Ok(())
+}
+
 impl Hub {
     /// 打开 Vault 并确保索引存在。首启只建表不重建（重建交给显式任务，
     /// 否则冷启动会被全量索引拖过 1.5s 预算）。
@@ -178,12 +200,15 @@ impl Hub {
     /// 供写路径使用：保存一篇笔记并增量重建它的索引。
     /// 返回内容 hash，UI 用它做乐观并发（下次保存前比对，不一致就是有人在外面改过）。
     pub fn save_note(&mut self, rel: &str, content: &str) -> Result<String> {
+        check_note_rel(rel)?;
         let hash = self.vault.write_atomic(rel, content.as_bytes())?;
         // 只取这一个文件的元数据。以前这里 scan() 了整个 Vault 来拿一个 NoteFile，
         // 等于每次保存都要给全库算一遍 hash——5000 篇时早就爆掉 8ms 预算了。
         let file = self.vault.note_file(rel)?;
         self.index.index_file(&file, content)?;
         self.index.rebuild_links_of_note(rel)?;
+        // 这篇新写出来的链接里，可能有别人早就悬空指向它的
+        self.index.resolve_broken_to(rel)?;
         Ok(hash)
     }
 
@@ -203,23 +228,33 @@ impl Hub {
         Ok(rel)
     }
 
-    /// 移动或换目录（`notes/甲.md` → `archive/甲.md`）。按 id 认亲，链接图不断。
+    /// 移动或换目录（`notes/甲.md` → `archive/甲.md`）。
+    ///
+    /// 没有 front-matter `id:` 的笔记（手写与导入的占大多数）其 id 是从路径推的，
+    /// 换路径等于换 id，旧行匹配不上就会留下指向已消失文件的幽灵行——照样能搜到。
+    /// 所以先按旧路径把行清掉，再把指向它的入链标成悬空，最后按新路径接回来。
+    /// 全程只碰与这篇有关的链接，不做全库重解析。
     pub fn note_move(&mut self, rel: &str, new_rel: &str) -> Result<()> {
+        check_note_rel(new_rel)?;
+        self.index.break_incoming_links(rel)?;
         self.vault.move_file(rel, new_rel)?;
         let content = String::from_utf8_lossy(&self.vault.read(new_rel)?).to_string();
         let file = self.vault.note_file(new_rel)?;
+        self.index.drop_note(rel)?;
         self.index.index_file(&file, &content)?;
         self.index.rebuild_links_of_note(new_rel)?;
+        self.index.resolve_broken_to(new_rel)?;
         Ok(())
     }
 
     /// 改名。文件名与 front-matter 的 title 一起改——列表显示的是 title，
     /// 只动文件名的话用户会以为没改成功。
     pub fn note_rename(&mut self, rel: &str, new_stem: &str) -> Result<String> {
-        let stem = crate::vault::sanitize_file_stem(new_stem.trim());
-        if stem.is_empty() || stem == "未命名" && new_stem.trim().is_empty() {
+        let want = new_stem.trim();
+        if want.is_empty() {
             return Err(Error::Invalid("新名字是空的".into()));
         }
+        let stem = crate::vault::sanitize_file_stem(want);
         let dir = rel.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
         let new_rel = format!("{dir}{stem}.md");
         if new_rel == rel {
@@ -237,10 +272,11 @@ impl Hub {
     /// 移进回收站。文件本身还在（`.note/trash/`），所以这条操作不丢内容；
     /// `note_versions` 的 before_delete 快照要等历史/撤销功能一起做（docs/02 §偏差）。
     pub fn note_trash(&mut self, rel: &str) -> Result<()> {
+        // 先把指向它的入链标成悬空再删行：直接删会被 ON DELETE CASCADE 一起带走，
+        // 恢复时就没有"曾经指向它"的记录可接回来了
+        self.index.break_incoming_links(rel)?;
         self.vault.move_to_trash(rel)?;
         self.index.drop_note(rel)?;
-        // 指向它的入链会随 notes 行级联消失，必须全量重解析才能退回 broken=1
-        self.index.rebuild_links()?;
         Ok(())
     }
 
@@ -264,7 +300,8 @@ impl Hub {
         let content = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
         let file = self.vault.note_file(rel)?;
         self.index.index_file(&file, &content)?;
-        self.index.rebuild_links()?;
+        self.index.rebuild_links_of_note(rel)?;
+        self.index.resolve_broken_to(rel)?;
         Ok(())
     }
 

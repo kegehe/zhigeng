@@ -18,9 +18,11 @@
 | Vault 扫描与排除、路径越界拒绝、原子写、回收站、冲突判定 | `cargo test -p note-core --test vault`（10 项） |
 | SQLite 索引：全量/增量重建一致、无孤儿索引行、中文分词检索、隐私硬门、链接图 | `cargo test -p note-core --test index`（10 项） |
 | 速记捕获：落 `inbox/`、标题推导、重名不覆盖 | `note capture` + 8 项单测 |
-| 服务层端到端：新建→编辑→改名→归档→删除→恢复，全程 md 与索引零漂移 | `cargo test -p note-core --test service`（8 项）+ `note reindex <Vault> --dry-run` |
+| 服务层端到端：新建→编辑→改名→归档→删除→恢复，全程 md 与索引零漂移；删除后入链转悬空、恢复后自动接回 | `cargo test -p note-core --test service`（11 项）+ `note reindex <Vault> --dry-run` |
 | 桌面端：首启选库、列表/搜索/浏览、速记窗 + `Alt+Shift+N`、托盘、明暗主题 | 真机跑通；同步 IPC p95 4.3–4.6ms（G6 预算 8ms） |
-| 性能基线与预算检查 | `note bench` / `note ipc-bench` / `node scripts/guard.mjs` |
+| 性能基线与预算检查 | `note bench` / `note ipc-bench` / `note write-bench` / `node scripts/guard.mjs` |
+
+**已知未达标的红线**：写命令（保存/改名/恢复）在 2000 篇时 p95 12–17ms，超过 G6 的 8ms。读命令已达标（4.3–4.6ms）。修法按 [03] §后端调用纪律 走——落盘同步返回、索引后台补 + 事件，与速记捕获同形。`note write-bench` 会直接报超线，别把它当噪声。
 
 **没做的**：块级所见即所得编辑器（目前只有整篇 Markdown 源码编辑）、目录树 UI、反链与标签视图、
 导入 Notion/Obsidian、任何 AI 调用（M2 起）、macOS/Linux、云同步。
@@ -60,7 +62,8 @@ cargo build -p note-cli
 
 # 性能
 ./target/debug/note.exe bench      --notes 5000   # 扫描/重建/检索吞吐
-./target/debug/note.exe ipc-bench                # 同步命令 p95，红线 8ms
+./target/debug/note.exe ipc-bench                # 同步读命令 p95，红线 8ms
+./target/debug/note.exe write-bench --notes 2000   # 写路径 p95（当前超线，见上）
 ./target/debug/note.exe capture . --bench 150    # 捕获分段计时（写进临时库，不碰真实 Vault）
 ```
 
@@ -139,7 +142,7 @@ G1 Markdown 唯一真相源 · G2 摘掉 AI 必须是空壳 · G3 AI 不得静�
 crates/
   md-kernel/    Markdown ↔ 块树，无损往返的唯一实现点（不依赖 SQLite、不依赖 Tauri）
   note-core/    后端服务层：vault / index / capture / service / schema
-  note-cli/     note 命令行：scan · reindex · search · capture · bench · ipc-bench · parse
+  note-cli/     note 命令行：scan · reindex · search · capture · bench · ipc-bench · write-bench · write-profile · parse
 src-tauri/      薄壳：窗口、托盘、单实例、全局热键、Mica、command 注册
 src/            React 19 + TS + Tailwind v4；ui/tokens.css 是全仓库唯一允许颜色字面量的地方
 docs/           规格即真相：00 导航 · 01 范围 · 02 数据模型 · 03 架构 · 04 AI · 05 路线图 · 06 样式 · adr/
