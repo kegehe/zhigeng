@@ -1,3 +1,4 @@
+import type { JSONContent } from "@tiptap/core";
 import type { Node as PmNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
@@ -56,7 +57,7 @@ function attrsOf(b: EditBlock): Record<string, unknown> {
   };
 }
 
-export type JsonNode = { type: string; attrs?: Record<string, unknown>; content?: unknown[] };
+export type JsonNode = { type: string; attrs?: Record<string, unknown>; content?: JSONContent[] };
 
 /**
  * 只走顶层，与 Rust 侧 `render_exact` 同口径。

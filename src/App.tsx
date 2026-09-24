@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
+import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri } from "./ipc/commands";
-import type { AppInfo, ListNotes, NoteDetail, TrashRow } from "./ipc/types";
+import type { AppInfo, EditDoc, ListNotes, NoteDetail, TrashRow } from "./ipc/types";
 
 type Theme = "system" | "light" | "dark";
 /** 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。 */
-type Mode = "view" | "source" | "rename" | "trash";
+type Mode = "view" | "inline" | "source" | "rename" | "trash";
 
 function useTheme() {
   const [theme, setTheme] = useState<Theme>("system");
@@ -60,11 +61,13 @@ export function App() {
   const [flash, setFlash] = useState<string | null>(null);
   const [baseHash, setBaseHash] = useState("");
   const [savedDraft, setSavedDraft] = useState("");
+  const [editDoc, setEditDoc] = useState<EditDoc | null>(null);
+  const [editEpoch, setEditEpoch] = useState(0);
   const [saveState, setSaveState] = useState<"clean" | "saving" | "saved" | "conflict">("clean");
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
-  const editing = mode === "source";
+  const editing = mode === "source" || mode === "inline";
   const unsaved = editing && draft !== savedDraft;
 
   const apply = useCallback(async (app: AppInfo) => {
@@ -214,7 +217,16 @@ export function App() {
     setSelected(await api.readNote(rel));
   };
 
-  const startEdit = async (rel?: string) => {
+  /**
+   * 装载行内编辑要的块树。`editEpoch` 同时递增：编辑器只在 rel 变化时才重挂载，
+   * 而"同一篇看完再进来编辑""冲突后换成磁盘版本"都是同一个 rel、不同的内容。
+   */
+  const loadEditDoc = async (rel: string) => {
+    setEditDoc(await api.noteEditDoc(rel));
+    setEditEpoch((n) => n + 1);
+  };
+
+  const startEdit = async (rel?: string, surface: "inline" | "source" = "inline") => {
     const target = rel ?? selected?.rel;
     if (!target) return;
     try {
@@ -223,7 +235,8 @@ export function App() {
       setSavedDraft(src.content);
       setBaseHash(src.hash);
       setSaveState("clean");
-      setMode("source");
+      if (surface === "inline") await loadEditDoc(target);
+      setMode(surface);
     } catch (e) {
       setError(describeError(e).message);
     }
@@ -237,6 +250,18 @@ export function App() {
     if (rel) await afterChange(rel);
   };
 
+  /** 行内 ↔ 源码：同一个草稿、同一条自动保存链路，只是换个写法。存不下就不切。 */
+  const switchSurface = async () => {
+    if (!(await persist())) return;
+    if (mode === "inline") {
+      setMode("source");
+      return;
+    }
+    if (!selected) return;
+    await loadEditDoc(selected.rel);
+    setMode("inline");
+  };
+
   const reloadDisk = async () => {
     if (!selected) return;
     try {
@@ -245,6 +270,8 @@ export function App() {
       setSavedDraft(src.content);
       setBaseHash(src.hash);
       setSaveState("clean");
+      // 行内模式下编辑器显示的就是被丢弃的那份：不重装载，下一次按键又把旧内容写回去
+      if (mode === "inline") await loadEditDoc(selected.rel);
       setFlash("已换成磁盘上的版本，你的草稿被丢弃了");
     } catch (e) {
       setError(describeError(e).message);
@@ -508,7 +535,14 @@ export function App() {
                                 ? "未保存的修改"
                                 : "已自动保存"}
                           </span>
-                          <span className="text-fg-disabled">整篇 Markdown 源码</span>
+                          <span className="text-fg-disabled">
+                            {mode === "inline"
+                              ? "所见即所得 · 没改动的块按原文落盘"
+                              : "整篇 Markdown 源码"}
+                          </span>
+                          <button className={btn} onClick={() => void switchSurface()}>
+                            {mode === "inline" ? "改源码" : "行内编辑"}
+                          </button>
                         </>
                       ) : mode === "rename" ? (
                         <>
@@ -568,7 +602,26 @@ export function App() {
                     ) : null}
                     {flash ? <p className="mb-4 text-xs text-fg-2">{flash}</p> : null}
 
-                    {mode === "source" ? (
+                    {mode === "inline" && editDoc ? (
+                      <div
+                        onBlur={() => void persist()}
+                        onKeyDown={(e) => {
+                          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+                            e.preventDefault();
+                            void persist();
+                          } else if (e.key === "Escape") {
+                            e.preventDefault();
+                            void leaveEdit();
+                          }
+                        }}
+                      >
+                        <BlockEditor
+                          key={`${selected.rel}:${editEpoch}`}
+                          doc={editDoc}
+                          onMarkdown={setDraft}
+                        />
+                      </div>
+                    ) : mode === "source" ? (
                       <textarea
                         autoFocus
                         spellCheck={false}

@@ -1,3 +1,4 @@
+import type { JSONContent } from "@tiptap/core";
 import type { Node as PmNode } from "@tiptap/pm/model";
 
 /**
@@ -76,9 +77,9 @@ export function parseInline(src: string): Inline[] {
  * 多写一个 `marks: []` 会让"载入时算的签名"和"实时算的签名"永远对不上，
  * 于是每个块都被判定为已改、整篇被重新序列化——上一轮就是这么把文件写坏的。
  */
-export function inlineToJson(src: string): Record<string, unknown>[] {
+export function inlineToJson(src: string): JSONContent[] {
   return parseInline(src).map((n) => {
-    const json: Record<string, unknown> = { type: "text", text: n.text };
+    const json: JSONContent = { type: "text", text: n.text };
     if (n.marks.length) {
       json.marks = n.marks.map((m) =>
         m === "link" ? { type: "link", attrs: { href: n.href ?? "", title: null } } : { type: m }

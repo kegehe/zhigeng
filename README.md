@@ -19,7 +19,7 @@
 | SQLite 索引：全量/增量重建一致、无孤儿索引行、中文分词检索、隐私硬门、链接图 | `cargo test -p note-core --test index`（10 项） |
 | 速记捕获：落 `inbox/`、标题推导、重名不覆盖 | `note capture` + 8 项单测 |
 | 服务层端到端：新建→编辑→改名→归档→删除→恢复，全程 md 与索引零漂移；删除后入链转悬空、恢复后自动接回；失败的移动不改索引；悬空锚点不再让保存炸掉 | `cargo test -p note-core --test service`（16 项）+ `note reindex <Vault> --dry-run` |
-| **块编辑器的无损门槛**：5 个真实语法样本过编辑器后逐字节等于源文件（什么都不改 / 改一处再改回 / 连算两次不变样 / 勾选待办要落盘 / 空笔记不多出换行） | `pnpm test`（`src/editor/roundtrip.test.ts`，22 项）——**这项不绿，行内编辑器不许接到界面上** |
+| **块编辑器的无损门槛**：5 个真实语法样本过编辑器后逐字节等于源文件（什么都不改 / 改一处再改回 / 连算两次不变样 / 勾选待办要落盘 / 空笔记不多出换行） | `pnpm test`（`src/editor/roundtrip.test.ts`，22 项）——**这项不绿，行内编辑器不许接到界面上**。已接上：真机在含表格/代码/嵌套列表/引用/`^b-` 锚点/`due::`/`$E=mc^2$` 的笔记里打一次字，文件只多出那 21 个字节，其余逐字节不动 |
 | 桌面端：首启选库、列表/搜索/浏览、速记窗 + `Alt+Shift+N`、托盘、明暗主题 | 真机跑通；同步 IPC p95 4.3–4.6ms（G6 预算 8ms） |
 | 编辑与自动保存：停手 800ms 落盘、冲突不覆盖、改名/归档/删除/恢复 | 真机验证；`cargo test -p note-core --test service` |
 | 性能基线与预算检查 | `note bench` / `note ipc-bench` / `note write-bench` / `node scripts/guard.mjs` |
