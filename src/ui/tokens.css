@@ -167,6 +167,10 @@
   --text-2xl: var(--text-2xl);
   --text-mono: var(--text-mono);
 
+  /* 不登记这两个，`leading-body` / `leading-ui` 就是查无此类的空类名 */
+  --leading-body: var(--leading-body);
+  --leading-ui: var(--leading-ui);
+
   --font-ui: var(--font-ui);
   --font-mono: var(--font-mono);
 

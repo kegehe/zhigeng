@@ -46,6 +46,15 @@ pub struct NoteFile {
     pub content_hash: String,
 }
 
+/// 回收站里的一条。`rel` 是恢复目标（原相对路径），`batch` 是它所在的那一批。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrashEntry {
+    pub batch: String,
+    pub rel: String,
+    pub size: u64,
+    pub mtime_ms: i64,
+}
+
 /// 一个打开的 Vault。root 必须已存在。
 #[derive(Debug, Clone)]
 pub struct Vault {
@@ -273,12 +282,14 @@ impl Vault {
         })
     }
 
-    /// 移入回收站。状态存在目录里（`.note/trash/<原相对路径>`），不进 DB —— 否则违反 G1。
+    /// 移入回收站。状态存在目录里（`.note/trash/<批次>/<原相对路径>`），不进 DB —— 否则违反 G1。
+    ///
+    /// 批次目录是必需的：同一篇笔记删两次（或删了又建同名再删）若直接按原路径镜像存放，
+    /// `rename` 会**静默覆盖**上一次的回收件，等于用户删第二条时丢了第一条。
     pub fn move_to_trash(&self, rel: &str) -> Result<PathBuf> {
         let src = self.resolve(rel)?;
         let dst = self
-            .meta_dir()
-            .join("trash")
+            .trash_dir(&trash_batch())
             .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io {
@@ -291,6 +302,133 @@ impl Vault {
             source: e,
         })?;
         Ok(dst)
+    }
+
+    fn trash_dir(&self, batch: &str) -> PathBuf {
+        self.meta_dir().join("trash").join(batch)
+    }
+
+    /// 回收站清单：扫目录得出，不存 DB（docs/02 §回收站的索引处理）。
+    /// 返回的 `rel` 是**恢复目标路径**，`batch` 定位它在哪一批。
+    pub fn list_trash(&self) -> Result<Vec<TrashEntry>> {
+        let root = self.meta_dir().join("trash");
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for batch in std::fs::read_dir(&root).map_err(|e| Error::Io {
+            path: root.display().to_string(),
+            source: e,
+        })? {
+            let batch = batch.map_err(|e| Error::Io {
+                path: root.display().to_string(),
+                source: e,
+            })?;
+            if !batch.path().is_dir() {
+                continue;
+            }
+            let name = batch.file_name().to_string_lossy().to_string();
+            for entry in walkdir::WalkDir::new(batch.path()).follow_links(false) {
+                let entry = entry.map_err(|e| Error::Io {
+                    path: name.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::Other, e),
+                })?;
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let Ok(rel) = self.relative(&entry.path().to_path_buf()) else {
+                    continue;
+                };
+                // rel 形如 `.note/trash/<批次>/notes/甲.md`，剥掉三段前缀才是原路径
+                let md = entry.metadata();
+                let Some(orig) =
+                    rel.strip_prefix(&format!("{META_DIR}/trash/{name}/")).map(str::to_owned)
+                else {
+                    continue;
+                };
+                out.push(TrashEntry {
+                    batch: name.clone(),
+                    rel: orig,
+                    size: md.as_ref().map(|m| m.len()).unwrap_or(0),
+                    mtime_ms: md
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                });
+            }
+        }
+        out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+        Ok(out)
+    }
+
+    /// 回收站里某个条目的绝对路径。`batch`/`rel` 来自 UI，必须先过一遍 `resolve`
+    /// 的边界校验再拼接，否则 `../..` 就能借恢复操作往 Vault 外写文件。
+    fn trash_path(&self, batch: &str, rel: &str) -> Result<PathBuf> {
+        let checked = self.resolve(rel)?;
+        let rel = self.relative(&checked)?;
+        let batch = batch
+            .split(['/', '\\'])
+            .last()
+            .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+            .ok_or_else(|| Error::OutsideVault(batch.to_string()))?;
+        Ok(self
+            .trash_dir(batch)
+            .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
+    }
+
+    /// 读回收站里的某一份。UI 要预览内容，测试要验证"两次删除各自完整"。
+    pub fn read_from_trash(&self, batch: &str, rel: &str) -> Result<Vec<u8>> {
+        let src = self.trash_path(batch, rel)?;
+        std::fs::read(&src).map_err(|e| Error::Io {
+            path: src.display().to_string(),
+            source: e,
+        })
+    }
+
+    /// 从回收站移回原位。原位已有文件时**拒绝**，不覆盖——那说明用户又建了同名笔记。
+    pub fn restore_from_trash(&self, batch: &str, rel: &str) -> Result<()> {
+        let src = self.trash_path(batch, rel)?;
+        if !src.is_file() {
+            return Err(Error::NotFound(rel.to_string()));
+        }
+        let dst = self.resolve(rel)?;
+        if dst.exists() {
+            return Err(Error::Conflict(dst.display().to_string()));
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io {
+                path: parent.display().to_string(),
+                source: e,
+            })?;
+        }
+        std::fs::rename(&src, &dst).map_err(|e| Error::Io {
+            path: rel.to_string(),
+            source: e,
+        })
+    }
+
+    /// 改名或换目录。两者是同一个原语：目标已存在就报错，绝不静默覆盖。
+    pub fn move_file(&self, rel: &str, new_rel: &str) -> Result<()> {
+        let src = self.resolve(rel)?;
+        let dst = self.resolve(new_rel)?;
+        if src == dst {
+            return Ok(());
+        }
+        if dst.exists() {
+            return Err(Error::Conflict(dst.display().to_string()));
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| Error::Io {
+                path: parent.display().to_string(),
+                source: e,
+            })?;
+        }
+        std::fs::rename(&src, &dst).map_err(|e| Error::Io {
+            path: rel.to_string(),
+            source: e,
+        })
     }
 
     /// 冲突时保留磁盘版本（docs/02 表格第 2 行）。
@@ -310,8 +448,23 @@ impl Vault {
     }
 }
 
-fn sibling_tmp(target: &Path) -> PathBuf {
-    let name = target
+/// 回收站批次目录名。必须每次调用都不重复：批次撞车等于第二次删除覆盖第一次的回收件。
+fn trash_batch() -> String {
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}-{:06}{:02}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        nanos % 1_000_000,
+        n % 100
+    )
+}
+
+fn sibling_tmp(target: &Path) -> PathBuf {    let name = target
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "note.md".into());

@@ -87,3 +87,115 @@ fn 索引一次都不落在启动路径之外() {
     assert_eq!(hub.drift().unwrap(), 0);
     assert_eq!(hub.search_keyword("重启", 10).unwrap().len(), 1);
 }
+
+#[test]
+fn 新建改名归档删除恢复全程索引不漂() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+
+    let rel = hub.note_create("周会纪要").unwrap();
+    assert!(rel.starts_with("notes/"), "{rel}");
+    assert_eq!(hub.read_note(&rel).unwrap().title, "周会纪要");
+
+    let renamed = hub.note_rename(&rel, "周会纪要 9 月").unwrap();
+    assert_ne!(renamed, rel);
+    assert_eq!(
+        hub.read_note(&renamed).unwrap().title,
+        "周会纪要 9 月",
+        "改名必须连 front-matter 一起改，列表显示的是 title"
+    );
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1, "改名后多出一篇");
+
+    let file = renamed.rsplit('/').next().unwrap().to_string();
+    let archived = format!("archive/{file}");
+    hub.note_move(&renamed, &archived).unwrap();
+    let row = hub.list_notes(10).unwrap().notes.remove(0);
+    assert_eq!((row.rel.as_str(), row.status.as_str()), (archived.as_str(), "archived"));
+
+    hub.note_trash(&archived).unwrap();
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 0);
+    let trash = hub.list_trash().unwrap();
+    assert_eq!(trash.len(), 1, "{trash:?}");
+    assert_eq!(trash[0].rel, archived, "回收站要记得恢复目标路径");
+
+    hub.note_restore(&trash[0].batch, &trash[0].rel).unwrap();
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
+    assert!(hub.list_trash().unwrap().is_empty());
+    assert_eq!(hub.drift().unwrap(), 0, "每一步之后 md 与 db 都必须对齐");
+    assert!(hub.orphan_counts().unwrap().is_clean());
+}
+
+fn open_index(hub: &Hub) -> rusqlite::Connection {
+    rusqlite::Connection::open(hub.vault().meta_dir().join("index.db")).unwrap()
+}
+
+fn link_stats(conn: &rusqlite::Connection) -> (i64, i64) {
+    conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(broken), 0) FROM links",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+}
+
+#[test]
+fn 删掉被引用的笔记时入链退回悬空而不是静默消失() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let target = hub.note_create("目标笔记").unwrap();
+    hub.save_note("notes/引用者.md", "看 [[目标笔记]] 那篇。\n").unwrap();
+
+    let conn = open_index(&hub);
+    assert_eq!(link_stats(&conn), (1, 0), "新建的链接应当解析成功");
+
+    // notes 行一删，指向它的 links 行会被 ON DELETE CASCADE 一起带走。
+    // 不重解析的话，用户的反链就在界面上凭空少一条——它其实只是暂时悬空。
+    hub.note_trash(&target).unwrap();
+    assert_eq!(link_stats(&conn), (1, 1), "目标被删后链接必须退回 broken=1");
+
+    let trash = hub.list_trash().unwrap();
+    hub.note_restore(&trash[0].batch, &trash[0].rel).unwrap();
+    assert_eq!(link_stats(&conn), (1, 0), "恢复后链接要重新接上");
+}
+
+#[test]
+fn 同名笔记删两次在回收站里不互相覆盖() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let rel = hub.note_create("同名").unwrap();
+    hub.save_note(&rel, "---\nid: n-keep0001\ntitle: \"同名\"\n---\n\n第一条内容\n")
+        .unwrap();
+    hub.note_trash(&rel).unwrap();
+    hub.save_note(&rel, "---\nid: n-keep0002\ntitle: \"同名\"\n---\n\n第二条内容\n")
+        .unwrap();
+    hub.note_trash(&rel).unwrap();
+
+    let trash = hub.list_trash().unwrap();
+    assert_eq!(trash.len(), 2, "镜像存放会把第二次覆盖到第一次上: {trash:?}");
+    assert_ne!(trash[0].batch, trash[1].batch);
+    let bodies: Vec<String> = trash
+        .iter()
+        .map(|t| {
+            String::from_utf8_lossy(&hub.vault().read_from_trash(&t.batch, &t.rel).unwrap())
+                .to_string()
+        })
+        .collect();
+    assert!(bodies.iter().any(|b| b.contains("第一条")), "{bodies:?}");
+    assert!(bodies.iter().any(|b| b.contains("第二条")), "{bodies:?}");
+
+    hub.note_restore(&trash[0].batch, &rel).unwrap();
+    // 原位已被占用，第二次恢复必须报冲突而不是盖掉刚恢复的那篇
+    assert!(matches!(
+        hub.note_restore(&trash[1].batch, &rel),
+        Err(note_core::Error::Conflict(_))
+    ));
+}
+
+#[test]
+fn 回收站的恢复参数不能越出Vault() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    // batch 与 rel 都是从 UI 来的，拼进 trash 路径之前必须过边界校验
+    assert!(hub.note_restore("..", "../outside.md").is_err());
+    assert!(hub.note_restore("a/../../b", "notes/甲.md").is_err());
+}

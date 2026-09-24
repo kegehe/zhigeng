@@ -39,12 +39,26 @@ export type CapturedOut = {
   indexMs: number;
 };
 
+export type TrashRow = {
+  batch: string;
+  rel: string;
+  size: number;
+  updatedMs: number;
+};
+
 export type CommandName =
   | "app_info"
   | "capture_text"
   | "hide_capture"
   | "list_notes"
+  | "list_trash"
+  | "note_create"
+  | "note_move"
+  | "note_rename"
+  | "note_restore"
+  | "note_trash"
   | "read_note"
+  | "read_raw"
   | "save_note"
   | "vault_default_path"
   | "vault_open"

@@ -115,8 +115,20 @@ fn 回收站移动与恢复() {
     assert_eq!(v.scan().unwrap().len(), 1);
     v.move_to_trash("notes/a.md").unwrap();
     assert_eq!(v.scan().unwrap().len(), 0, "回收站内容不应被索引");
-    assert!(dir.path().join(".note/trash/notes/a.md").exists());
     assert!(!dir.path().join("notes/a.md").exists());
+
+    // 批次目录：同一路径删两次不能互相覆盖，所以清单要能报出恢复目标
+    let trash = v.list_trash().unwrap();
+    assert_eq!(trash.len(), 1, "{trash:?}");
+    assert_eq!(trash[0].rel, "notes/a.md");
+    assert_eq!(
+        String::from_utf8_lossy(&v.read_from_trash(&trash[0].batch, "notes/a.md").unwrap()),
+        "甲\n"
+    );
+
+    v.restore_from_trash(&trash[0].batch, "notes/a.md").unwrap();
+    assert!(v.list_trash().unwrap().is_empty());
+    assert_eq!(v.scan().unwrap().len(), 1, "恢复后要重新被扫描到");
 }
 
 #[test]

@@ -6,7 +6,7 @@
 
 判据只有一条：**把全部 AI 模块摘掉，剩下的应该是一个能用但没人愿意用的空壳**。如果只是"少了个润色按钮"，那叫接入 AI。
 
-> 状态：M0 地基完成，M1 进行中。**内核与命令行已可用并有测试覆盖；图形界面代码完成但还没在真机上跑过一次。** 下面会逐项写清哪些是验证过的。
+> 状态：M0 地基完成，M1 进行中。**内核、命令行、桌面端都已真机跑过**（Windows 11 / WebView2）。下面逐项写清哪些是验证过的。
 
 ---
 
@@ -15,13 +15,16 @@
 | 能力 | 怎么验证 |
 |---|---|
 | Markdown ↔ 块树双向转换，字节级无损往返 | `cargo test -p md-kernel`（19 项，含 proptest 随机恒等往返） |
-| Vault 扫描与排除、路径越界拒绝、原子写、回收站、冲突判定 | `cargo test -p note-core --test vault`（9 项） |
+| Vault 扫描与排除、路径越界拒绝、原子写、回收站、冲突判定 | `cargo test -p note-core --test vault`（10 项） |
 | SQLite 索引：全量/增量重建一致、无孤儿索引行、中文分词检索、隐私硬门、链接图 | `cargo test -p note-core --test index`（10 项） |
 | 速记捕获：落 `inbox/`、标题推导、重名不覆盖 | `note capture` + 8 项单测 |
+| 服务层端到端：新建→编辑→改名→归档→删除→恢复，全程 md 与索引零漂移 | `cargo test -p note-core --test service`（8 项）+ `note reindex <Vault> --dry-run` |
+| 桌面端：首启选库、列表/搜索/浏览、速记窗 + `Alt+Shift+N`、托盘、明暗主题 | 真机跑通；同步 IPC p95 4.3–4.6ms（G6 预算 8ms） |
 | 性能基线与预算检查 | `note bench` / `note ipc-bench` / `node scripts/guard.mjs` |
 
-**没做的**：块编辑器、目录树 UI、导入 Notion/Obsidian、任何 AI 调用（M2 起）、macOS/Linux、云同步。
-**做了但没真机跑过**：Tauri 窗口、全局热键、速记窗、托盘、Mica 材质。
+**没做的**：块级所见即所得编辑器（目前只有整篇 Markdown 源码编辑）、目录树 UI、反链与标签视图、
+导入 Notion/Obsidian、任何 AI 调用（M2 起）、macOS/Linux、云同步。
+**做了但还没验**：NSIS 安装包（`bundle.active` 仍为 `false`）、纯 Win10 上的 Mica 降级、崩溃强杀下的落盘一致性。
 
 ---
 

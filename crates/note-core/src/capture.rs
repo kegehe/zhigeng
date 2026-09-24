@@ -98,6 +98,54 @@ fn yaml_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// 新建笔记的内容。与 `compose_capture` 分开：这里标题是用户显式给的，
+/// 不是从第一行推出来的，所以正文可以留空等用户写。
+pub fn compose_new(title: &str, id: &str, created: &str) -> String {
+    format!(
+        "---\nid: {id}\ntitle: {}\ncreated: {created}\n---\n\n",
+        yaml_quote(title)
+    )
+}
+
+/// 新建笔记的落点：`notes/YYYY-MM-DD-<slug>.md`，重名自动加序号。
+pub fn new_note_rel(vault: &Vault, title: &str) -> String {
+    let stem = sanitize_file_stem(title);
+    let day = today();
+    let mut rel = format!("notes/{day}-{stem}.md");
+    let mut n = 1;
+    while vault.resolve(&rel).map(|p| p.exists()).unwrap_or(false) {
+        rel = format!("notes/{day}-{stem}-{n}.md");
+        n += 1;
+    }
+    rel
+}
+
+/// 只改 front-matter 里的 `title:`，其余字节原样不动。
+/// 没有 front-matter 或没有 title 行时返回原文——改名不该给用户凭空造一段 YAML。
+pub fn set_front_title(content: &str, title: &str) -> String {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return content.to_string();
+    };
+    let Some(end) = rest.find("\n---\n") else {
+        return content.to_string();
+    };
+    let fm = &rest[..end];
+    if !fm.lines().any(|l| l.starts_with("title:")) {
+        return content.to_string();
+    }
+    let new_fm: Vec<String> = fm
+        .lines()
+        .map(|l| {
+            if l.starts_with("title:") {
+                format!("title: {}", yaml_quote(title))
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    format!("---\n{}\n{}", new_fm.join("\n"), &rest[end + 1..])
+}
+
 /// 目标路径：`inbox/YYYY-MM-DD-<slug>.md`，重名自动加序号，绝不覆盖已有笔记。
 pub fn capture_rel(vault: &Vault, title: &str) -> String {
     let stem = sanitize_file_stem(title);

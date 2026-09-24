@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use note_core::capture::Captured;
-use note_core::service::{AppInfo, HitRow, Hub, NoteDetail, NoteList};
+use note_core::service::{AppInfo, HitRow, Hub, NoteDetail, NoteList, TrashRow};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -47,6 +47,16 @@ fn with_hub<T: serde::Serialize>(
 ) -> Result<T, String> {
     let guard = state.0.lock().map_err(|e| e.to_string())?;
     let hub = guard.as_ref().ok_or_else(|| "尚未选择 Vault".to_string())?;
+    f(hub).map_err(|e| e.to_string())
+}
+
+/// 写操作要 `&mut Hub`：SQLite 单写者，M1 之前就用这把锁串行化（docs/03）。
+fn with_hub_mut<T: serde::Serialize>(
+    state: &State<'_, Shared>,
+    f: impl FnOnce(&mut Hub) -> note_core::Result<T>,
+) -> Result<T, String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let hub = guard.as_mut().ok_or_else(|| "尚未选择 Vault".to_string())?;
     f(hub).map_err(|e| e.to_string())
 }
 
@@ -133,6 +143,11 @@ fn read_note(state: State<'_, Shared>, rel: String) -> Result<NoteDetail, String
 }
 
 #[tauri::command]
+fn read_raw(state: State<'_, Shared>, rel: String) -> Result<String, String> {
+    with_hub(&state, |h| h.read_raw(&rel))
+}
+
+#[tauri::command]
 fn search_keyword(
     state: State<'_, Shared>,
     query: String,
@@ -163,9 +178,45 @@ fn vault_open(
 
 #[tauri::command]
 fn save_note(state: State<'_, Shared>, rel: String, content: String) -> Result<String, String> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    let hub = guard.as_mut().ok_or_else(|| "尚未选择 Vault".to_string())?;
-    hub.save_note(&rel, &content).map_err(|e| e.to_string())
+    with_hub_mut(&state, |h| h.save_note(&rel, &content))
+}
+
+#[tauri::command]
+fn note_create(state: State<'_, Shared>, title: String) -> Result<String, String> {
+    with_hub_mut(&state, |h| h.note_create(&title))
+}
+
+#[tauri::command]
+fn note_rename(
+    state: State<'_, Shared>,
+    rel: String,
+    new_stem: String,
+) -> Result<String, String> {
+    with_hub_mut(&state, |h| h.note_rename(&rel, &new_stem))
+}
+
+#[tauri::command]
+fn note_move(state: State<'_, Shared>, rel: String, new_rel: String) -> Result<(), String> {
+    with_hub_mut(&state, |h| h.note_move(&rel, &new_rel))
+}
+
+#[tauri::command]
+fn note_trash(state: State<'_, Shared>, rel: String) -> Result<(), String> {
+    with_hub_mut(&state, |h| h.note_trash(&rel))
+}
+
+#[tauri::command]
+fn list_trash(state: State<'_, Shared>) -> Result<Vec<TrashRow>, String> {
+    with_hub(&state, |h| h.list_trash())
+}
+
+#[tauri::command]
+fn note_restore(
+    state: State<'_, Shared>,
+    batch: String,
+    rel: String,
+) -> Result<(), String> {
+    with_hub_mut(&state, |h| h.note_restore(&batch, &rel))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -208,10 +259,17 @@ pub fn run() {
             hide_capture,
             list_notes,
             read_note,
+            read_raw,
             search_keyword,
             vault_default_path,
             vault_open,
-            save_note
+            save_note,
+            note_create,
+            note_rename,
+            note_move,
+            note_trash,
+            list_trash,
+            note_restore
         ])
         .setup(|app| {
             let handle = app.handle().clone();

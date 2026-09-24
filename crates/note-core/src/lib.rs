@@ -29,6 +29,8 @@ pub enum Error {
     OutsideVault(String),
     #[error("外部修改冲突: {0}")]
     Conflict(String),
+    #[error("输入不合法: {0}")]
+    Invalid(String),
     #[error("笔记不存在: {0}")]
     NotFound(String),
 }

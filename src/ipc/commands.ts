@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppInfo, CapturedOut, ListNotes, NoteDetail } from "./types";
+import type { AppInfo, CapturedOut, ListNotes, NoteDetail, TrashRow } from "./types";
 
 export const inTauri = () => "__TAURI_INTERNALS__" in window;
 
@@ -22,4 +22,16 @@ export const api = {
       "search_keyword",
       { query, limit }
     ),
+  /** 原文。只在进入编辑态时取，普通浏览不付序列化整篇的代价 */
+  readRaw: (rel: string) => invoke<string>("read_raw", { rel }),
+  saveNote: (rel: string, content: string) => invoke<string>("save_note", { rel, content }),
+  /** 返回新建笔记的相对路径 */
+  noteCreate: (title: string) => invoke<string>("note_create", { title }),
+  noteRename: (rel: string, newStem: string) =>
+    invoke<string>("note_rename", { rel, newStem }),
+  noteMove: (rel: string, newRel: string) => invoke<void>("note_move", { rel, newRel }),
+  noteTrash: (rel: string) => invoke<void>("note_trash", { rel }),
+  listTrash: () => invoke<TrashRow[]>("list_trash"),
+  noteRestore: (batch: string, rel: string) =>
+    invoke<void>("note_restore", { batch, rel }),
 };

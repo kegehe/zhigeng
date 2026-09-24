@@ -137,6 +137,52 @@ impl Index {
         Ok(stats)
     }
 
+    /// 笔记被删除/移进回收站后清掉它的全部索引。按路径清（此时 front-matter 里的
+    /// id 已经不在手上），派生表清理顺序与 `index_file` 完全一致。
+    pub fn drop_note(&mut self, rel: &str) -> Result<()> {
+        purge_by_key(&self.conn, rel, "")
+    }
+
+    /// 全量重解析链接图。删除/恢复会让别人的入链悬空，只有全量能把它退回 `broken=1`。
+    pub fn rebuild_links(&mut self) -> Result<usize> {
+        rebuild_links(&self.conn)
+    }
+
+    /// 只重算一篇笔记**发出**的链接。`links.to_note` 存的是 id，所以改名/移动不会
+    /// 弄坏别人的入链，被指方不需要跟着重建——这点决定了写路径不必每次全量重建链接图。
+    pub fn rebuild_links_of_note(&mut self, rel: &str) -> Result<usize> {
+        let Ok(note_id) = self
+            .conn
+            .query_row("SELECT id FROM notes WHERE path=?1", [rel], |r| {
+                r.get::<_, String>(0)
+            })
+        else {
+            return Ok(0);
+        };
+        self.conn.execute(
+            "DELETE FROM links WHERE from_block IN (SELECT id FROM blocks WHERE note_id=?1)",
+            [&note_id],
+        )?;
+        let lookup = link_lookup(&self.conn)?;
+        let rows: Vec<(String, String, Option<String>, String)> = {
+            let mut s = self.conn.prepare(
+                "SELECT lt.from_block, lt.target, lt.to_block, lt.kind
+                 FROM link_targets lt JOIN blocks b ON b.id = lt.from_block
+                 WHERE b.note_id=?1",
+            )?;
+            let r = s.query_map([&note_id], |x: &Row| {
+                Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?))
+            })?;
+            r.filter_map(|x| x.ok()).collect()
+        };
+        let mut n = 0usize;
+        for (from, target, anchor, kind) in &rows {
+            insert_resolved(&self.conn, &lookup, from, target, anchor.as_ref(), kind)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     pub fn vec_tables(&self) -> Vec<String> {
         vec_tables_of(&self.conn)
     }
@@ -499,10 +545,9 @@ fn self_link_count(conn: &Connection, note_id: &str) -> Result<usize> {
     Ok(n as usize)
 }
 
-/// 全量解析链接图：把 `link_targets` 的原始写法映射到具体笔记。
-/// 匹配顺序：front-matter id → 完整相对路径 → 去扩展名的路径 → 文件名 → 标题。
-pub fn rebuild_links(conn: &Connection) -> Result<usize> {
-    conn.execute("DELETE FROM links", [])?;
+/// 目标写法 → 笔记 id 的查找表。匹配顺序：front-matter id → 完整相对路径 →
+/// 去扩展名的路径 → 文件名 → 标题。
+fn link_lookup(conn: &Connection) -> Result<BTreeMap<String, String>> {
     let mut stmt = conn.prepare("SELECT id, path, title FROM notes")?;
     let notes: Vec<(String, String, String)> = stmt
         .query_map([], |r: &Row| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -516,6 +561,40 @@ pub fn rebuild_links(conn: &Connection) -> Result<usize> {
             lookup.entry(key.to_string()).or_insert_with(|| id.clone());
         }
     }
+    Ok(lookup)
+}
+
+/// 把一条 `link_targets` 解析成 `links` 行。找不到目标也登记（`broken=1`），
+/// UI 才标得出来并提示补上（docs/02 §块 ID）。
+fn insert_resolved(
+    conn: &Connection,
+    lookup: &BTreeMap<String, String>,
+    from_block: &str,
+    target: &str,
+    anchor: Option<&String>,
+    kind: &str,
+) -> Result<()> {
+    let base = target.split('#').next().unwrap_or(target).trim();
+    let to_block = anchor.filter(|a| a.starts_with("b-")).cloned();
+    match lookup.get(base) {
+        Some(to_note) => conn.execute(
+            "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
+             VALUES(?1,?2,?3,?4,'human',0)",
+            params![from_block, to_note, to_block, kind],
+        )?,
+        None => conn.execute(
+            "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
+             VALUES(?1,NULL,?2,?3,'human',1)",
+            params![from_block, to_block, kind],
+        )?,
+    };
+    Ok(())
+}
+
+/// 全量解析链接图：把 `link_targets` 的原始写法映射到具体笔记。
+pub fn rebuild_links(conn: &Connection) -> Result<usize> {
+    conn.execute("DELETE FROM links", [])?;
+    let lookup = link_lookup(conn)?;
     let mut t = conn.prepare("SELECT from_block, target, to_block, kind FROM link_targets")?;
     let targets: Vec<(String, String, Option<String>, String)> = t
         .query_map([], |r: &Row| {
@@ -524,31 +603,11 @@ pub fn rebuild_links(conn: &Connection) -> Result<usize> {
         .filter_map(|x| x.ok())
         .collect();
     let mut n = 0usize;
-    let mut unresolved = 0usize;
     for (from_block, target, anchor, kind) in &targets {
-        let base = target.split('#').next().unwrap_or(target).trim();
-        let to_block = anchor.as_ref().filter(|a| a.starts_with("b-")).cloned();
-        match lookup.get(base) {
-            Some(to_note) => {
-                conn.execute(
-                    "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
-                     VALUES(?1,?2,?3,?4,'human',0)",
-                    params![from_block, to_note, to_block, kind],
-                )?;
-                n += 1;
-            }
-            None => {
-                // 悬空链接也要登记，UI 才能标红并提示补上（docs/02 §块 ID）
-                conn.execute(
-                    "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
-                     VALUES(?1,NULL,?2,?3,'human',1)",
-                    params![from_block, to_block, kind],
-                )?;
-                unresolved += 1;
-            }
-        }
+        insert_resolved(conn, &lookup, from_block, target, anchor.as_ref(), kind)?;
+        n += 1;
     }
-    Ok(n + unresolved)
+    Ok(n)
 }
 
 /// 一次前序遍历得到的块清单：ID 规则只有一处，blocks 与 chunks 共用。

@@ -95,6 +95,16 @@ pub struct Hub {
     root: PathBuf,
 }
 
+/// 回收站里的一条。`batch` + `rel` 一起才能定位，因为同一路径可能被删多次。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashRow {
+    pub batch: String,
+    pub rel: String,
+    pub size: u64,
+    pub updated_ms: i64,
+}
+
 impl Hub {
     /// 打开 Vault 并确保索引存在。首启只建表不重建（重建交给显式任务，
     /// 否则冷启动会被全量索引拖过 1.5s 预算）。
@@ -169,13 +179,93 @@ impl Hub {
     /// 返回内容 hash，UI 用它做乐观并发（下次保存前比对，不一致就是有人在外面改过）。
     pub fn save_note(&mut self, rel: &str, content: &str) -> Result<String> {
         let hash = self.vault.write_atomic(rel, content.as_bytes())?;
-        let files = self.vault.scan()?;
-        let file = files
-            .iter()
-            .find(|f| f.rel == rel)
-            .ok_or_else(|| Error::NotFound(rel.to_string()))?;
-        self.index.index_file(file, content)?;
+        // 只取这一个文件的元数据。以前这里 scan() 了整个 Vault 来拿一个 NoteFile，
+        // 等于每次保存都要给全库算一遍 hash——5000 篇时早就爆掉 8ms 预算了。
+        let file = self.vault.note_file(rel)?;
+        self.index.index_file(&file, content)?;
+        self.index.rebuild_links_of_note(rel)?;
         Ok(hash)
+    }
+
+    /// 新建一篇空笔记（标题只进 front-matter，正文留给用户写），返回相对路径。
+    pub fn note_create(&mut self, title: &str) -> Result<String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(Error::Invalid("标题不能为空".into()));
+        }
+        let rel = crate::capture::new_note_rel(&self.vault, title);
+        let content = crate::capture::compose_new(
+            title,
+            &crate::capture::gen_note_id(),
+            &crate::capture::today(),
+        );
+        self.save_note(&rel, &content)?;
+        Ok(rel)
+    }
+
+    /// 移动或换目录（`notes/甲.md` → `archive/甲.md`）。按 id 认亲，链接图不断。
+    pub fn note_move(&mut self, rel: &str, new_rel: &str) -> Result<()> {
+        self.vault.move_file(rel, new_rel)?;
+        let content = String::from_utf8_lossy(&self.vault.read(new_rel)?).to_string();
+        let file = self.vault.note_file(new_rel)?;
+        self.index.index_file(&file, &content)?;
+        self.index.rebuild_links_of_note(new_rel)?;
+        Ok(())
+    }
+
+    /// 改名。文件名与 front-matter 的 title 一起改——列表显示的是 title，
+    /// 只动文件名的话用户会以为没改成功。
+    pub fn note_rename(&mut self, rel: &str, new_stem: &str) -> Result<String> {
+        let stem = crate::vault::sanitize_file_stem(new_stem.trim());
+        if stem.is_empty() || stem == "未命名" && new_stem.trim().is_empty() {
+            return Err(Error::Invalid("新名字是空的".into()));
+        }
+        let dir = rel.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
+        let new_rel = format!("{dir}{stem}.md");
+        if new_rel == rel {
+            return Ok(rel.to_string());
+        }
+        self.note_move(rel, &new_rel)?;
+        let content = String::from_utf8_lossy(&self.vault.read(&new_rel)?).to_string();
+        let patched = crate::capture::set_front_title(&content, &stem);
+        if patched != content {
+            self.save_note(&new_rel, &patched)?;
+        }
+        Ok(new_rel)
+    }
+
+    /// 移进回收站。文件本身还在（`.note/trash/`），所以这条操作不丢内容；
+    /// `note_versions` 的 before_delete 快照要等历史/撤销功能一起做（docs/02 §偏差）。
+    pub fn note_trash(&mut self, rel: &str) -> Result<()> {
+        self.vault.move_to_trash(rel)?;
+        self.index.drop_note(rel)?;
+        // 指向它的入链会随 notes 行级联消失，必须全量重解析才能退回 broken=1
+        self.index.rebuild_links()?;
+        Ok(())
+    }
+
+    pub fn list_trash(&self) -> Result<Vec<TrashRow>> {
+        Ok(self
+            .vault
+            .list_trash()?
+            .into_iter()
+            .map(|t| TrashRow {
+                batch: t.batch,
+                rel: t.rel,
+                size: t.size,
+                updated_ms: t.mtime_ms,
+            })
+            .collect())
+    }
+
+    /// 从回收站移回原位并重新解析。原位已被同名笔记占用时报冲突，不覆盖。
+    pub fn note_restore(&mut self, batch: &str, rel: &str) -> Result<()> {
+        self.vault.restore_from_trash(batch, rel)?;
+        let content = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
+        let file = self.vault.note_file(rel)?;
+        self.index.index_file(&file, &content)?;
+        self.index.rebuild_links()?;
+        Ok(())
     }
 
     /// 捕获一篇速记：落盘 + 立刻索引。GUI 走的是拆分后的两步版本。
@@ -202,6 +292,12 @@ impl Hub {
         let file = self.vault.note_file(rel)?;
         self.index.index_file(&file, content)?;
         Ok(())
+    }
+
+    /// 原文。只在进入编辑态时才调——`read_note` 每次渲染都要走，把整篇 Markdown
+    /// 塞进它的返回值里会让 3000 块的长文档在普通浏览时也付这份序列化代价。
+    pub fn read_raw(&self, rel: &str) -> Result<String> {
+        Ok(String::from_utf8_lossy(&self.vault.read(rel)?).to_string())
     }
 
     /// 自检：md 与 db 是否一致。UI 的"索引健康"与 CI 都读这两个。
