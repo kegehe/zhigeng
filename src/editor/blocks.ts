@@ -1,5 +1,5 @@
 import type { JSONContent } from "@tiptap/core";
-import type { Node as PmNode } from "@tiptap/pm/model";
+import { Fragment, type Node as PmNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
 import { inlineToJson, serializeInline } from "./inline";
@@ -227,15 +227,24 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
  * 签名只能这么打：JSON 里那份是"我以为节点长什么样"，`sigOf(活节点)` 才是"它实际长
  * 什么样"，两者必须由同一个函数产出，否则判断"改没改"就成了猜谜。空串代表新块，
  * 一定会被重新序列化。
+ *
+ * **必须一次成型，不能逐块 `setNodeMarkup`**：3000 个块逐个改属性是 3000 次整树替换，
+ * 实测 854ms（真机 2026-09-24），把打开编辑器的开销全吃在这上面。这里改成"每个节点
+ * O(1) 换属性 + 一次整体替换"，子内容全部共享，代价线性。
  */
 export function stampSignatures(state: EditorState): Transaction | null {
-  const tr = state.tr;
-  state.doc.forEach((node, offset) => {
+  const kids: PmNode[] = [];
+  let changed = false;
+  state.doc.forEach((node) => {
     const sig = sigOf(node);
-    if (node.attrs.mdSig === sig) return;
-    tr.setNodeMarkup(offset, undefined, { ...node.attrs, mdSig: sig });
+    if (node.attrs.mdSig === sig) kids.push(node);
+    else {
+      changed = true;
+      kids.push(node.type.create({ ...node.attrs, mdSig: sig }, node.content, node.marks));
+    }
   });
-  if (!tr.docChanged) return null;
+  if (!changed) return null;
+  const tr = state.tr.replaceWith(0, state.doc.content.size, Fragment.fromArray(kids));
   // 打签名不是用户的编辑，不该进撤销栈
   return tr.setMeta("addToHistory", false);
 }

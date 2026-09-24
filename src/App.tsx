@@ -63,12 +63,16 @@ export function App() {
   const [savedDraft, setSavedDraft] = useState("");
   const [editDoc, setEditDoc] = useState<EditDoc | null>(null);
   const [editEpoch, setEditEpoch] = useState(0);
+  const [inlineRev, setInlineRev] = useState(0);
   const [saveState, setSaveState] = useState<"clean" | "saving" | "saved" | "conflict">("clean");
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
+  /** 行内模式的 Markdown 只在落盘那一刻取一次：整篇序列化是 O(块数) 的 */
+  const editApi = useRef<(() => string) | null>(null);
   const editing = mode === "source" || mode === "inline";
-  const unsaved = editing && draft !== savedDraft;
+  const dirty = inlineRev > 0 || draft !== savedDraft;
+  const unsaved = editing && dirty;
 
   const apply = useCallback(async (app: AppInfo) => {
     setInfo(app);
@@ -165,12 +169,16 @@ export function App() {
    * 让用户选留哪份（docs/02 §写入与外部修改：绝不静默覆盖）。
    */
   const persist = useCallback(async (force = false): Promise<boolean> => {
-    if (!selected || draft === savedDraft) return true;
+    // 行内模式现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）
+    const md = mode === "inline" && editApi.current ? editApi.current() : draft;
+    if (!selected || md === savedDraft) return true;
     setSaveState("saving");
     try {
-      const h = await api.saveNote(selected.rel, draft, force ? undefined : baseHash);
+      const h = await api.saveNote(selected.rel, md, force ? undefined : baseHash);
       setBaseHash(h);
-      setSavedDraft(draft);
+      setDraft(md);
+      setSavedDraft(md);
+      setInlineRev(0);
       setSaveState("saved");
       return true;
     } catch (e) {
@@ -179,17 +187,17 @@ export function App() {
       else setError(message);
       return false;
     }
-  }, [selected, draft, savedDraft, baseHash]);
+  }, [selected, mode, draft, savedDraft, baseHash]);
 
   // 停手 800ms 就存。手动 Ctrl+S 仍然留着——有人不信自动保存
   useEffect(() => {
-    if (!editing || draft === savedDraft) return;
+    if (!editing || !dirty) return;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => void persist(), 800);
     return () => {
       if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     };
-  }, [draft, savedDraft, editing, persist]);
+  }, [inlineRev, draft, dirty, editing, persist]);
 
   const openNote = async (rel: string) => {
     if (editing && !(await persist())) {
@@ -223,6 +231,7 @@ export function App() {
    */
   const loadEditDoc = async (rel: string) => {
     setEditDoc(await api.noteEditDoc(rel));
+    setInlineRev(0);
     setEditEpoch((n) => n + 1);
   };
 
@@ -618,7 +627,8 @@ export function App() {
                         <BlockEditor
                           key={`${selected.rel}:${editEpoch}`}
                           doc={editDoc}
-                          onMarkdown={setDraft}
+                          onEdit={() => setInlineRev((n) => n + 1)}
+                          editApi={editApi}
                         />
                       </div>
                     ) : mode === "source" ? (
