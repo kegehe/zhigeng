@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS blocks (
   props_json    TEXT
 );
 CREATE INDEX IF NOT EXISTS blocks_note_idx ON blocks(note_id, ordinal);
+-- 外键列在**被引用侧删行**时是要查的：没有索引，SQLite 就对每个被删的块全表扫一次。
+-- 增量索引一篇 3000 块的笔记 = 先删 2999 行，于是 2999 × 全表扫。实测（release，
+-- 2026-09-24）一次保存后第一个同步读命令要等 22.5 秒；8 块的短笔记只有 126 毫秒。
+CREATE INDEX IF NOT EXISTS blocks_parent_idx ON blocks(parent_id);
 CREATE TABLE IF NOT EXISTS chunks (
   id          INTEGER PRIMARY KEY,
   note_id     TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -51,6 +55,9 @@ CREATE TABLE IF NOT EXISTS chunks (
   source_hash TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chunks_note_idx ON chunks(note_id);
+-- 同上：删块时这两条外键也要查 chunks
+CREATE INDEX IF NOT EXISTS chunks_start_idx ON chunks(start_block);
+CREATE INDEX IF NOT EXISTS chunks_end_idx ON chunks(end_block);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
   seg, tokenize="unicode61 remove_diacritics 2"
@@ -92,6 +99,12 @@ CREATE TABLE IF NOT EXISTS links (
   created_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS links_to_idx ON links(to_note);
+-- 两条外键都要在 links 里找引用行（删块时 CASCADE / SET NULL）。没有索引时 SQLite 对
+-- 每个被删的块全表扫一次 links。注意：**这不是"保存 3000 块长文档后读命令卡 23 秒"的
+-- 原因**（补上这两个索引实测没变化，2026-09-24 release 构建），那条缺陷仍未定位。
+-- 这里补索引是按规模该做的事，不是那次修复的功劳。
+CREATE INDEX IF NOT EXISTS links_from_idx ON links(from_block);
+CREATE INDEX IF NOT EXISTS links_to_block_idx ON links(to_block);
 
 -- 链接目标的原始写法。插入期登记、rebuild_links 统一解析：
 -- 全量重建按路径顺序进行，指向"后面才入库的笔记"的链接在插入时查不到目标。

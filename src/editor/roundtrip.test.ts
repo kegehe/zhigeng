@@ -80,6 +80,41 @@ describe("块编辑器字节级往返", () => {
     editor.destroy();
   });
 
+  it("3000 块的长文档同样逐字节等于源文件", () => {
+    // 真机栽过：小样本全绿，3000 块的文档装载后只剩一半（装载路径在大文档上被截断）。
+    // 门槛必须在验收 ⑥ 的量级上跑，否则"绿"是骗人的。
+    const blocks = Array.from({ length: 3000 }, (_, i) => ({
+      kind: i % 20 === 0 ? "heading" : i % 9 === 0 ? "bullet" : "paragraph",
+      id: i % 500 === 0 ? `b-long${i}` : null,
+      raw:
+        (i % 20 === 0 ? "## 小节 " : i % 9 === 0 ? "- 列表项 " : "第 ") +
+        i +
+        " 段：讲一个足够长的句子来占位，里面有一个 [链接](https://example.com/" +
+        i +
+        ") 和一点 **强调**。" +
+        (i % 500 === 0 ? ` ^b-long${i}` : "") +
+        "\n",
+      gapBefore: i === 0 ? "\n" : "",
+      content:
+        (i % 20 === 0 ? "小节 " : i % 9 === 0 ? "列表项 " : "第 ") +
+        i +
+        " 段：讲一个足够长的句子来占位，里面有一个 [链接](https://example.com/" +
+        i +
+        ") 和一点 **强调**。",
+      level: i % 20 === 0 ? 2 : null,
+      checked: null,
+      fields: [],
+      children: [],
+    }));
+    const big: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    const src = reassemble(big);
+    expect(src.split("\n").filter(Boolean).length).toBe(3000);
+    const editor = createTestEditor(big);
+    expect(editor.state.doc.childCount).toBe(3000);
+    expect(docToMarkdown(editor.state.doc, big)).toBe(src);
+    editor.destroy();
+  });
+
   it("勾选待办必须落到文件里（块的语义属性不算编辑器账本）", () => {
     const { doc, src: original } = load("02-列表");
     const editor = createTestEditor(doc);
