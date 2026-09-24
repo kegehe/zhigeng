@@ -6,7 +6,7 @@
 //! 3. FTS5 与 vec 的 virtual table **不参与外键级联**，必须按"先取 rowid 再删主表"
 //!    的顺序手工清理，否则留下孤儿索引行让 AI 引用到已删内容。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use md_kernel::{Block, Doc, Kind};
@@ -729,12 +729,20 @@ fn put_link(
     to_block: Option<String>,
     kind: &str,
 ) -> Result<()> {
-    // 锚点可能写着不存在的块（`[[笔记#^b-手滑]]`）。`links.to_block` 有外键，
-    // 不判一下就让整次保存失败——而 docs/02 要的恰恰是"悬空也要登记得住"。
-    let anchor = to_block.filter(|b| {
-        conn.query_row("SELECT 1 FROM blocks WHERE id=?1", [b], |_| Ok(true))
-            .unwrap_or(false)
-    });
+    // `link_targets.to_block` 存的是文件里的裸锚点（`b-xxx`），而 `blocks.id` 是
+    // 带笔记前缀的限定形式。不拼回去就会撞上外键：锚点写着存在的块却"找不到"。
+    // 锚点也可能写错或指向已删的块——那种情况置 NULL，链接本身仍然登记（broken 照旧）。
+    let anchor = match (to_note, to_block) {
+        (Some(note), Some(a)) => {
+            let full = format!("{note}#{a}");
+            conn
+                .query_row("SELECT 1 FROM blocks WHERE id=?1", [&full], |_| Ok(true))
+                .unwrap_or(false)
+                .then_some(full)
+        }
+        _ => None,
+    };
+    let anchor = anchor.as_deref();
     match to_note {
         Some(to) => conn.execute(
             "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
@@ -818,10 +826,26 @@ fn plan_blocks<'a>(doc: &'a Doc, note_id: &str) -> Vec<Planned<'a>> {
         note_id: &str,
         parent: Option<&str>,
         ord: &mut i64,
+        seen: &mut BTreeSet<String>,
         out: &mut Vec<Planned<'a>>,
     ) {
         *ord += 1;
-        let id = b.id.clone().unwrap_or_else(|| format!("{note_id}#{ord}"));
+        // 块 ID 必须带笔记前缀才是全局唯一：模板、复制文件、Obsidian 里另存一份
+        // 都会让两篇笔记出现同一个 `^b-xxx`，用裸锚点当主键会让索引直接建不起来。
+        // 文件里写的仍然是裸锚点（docs/02 §块 ID），只有库内的键是限定形式。
+        let named = match &b.id {
+            Some(anchor) => format!("{note_id}#{anchor}"),
+            None => format!("{note_id}#{ord}"),
+        };
+        // 同一篇里也可能重：`> 文字 ^b-xxx` 这种容器块，锚点会同时被外层块和它
+        // 内部的段落认走。前序遍历，**外层优先**（Obsidian 也是把块 ID 挂在顶层块上），
+        // 后到的那个退回按序号的 ID——总得有个唯一键，且不能整篇索引失败。
+        // 按序号的键不会撞：ord 在整篇内单调递增，而锚点一律以 `b-` 开头。
+        let id = if seen.insert(named.clone()) {
+            named
+        } else {
+            format!("{note_id}#{ord}")
+        };
         out.push(Planned {
             id: id.clone(),
             parent: parent.map(str::to_string),
@@ -829,13 +853,14 @@ fn plan_blocks<'a>(doc: &'a Doc, note_id: &str) -> Vec<Planned<'a>> {
             block: b,
         });
         for c in &b.children {
-            go(c, note_id, Some(&id), ord, out);
+            go(c, note_id, Some(&id), ord, seen, out);
         }
     }
     let mut out = Vec::new();
     let mut ord = 0i64;
+    let mut seen = BTreeSet::new();
     for b in &doc.blocks {
-        go(b, note_id, None, &mut ord, &mut out);
+        go(b, note_id, None, &mut ord, &mut seen, &mut out);
     }
     out
 }

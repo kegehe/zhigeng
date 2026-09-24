@@ -127,6 +127,58 @@ fn check_note_rel(rel: &str) -> Result<()> {
     Ok(())
 }
 
+/// 编辑器要的块树。每个块带**精确源切片**：用户没碰过的块要能字节级原样写回（I4），
+/// 只有真被改过的块才由前端重新产 Markdown。
+///
+/// 与索引走同一个 `md_kernel::parse`，不允许前端另建一套块模型。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditBlock {
+    pub kind: String,
+    pub id: Option<String>,
+    /// 精确源切片（含块 ID 标记与结尾换行）。未改动的块靠它字节级回写。
+    pub raw: String,
+    pub gap_before: String,
+    /// 去掉前缀、缩进与 ID 之后的正文，仍含行内语法。
+    pub content: String,
+    pub level: Option<i64>,
+    pub checked: Option<bool>,
+    pub children: Vec<EditBlock>,
+}
+
+impl From<&md_kernel::Block> for EditBlock {
+    fn from(b: &md_kernel::Block) -> Self {
+        let (level, checked) = match b.kind {
+            md_kernel::Kind::Heading { level, .. } => (Some(level as i64), None),
+            md_kernel::Kind::Todo { checked } => (None, Some(checked)),
+            _ => (None, None),
+        };
+        Self {
+            kind: b.kind.as_str().to_string(),
+            id: b.id.clone(),
+            raw: b.raw.clone(),
+            gap_before: b.gap_before.clone(),
+            content: b.content.clone(),
+            level,
+            checked,
+            children: b.children.iter().map(EditBlock::from).collect(),
+        }
+    }
+}
+
+/// 一整篇给编辑器的输入。front-matter 与文件末尾空白**不是块**，
+/// 不单独带回去的话，保存一次就把用户的 YAML 和结尾换行吃掉了。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditDoc {
+    pub front_matter: String,
+    pub trailing_gap: String,
+    pub blocks: Vec<EditBlock>,
+}
+
+/// 编辑器的保存输入仍是整篇 Markdown（未改动的块由前端原样回显），
+/// 所以这里不需要"逐块提交"的 DTO——少一条会与 `save_note` 分叉的写路径。
+
 impl Hub {
     /// 打开 Vault 并确保索引存在。首启只建表不重建（重建交给显式任务，
     /// 否则冷启动会被全量索引拖过 1.5s 预算）。
@@ -230,6 +282,18 @@ impl Hub {
         Ok(NoteSource {
             hash: crate::hash::content_hash(&bytes),
             content: String::from_utf8_lossy(&bytes).to_string(),
+        })
+    }
+
+    /// 编辑器加载：front-matter + 块树 + 尾部空白，每块带精确源切片。
+    /// 走的是与索引同一个 `md_kernel::parse`，前端不许自己再切一遍块。
+    pub fn note_edit_doc(&self, rel: &str) -> Result<EditDoc> {
+        let src = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
+        let doc = md_kernel::parse(&src);
+        Ok(EditDoc {
+            front_matter: doc.front_matter.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
+            trailing_gap: doc.trailing_gap,
+            blocks: doc.blocks.iter().map(EditBlock::from).collect(),
         })
     }
 

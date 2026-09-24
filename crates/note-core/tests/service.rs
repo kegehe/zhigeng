@@ -331,3 +331,54 @@ fn 锚点写错的链接登记得下来而不是让保存炸掉() {
     assert_eq!(hub.list_notes(10).unwrap().notes.len(), 2);
     assert_eq!(hub.drift().unwrap(), 0);
 }
+
+/// 前端"未改动的块原样回写"这条契约的地基：把 EditDoc 按
+/// front-matter + Σ(gap_before + raw) + trailing_gap 拼回去，必须与源文件逐字节相同。
+/// 用 testdata/roundtrip 的真实语法样本（含表格、公式、setext、未识别语法）来验。
+#[test]
+fn 编辑器的块切片重组后与源文件逐字节相同() {
+    let dir = ["../../testdata/roundtrip", "testdata/roundtrip"]
+        .iter()
+        .find(|p| std::path::Path::new(p).is_dir())
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let mut checked = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().map(|e| e != "md").unwrap_or(true) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).unwrap();
+        let rel = format!("notes/rt-{}", path.file_name().unwrap().to_string_lossy());
+        hub.save_note(&rel, &src).unwrap();
+        let doc = hub.note_edit_doc(&rel).unwrap();
+        let mut out = doc.front_matter.clone();
+        for b in &doc.blocks {
+            out.push_str(&b.gap_before);
+            out.push_str(&b.raw);
+        }
+        out.push_str(&doc.trailing_gap);
+        assert_eq!(out, src, "{} 的块切片拼不回源文件", path.display());
+        checked += 1;
+    }
+    assert!(checked >= 5, "样本没跑全：{checked}");
+}
+
+#[test]
+fn 两篇笔记共用同一个块锚点也要都能索引() {
+    // 模板、复制文件、Obsidian 里另存一份都会造成重复锚点。
+    // 曾经库内主键用裸锚点，第二篇直接 INSERT 失败——整库都建不起来。
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.save_note("notes/甲.md", "第一段共用的锚点。 ^b-k3x9m2v7qa\n")
+        .unwrap();
+    hub.save_note("notes/乙.md", "另一篇也带同一个锚点。 ^b-k3x9m2v7qa\n")
+        .unwrap();
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 2);
+    assert_eq!(hub.drift().unwrap(), 0);
+    assert!(hub.orphan_counts().unwrap().is_clean());
+    // 块级引用仍然精确指向自己那篇的块
+    hub.save_note("notes/丙.md", "指回甲：[[甲#^b-k3x9m2v7qa]]\n").unwrap();
+    assert_eq!(hub.search_keyword("指回甲", 5).unwrap().len(), 1);
+}

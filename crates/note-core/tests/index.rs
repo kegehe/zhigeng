@@ -208,11 +208,13 @@ fn 链接图解析出双向与悬空() {
         })
         .unwrap();
     assert_eq!(broken, 1, "指向不存在的笔记应登记为悬空链接");
-    // 块级引用要能解析到具体块
+    // 块级引用要能解析到具体块。库内的块 ID 是 `{笔记}#{锚点}` 的限定形式
+    // （裸锚点在跨笔记复制时会撞主键，见 plan_blocks），文件里写的仍是裸锚点
     let block_level: i64 = idx
         .conn()
         .query_row(
-            "SELECT count(*) FROM links WHERE to_block='b-k3x9m2v7qa' AND broken=0",
+            "SELECT count(*) FROM links l JOIN blocks b ON b.id = l.to_block
+             WHERE l.to_block LIKE '%#b-k3x9m2v7qa' AND l.broken=0",
             [],
             |r| r.get(0),
         )

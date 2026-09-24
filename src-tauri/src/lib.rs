@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use note_core::capture::Captured;
-use note_core::service::{AppInfo, HitRow, Hub, NoteDetail, NoteList, NoteSource, TrashRow};
+use note_core::service::{AppInfo, EditDoc, HitRow, Hub, NoteDetail, NoteList, NoteSource, TrashRow};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -189,6 +189,12 @@ fn read_raw(state: State<'_, Shared>, rel: String) -> Result<NoteSource, String>
     with_hub(&state, |h| h.read_raw(&rel))
 }
 
+/// 行内编辑器要的整篇结构（每块含精确源切片，未改动的块原样回写）
+#[tauri::command]
+fn note_edit_doc(state: State<'_, Shared>, rel: String) -> Result<EditDoc, String> {
+    with_hub(&state, |h| h.note_edit_doc(&rel))
+}
+
 #[tauri::command]
 fn search_keyword(
     state: State<'_, Shared>,
@@ -337,6 +343,7 @@ pub fn run() {
             list_notes,
             read_note,
             read_raw,
+            note_edit_doc,
             search_keyword,
             vault_default_path,
             vault_open,
