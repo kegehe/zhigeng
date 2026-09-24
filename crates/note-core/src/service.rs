@@ -105,6 +105,14 @@ pub struct TrashRow {
     pub updated_ms: i64,
 }
 
+/// 编辑器的输入：整篇源文本 + 它的 hash。hash 要原样带回来才能做冲突判定。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteSource {
+    pub content: String,
+    pub hash: String,
+}
+
 /// 写路径只准落在"扫描器真的会索引"的位置。
 ///
 /// 判据必须与 `is_indexable_rel` 同源，别自己写一份弱的：只挡首段的话，
@@ -189,119 +197,6 @@ impl Hub {
         Ok(hits.into_iter().map(Into::into).collect())
     }
 
-    /// 供写路径使用：保存一篇笔记并增量重建它的索引。
-    /// 返回内容 hash，UI 用它做乐观并发（下次保存前比对，不一致就是有人在外面改过）。
-    pub fn save_note(&mut self, rel: &str, content: &str) -> Result<String> {
-        check_note_rel(rel)?;
-        let hash = self.vault.write_atomic(rel, content.as_bytes())?;
-        // 只取这一个文件的元数据。以前这里 scan() 了整个 Vault 来拿一个 NoteFile，
-        // 等于每次保存都要给全库算一遍 hash——5000 篇时早就爆掉 8ms 预算了。
-        let file = self.vault.note_file(rel)?;
-        self.index.index_file(&file, content)?;
-        self.index.rebuild_links_of_note(rel)?;
-        // 这篇新写出来的链接里，可能有别人早就悬空指向它的
-        self.index.resolve_broken_to(rel)?;
-        Ok(hash)
-    }
-
-    /// 新建一篇空笔记（标题只进 front-matter，正文留给用户写），返回相对路径。
-    pub fn note_create(&mut self, title: &str) -> Result<String> {
-        let title = title.trim();
-        if title.is_empty() {
-            return Err(Error::Invalid("标题不能为空".into()));
-        }
-        let rel = crate::capture::new_note_rel(&self.vault, title);
-        let content = crate::capture::compose_new(
-            title,
-            &crate::capture::gen_note_id(),
-            &crate::capture::today(),
-        );
-        self.save_note(&rel, &content)?;
-        Ok(rel)
-    }
-
-    /// 移动或换目录（`notes/甲.md` → `archive/甲.md`）。
-    ///
-    /// 没有 front-matter `id:` 的笔记（手写与导入的占大多数）其 id 是从路径推的，
-    /// 换路径等于换 id，旧行匹配不上就会留下指向已消失文件的幽灵行——照样能搜到。
-    /// 所以先按旧路径把行清掉，再把指向它的入链标成悬空，最后按新路径接回来。
-    /// 全程只碰与这篇有关的链接，不做全库重解析。
-    pub fn note_move(&mut self, rel: &str, new_rel: &str) -> Result<()> {
-        check_note_rel(new_rel)?;
-        // 文件操作必须排在索引改动之前：反过来写的话，一次"目标已存在"的失败改名
-        // 就会留下已经被置悬空的入链，而那篇笔记其实原地未动。
-        self.vault.move_file(rel, new_rel)?;
-        let content = String::from_utf8_lossy(&self.vault.read(new_rel)?).to_string();
-        let file = self.vault.note_file(new_rel)?;
-        self.index.break_incoming_links(rel)?;
-        self.index.drop_note(rel)?;
-        self.index.index_file(&file, &content)?;
-        self.index.rebuild_links_of_note(new_rel)?;
-        self.index.resolve_broken_to(new_rel)?;
-        Ok(())
-    }
-
-    /// 改名。文件名与 front-matter 的 title 一起改——列表显示的是 title，
-    /// 只动文件名的话用户会以为没改成功。
-    pub fn note_rename(&mut self, rel: &str, new_stem: &str) -> Result<String> {
-        let want = new_stem.trim();
-        if want.is_empty() {
-            return Err(Error::Invalid("新名字是空的".into()));
-        }
-        let stem = crate::vault::sanitize_file_stem(want);
-        let dir = rel.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
-        let new_rel = format!("{dir}{stem}.md");
-        if new_rel == rel {
-            return Ok(rel.to_string());
-        }
-        // 先把要打的新内容算出来再动文件：读盘或改 YAML 失败时，改名整个不发生，
-        // 不会留下"文件名改了、标题还是旧的"这种半状态。
-        let content = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
-        let patched = crate::capture::set_front_title(&content, &stem);
-        self.note_move(rel, &new_rel)?;
-        if patched != content {
-            self.save_note(&new_rel, &patched)?;
-        }
-        Ok(new_rel)
-    }
-
-    /// 移进回收站。文件本身还在（`.note/trash/`），所以这条操作不丢内容；
-    /// `note_versions` 的 before_delete 快照要等历史/撤销功能一起做（docs/02 §偏差）。
-    pub fn note_trash(&mut self, rel: &str) -> Result<()> {
-        self.vault.move_to_trash(rel)?;
-        // 入链先置悬空再删行：直接删会被 ON DELETE CASCADE 一起带走，
-        // 恢复时就没有"曾经指向它"的记录可接回来了。放在移文件之后是为了让
-        // 失败的删除不先把索引改坏（理由同 note_move）。
-        self.index.break_incoming_links(rel)?;
-        self.index.drop_note(rel)?;
-        Ok(())
-    }
-
-    pub fn list_trash(&self) -> Result<Vec<TrashRow>> {
-        Ok(self
-            .vault
-            .list_trash()?
-            .into_iter()
-            .map(|t| TrashRow {
-                batch: t.batch,
-                rel: t.rel,
-                size: t.size,
-                updated_ms: t.mtime_ms,
-            })
-            .collect())
-    }
-
-    /// 从回收站移回原位并重新解析。原位已被同名笔记占用时报冲突，不覆盖。
-    pub fn note_restore(&mut self, batch: &str, rel: &str) -> Result<()> {
-        self.vault.restore_from_trash(batch, rel)?;
-        let content = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
-        let file = self.vault.note_file(rel)?;
-        self.index.index_file(&file, &content)?;
-        self.index.rebuild_links_of_note(rel)?;
-        self.index.resolve_broken_to(rel)?;
-        Ok(())
-    }
-
     /// 捕获一篇速记：落盘 + 立刻索引。GUI 走的是拆分后的两步版本。
     pub fn capture(&mut self, raw: &str, source_url: Option<&str>) -> Result<Captured> {
         let mut cap = self.capture_write(raw, source_url, true)?;
@@ -328,11 +223,185 @@ impl Hub {
         Ok(())
     }
 
-    /// 原文。只在进入编辑态时才调——`read_note` 每次渲染都要走，把整篇 Markdown
-    /// 塞进它的返回值里会让 3000 块的长文档在普通浏览时也付这份序列化代价。
-    pub fn read_raw(&self, rel: &str) -> Result<String> {
-        Ok(String::from_utf8_lossy(&self.vault.read(rel)?).to_string())
+    /// 编辑器加载一篇：内容和 hash 一起给。前端把 hash 原样带回来，
+    /// 服务端才判断得出"你要存的这份，还是不是磁盘上那份"。
+    pub fn read_raw(&self, rel: &str) -> Result<NoteSource> {
+        let bytes = self.vault.read(rel)?;
+        Ok(NoteSource {
+            hash: crate::hash::content_hash(&bytes),
+            content: String::from_utf8_lossy(&bytes).to_string(),
+        })
     }
+
+    /// **同步那一半**：校验 + 冲突判定 + 原子落盘，返回写后的 hash。
+    ///
+    /// `expect_hash` 是编辑器加载时拿到的 hash。磁盘上的已经变了就说明有人在外面
+    /// 改过（Obsidian、另一台机器同步、自己另开的窗口），这时**拒绝写入**而不是
+    /// 静默覆盖——docs/02 §写入与外部修改 的底线。传 `None` 表示不做判定（导入、
+    /// 迁移等自有顺序的批量路径用）。
+    pub fn save_note_write(
+        &mut self,
+        rel: &str,
+        content: &str,
+        expect_hash: Option<&str>,
+    ) -> Result<String> {
+        check_note_rel(rel)?;
+        if let Some(want) = expect_hash {
+            // 新建的文件磁盘上没有旧版本，note_file 失败即"没有可比对的"，放行
+            if let Ok(cur) = self.vault.note_file(rel) {
+                if cur.content_hash != want {
+                    return Err(Error::Conflict(rel.to_string()));
+                }
+            }
+        }
+        self.vault.write_atomic(rel, content.as_bytes())
+    }
+
+    /// **后台那一半**：按磁盘现状重建这一篇的索引与链接。
+    /// 与落盘分开是因为它实测要 8–10ms，留在同步路径上就把 G6 顶穿了
+    /// （docs/03 §后端调用纪律：8ms–300ms 一律异步 + 乐观 UI）。
+    pub fn index_one(&mut self, rel: &str) -> Result<()> {
+        let file = self.vault.note_file(rel)?;
+        let content = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
+        self.index.index_file(&file, &content)?;
+        self.index.rebuild_links_of_note(rel)?;
+        // 这篇新写出来的链接里，可能有别人早就悬空指向它的
+        self.index.resolve_broken_to(rel)?;
+        Ok(())
+    }
+
+    /// 落盘 + 索引一起做。CLI、测试与批量路径用；GUI 走拆分后的两步。
+    pub fn save_note(&mut self, rel: &str, content: &str) -> Result<String> {
+        let hash = self.save_note_write(rel, content, None)?;
+        self.index_one(rel)?;
+        Ok(hash)
+    }
+
+    /// 新建一篇空笔记的**落盘**部分，返回相对路径（索引留给 `index_one`）。
+    pub fn note_create_file(&mut self, title: &str) -> Result<String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(Error::Invalid("标题不能为空".into()));
+        }
+        let rel = crate::capture::new_note_rel(&self.vault, title);
+        let content = crate::capture::compose_new(
+            title,
+            &crate::capture::gen_note_id(),
+            &crate::capture::today(),
+        );
+        self.save_note_write(&rel, &content, None)?;
+        Ok(rel)
+    }
+
+    /// 新建一篇空笔记（标题只进 front-matter，正文留给用户写），返回相对路径。
+    pub fn note_create(&mut self, title: &str) -> Result<String> {
+        let rel = self.note_create_file(title)?;
+        self.index_one(&rel)?;
+        Ok(rel)
+    }
+
+    /// **同步那一半**：改名或换目录的文件操作。目标已存在会在这里失败，
+    /// 索引一个字都没动——失败的删除/改名不该先把索引改坏。
+    pub fn note_move_file(&mut self, rel: &str, new_rel: &str) -> Result<()> {
+        check_note_rel(new_rel)?;
+        self.vault.move_file(rel, new_rel)
+    }
+
+    /// **后台那一半**：把旧路径的行清掉并按新路径重建。
+    ///
+    /// 没有 front-matter `id:` 的笔记（手写与导入的占大多数）其 id 是从路径推的，
+    /// 换路径等于换 id，旧行匹配不上就会留下指向已消失文件的幽灵行——照样能搜到。
+    /// 入链先置悬空再删行，最后按新路径接回来；全程只碰与这篇相关的链接。
+    pub fn index_moved(&mut self, rel: &str, new_rel: &str) -> Result<()> {
+        if rel == new_rel {
+            return self.index_one(new_rel);
+        }
+        self.index.break_incoming_links(rel)?;
+        self.index.drop_note(rel)?;
+        self.index_one(new_rel)
+    }
+
+    /// 移动或换目录（`notes/甲.md` → `archive/甲.md`），落盘 + 索引一起做。
+    pub fn note_move(&mut self, rel: &str, new_rel: &str) -> Result<()> {
+        self.note_move_file(rel, new_rel)?;
+        self.index_moved(rel, new_rel)
+    }
+
+    /// **同步那一半**：改名 = 算好新内容 + 移文件 + 覆写补丁，全部不碰索引。
+    /// 先把要打的内容算出来再动文件：读盘或改 YAML 失败时改名整个不发生。
+    pub fn note_rename_file(&mut self, rel: &str, new_stem: &str) -> Result<String> {
+        let want = new_stem.trim();
+        if want.is_empty() {
+            return Err(Error::Invalid("新名字是空的".into()));
+        }
+        let stem = crate::vault::sanitize_file_stem(want);
+        let dir = rel.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
+        let new_rel = format!("{dir}{stem}.md");
+        if new_rel == rel {
+            return Ok(rel.to_string());
+        }
+        let content = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
+        let patched = crate::capture::set_front_title(&content, &stem);
+        self.note_move_file(rel, &new_rel)?;
+        if patched != content {
+            self.save_note_write(&new_rel, &patched, None)?;
+        }
+        Ok(new_rel)
+    }
+
+    /// 改名。文件名与 front-matter 的 title 一起改——列表显示的是 title，
+    /// 只动文件名的话用户会以为没改成功。
+    pub fn note_rename(&mut self, rel: &str, new_stem: &str) -> Result<String> {
+        let new_rel = self.note_rename_file(rel, new_stem)?;
+        self.index_moved(rel, &new_rel)?;
+        Ok(new_rel)
+    }
+
+    /// **同步那一半**：把文件移进回收站。
+    pub fn note_trash_file(&mut self, rel: &str) -> Result<()> {
+        self.vault.move_to_trash(rel).map(|_| ())
+    }
+
+    /// **后台那一半**：入链置悬空 + 删掉索引行。
+    /// 直接删行会被 `ON DELETE CASCADE` 把入链一起带走，恢复时就没有
+    /// "曾经指向它"的记录可接回来了。
+    pub fn index_trashed(&mut self, rel: &str) -> Result<()> {
+        self.index.break_incoming_links(rel)?;
+        self.index.drop_note(rel)
+    }
+
+    /// 移进回收站。文件本身还在（`.note/trash/`），所以这条操作不丢内容；
+    /// `note_versions` 的 before_delete 快照要等历史/撤销功能一起做（docs/02 §偏差）。
+    pub fn note_trash(&mut self, rel: &str) -> Result<()> {
+        self.note_trash_file(rel)?;
+        self.index_trashed(rel)
+    }
+
+    pub fn list_trash(&self) -> Result<Vec<TrashRow>> {
+        Ok(self
+            .vault
+            .list_trash()?
+            .into_iter()
+            .map(|t| TrashRow {
+                batch: t.batch,
+                rel: t.rel,
+                size: t.size,
+                updated_ms: t.mtime_ms,
+            })
+            .collect())
+    }
+
+    /// **同步那一半**：从回收站移回原位。原位已被同名笔记占用时报冲突，不覆盖。
+    pub fn note_restore_file(&mut self, batch: &str, rel: &str) -> Result<()> {
+        self.vault.restore_from_trash(batch, rel)
+    }
+
+    /// 恢复并重新解析。
+    pub fn note_restore(&mut self, batch: &str, rel: &str) -> Result<()> {
+        self.note_restore_file(batch, rel)?;
+        self.index_one(rel)
+    }
+
 
     /// 自检：md 与 db 是否一致。UI 的"索引健康"与 CI 都读这两个。
     pub fn drift(&self) -> Result<i64> {

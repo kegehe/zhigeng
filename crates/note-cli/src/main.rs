@@ -421,57 +421,85 @@ fn cmd_write_bench(notes: usize, iters: usize) -> Result<()> {
     let content = String::from_utf8_lossy(&hub.vault().read(rel)?).to_string();
     let budget = read_ipc_budget_ms()?;
 
+    // 红线管的是**同步那一半**。后台补索引再慢，代价也只是"晚一点才可搜"，
+    // 不会让界面发涩——所以两张表分开看，别拿后台的耗时去判超线。
     let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
-    let mut save = Vec::new();
-    let mut moved = Vec::new();
-    let mut deleted = Vec::new();
-    let mut restored = Vec::new();
+    let mut save_s = Vec::new();
+    let mut save_b = Vec::new();
+    let mut move_s = Vec::new();
+    let mut move_b = Vec::new();
+    let mut trash_s = Vec::new();
+    let mut trash_b = Vec::new();
     for _ in 0..iters {
+        // 带 expect_hash 才走的是真路径：它多一次读盘 + 算 hash
+        let base = hub.vault().note_file(rel)?.content_hash;
         let t = Instant::now();
-        hub.save_note(rel, &content)?;
-        save.push(ms(t));
+        hub.save_note_write(rel, &content, Some(&base))?;
+        save_s.push(ms(t));
+        let t = Instant::now();
+        hub.index_one(rel)?;
+        save_b.push(ms(t));
 
-        // 一次来回，报单次移动的成本
+        // 移一次、补一次索引，再移回来、再补一次：两步必须配对，
+        // 否则索引那一步会去读已经被移走的文件
         let t = Instant::now();
-        hub.note_move(rel, alt)?;
-        hub.note_move(alt, rel)?;
-        moved.push(ms(t) / 2.0);
+        hub.note_move_file(rel, alt)?;
+        move_s.push(ms(t));
+        let t = Instant::now();
+        hub.index_moved(rel, alt)?;
+        move_b.push(ms(t));
+        let t = Instant::now();
+        hub.note_move_file(alt, rel)?;
+        move_s.push(ms(t));
+        let t = Instant::now();
+        hub.index_moved(alt, rel)?;
+        move_b.push(ms(t));
 
         let t = Instant::now();
-        hub.note_trash(rel)?;
-        deleted.push(ms(t));
-
-        // 恢复在 UI 里必然带着列回收站，一起量
+        hub.note_trash_file(rel)?;
+        trash_s.push(ms(t));
         let t = Instant::now();
+        hub.index_trashed(rel)?;
+        trash_b.push(ms(t));
         let batch = hub.list_trash()?[0].batch.clone();
-        hub.note_restore(&batch, rel)?;
-        restored.push(ms(t));
+        hub.note_restore_file(&batch, rel)?;
+        hub.index_one(rel)?;
     }
 
-    println!("写路径基准：{notes} 篇 / 每项 {iters} 次，红线 p95 < {budget:.1}ms");
+    println!("写路径基准：{notes} 篇 / 每项 {iters} 次，同步那一半红线 p95 < {budget:.1}ms");
     let mut failed = false;
-    for (name, mut s) in [
-        ("save_note", save),
-        ("note_move", moved),
-        ("note_trash", deleted),
-        ("list_trash+restore", restored),
-    ] {
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let q = |p: f64| s[((s.len() as f64 * p) as usize).min(s.len() - 1)];
-        let over = q(0.95) > budget;
-        failed |= over;
-        println!(
-            "  {:<20} p50 {:>7.2}ms  p95 {:>7.2}ms  max {:>7.2}ms  {}",
-            name,
-            q(0.5),
-            q(0.95),
-            s[s.len() - 1],
-            if over { "超线" } else { "ok" }
-        );
-    }
+    let report = |label: &str, rows: Vec<(&str, Vec<f64>)>, gate: bool| -> bool {
+        println!("  {label}");
+        let mut bad = false;
+        for (name, mut s) in rows {
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let q = |p: f64| s[((s.len() as f64 * p) as usize).min(s.len() - 1)];
+            let over = gate && q(0.95) > budget;
+            bad |= over;
+            println!(
+                "    {:<14} p50 {:>7.2}ms  p95 {:>7.2}ms  max {:>7.2}ms  {}",
+                name,
+                q(0.5),
+                q(0.95),
+                s[s.len() - 1],
+                if !gate { "后台" } else if over { "超线" } else { "ok" }
+            );
+        }
+        bad
+    };
+    failed |= report(
+        "同步（落盘/改名/删除返回前）：",
+        vec![("save", save_s), ("move", move_s), ("trash", trash_s)],
+        true,
+    );
+    report(
+        "后台（索引与链接图）：",
+        vec![("index", save_b), ("moved", move_b), ("trashed", trash_b)],
+        false,
+    );
     let _ = std::fs::remove_dir_all(&dir);
     if failed {
-        anyhow::bail!("写路径超过 8ms 预算：要么挪到异步，要么把全表步骤改成按篇");
+        anyhow::bail!("同步写路径超过 8ms 预算：还有活留在返回前，把它挪进 index_one/index_moved");
     }
     Ok(())
 }

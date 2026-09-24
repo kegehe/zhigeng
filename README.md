@@ -20,9 +20,10 @@
 | 速记捕获：落 `inbox/`、标题推导、重名不覆盖 | `note capture` + 8 项单测 |
 | 服务层端到端：新建→编辑→改名→归档→删除→恢复，全程 md 与索引零漂移；删除后入链转悬空、恢复后自动接回；失败的移动不改索引；悬空锚点不再让保存炸掉 | `cargo test -p note-core --test service`（14 项）+ `note reindex <Vault> --dry-run` |
 | 桌面端：首启选库、列表/搜索/浏览、速记窗 + `Alt+Shift+N`、托盘、明暗主题 | 真机跑通；同步 IPC p95 4.3–4.6ms（G6 预算 8ms） |
+| 编辑与自动保存：停手 800ms 落盘、冲突不覆盖、改名/归档/删除/恢复 | 真机验证；`cargo test -p note-core --test service` |
 | 性能基线与预算检查 | `note bench` / `note ipc-bench` / `note write-bench` / `node scripts/guard.mjs` |
 
-**已知未达标的红线**：写命令（保存/改名/恢复）在 2000 篇时 p95 12–17ms，超过 G6 的 8ms。读命令已达标（4.3–4.6ms）。修法按 [03] §后端调用纪律 走——落盘同步返回、索引后台补 + 事件，与速记捕获同形。`note write-bench` 会直接报超线，别把它当噪声。
+正文是**自动保存**的：停手 800ms 或失焦就落盘（Ctrl+S 仍在）。保存带 `expect_hash`——这篇在你编辑期间被别处改过时，界面会给你"用磁盘版本 / 仍然存我这份"，不静默覆盖。
 
 **没做的**：块级所见即所得编辑器（目前只有整篇 Markdown 源码编辑）、目录树 UI、反链与标签视图、
 导入 Notion/Obsidian、任何 AI 调用（M2 起）、macOS/Linux、云同步。

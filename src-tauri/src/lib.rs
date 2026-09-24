@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use note_core::capture::Captured;
-use note_core::service::{AppInfo, HitRow, Hub, NoteDetail, NoteList, TrashRow};
+use note_core::service::{AppInfo, HitRow, Hub, NoteDetail, NoteList, NoteSource, TrashRow};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -50,6 +50,26 @@ fn with_hub<T: serde::Serialize>(
     f(hub).map_err(|e| e.to_string())
 }
 
+/// 写命令的错误负载。`kind` 是前端要分支的**类型**，不是文案——
+/// 自动保存必须区分"这篇在别处被改过"（要让用户选择保留哪份）和普通的写失败
+/// （只需报错），靠 `to_string()` 匹配字符串迟早碎掉。
+#[derive(serde::Serialize)]
+struct WriteErr {
+    kind: &'static str,
+    message: String,
+}
+
+fn werr(e: note_core::Error) -> WriteErr {
+    WriteErr {
+        kind: if matches!(e, note_core::Error::Conflict(_)) {
+            "conflict"
+        } else {
+            "error"
+        },
+        message: e.to_string(),
+    }
+}
+
 /// 写操作要 `&mut Hub`：SQLite 单写者，M1 之前就用这把锁串行化（docs/03）。
 fn with_hub_mut<T: serde::Serialize>(
     state: &State<'_, Shared>,
@@ -58,6 +78,44 @@ fn with_hub_mut<T: serde::Serialize>(
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     let hub = guard.as_mut().ok_or_else(|| "尚未选择 Vault".to_string())?;
     f(hub).map_err(|e| e.to_string())
+}
+
+/// 同上，但错误带类型。写命令一律用它——前端要按 `kind` 分支。
+fn with_hub_write<T: serde::Serialize>(
+    state: &State<'_, Shared>,
+    f: impl FnOnce(&mut Hub) -> note_core::Result<T>,
+) -> Result<T, WriteErr> {
+    let mut guard = state.0.lock().map_err(werr_io)?;
+    let hub = guard
+        .as_mut()
+        .ok_or_else(|| WriteErr { kind: "error", message: "尚未选择 Vault".into() })?;
+    f(hub).map_err(werr)
+}
+
+fn werr_io(e: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<Hub>>>) -> WriteErr {
+    WriteErr { kind: "error", message: e.to_string() }
+}
+
+/// 落盘同步返回、索引挪到后台线程，做完广播 `note://indexed`。
+///
+/// 这不是"为了快"而牺牲正确性：实测单篇索引要 8–10ms，留在同步路径上就把
+/// G6 的 8ms 红线顶穿了（docs/03 §后端调用纪律 明确 8ms–300ms 一律异步 + 乐观 UI）。
+/// 文件在同步那一步已经 fsync 落盘，所以返回即代表内容不会丢。
+fn reindex_async<F>(app: AppHandle, job: F)
+where
+    F: FnOnce(&mut Hub) -> note_core::Result<()> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let ok = match app.state::<Shared>().0.lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(hub) => job(hub).is_ok(),
+                None => false,
+            },
+            Err(_) => false,
+        };
+        // 前端靠它把"已存"变成"已可搜"；失败时下次 reindex 会兜底
+        let _ = app.emit("note://indexed", ok);
+    });
 }
 
 /// 唤起速记窗。已存在就复用——不重复建窗口，也不打断用户已经输入的内容。
@@ -89,26 +147,10 @@ fn capture_text(
     text: String,
     source_url: Option<String>,
 ) -> Result<Captured, String> {
-    let cap = {
-        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-        let hub = guard.as_mut().ok_or_else(|| "尚未选择 Vault".to_string())?;
-        hub.capture_write(&text, source_url.as_deref(), true)
-            .map_err(|e| e.to_string())?
-    };
+    let cap = with_hub_mut(&state, |h| h.capture_write(&text, source_url.as_deref(), true))?;
     let rel = cap.rel.clone();
     let content = cap.content.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let st = app.state::<Shared>();
-        let indexed = match st.0.lock() {
-            Ok(mut guard) => match guard.as_mut() {
-                Some(hub) => hub.index_captured(&rel, &content).is_ok(),
-                None => false,
-            },
-            Err(_) => false,
-        };
-        // 前端靠它把"已存"变成"已可搜"；失败时下次 reindex 会兜底
-        let _ = app.emit("note://indexed", indexed);
-    });
+    reindex_async(app, move |h| h.index_captured(&rel, &content));
     Ok(cap)
 }
 
@@ -143,7 +185,7 @@ fn read_note(state: State<'_, Shared>, rel: String) -> Result<NoteDetail, String
 }
 
 #[tauri::command]
-fn read_raw(state: State<'_, Shared>, rel: String) -> Result<String, String> {
+fn read_raw(state: State<'_, Shared>, rel: String) -> Result<NoteSource, String> {
     with_hub(&state, |h| h.read_raw(&rel))
 }
 
@@ -176,33 +218,65 @@ fn vault_open(
     Ok(info)
 }
 
+/// 写命令一律"落盘同步 + 索引后台"。返回即代表内容已经在磁盘上，
+/// 索引晚一点才追上——前端收到 `note://indexed` 再校正列表与正文。
 #[tauri::command]
-fn save_note(state: State<'_, Shared>, rel: String, content: String) -> Result<String, String> {
-    with_hub_mut(&state, |h| h.save_note(&rel, &content))
+fn save_note(
+    app: AppHandle,
+    state: State<'_, Shared>,
+    rel: String,
+    content: String,
+    expect_hash: Option<String>,
+) -> Result<String, WriteErr> {
+    let hash = with_hub_write(&state, |h| {
+        h.save_note_write(&rel, &content, expect_hash.as_deref())
+    })?;
+    reindex_async(app, move |h| h.index_one(&rel));
+    Ok(hash)
 }
 
 #[tauri::command]
-fn note_create(state: State<'_, Shared>, title: String) -> Result<String, String> {
-    with_hub_mut(&state, |h| h.note_create(&title))
+fn note_create(
+    app: AppHandle,
+    state: State<'_, Shared>,
+    title: String,
+) -> Result<String, WriteErr> {
+    let rel = with_hub_write(&state, |h| h.note_create_file(&title))?;
+    let shown = rel.clone();
+    reindex_async(app, move |h| h.index_one(&rel));
+    Ok(shown)
 }
 
 #[tauri::command]
 fn note_rename(
+    app: AppHandle,
     state: State<'_, Shared>,
     rel: String,
     new_stem: String,
-) -> Result<String, String> {
-    with_hub_mut(&state, |h| h.note_rename(&rel, &new_stem))
+) -> Result<String, WriteErr> {
+    let new_rel = with_hub_write(&state, |h| h.note_rename_file(&rel, &new_stem))?;
+    let shown = new_rel.clone();
+    reindex_async(app, move |h| h.index_moved(&rel, &new_rel));
+    Ok(shown)
 }
 
 #[tauri::command]
-fn note_move(state: State<'_, Shared>, rel: String, new_rel: String) -> Result<(), String> {
-    with_hub_mut(&state, |h| h.note_move(&rel, &new_rel))
+fn note_move(
+    app: AppHandle,
+    state: State<'_, Shared>,
+    rel: String,
+    new_rel: String,
+) -> Result<(), WriteErr> {
+    with_hub_write(&state, |h| h.note_move_file(&rel, &new_rel))?;
+    reindex_async(app, move |h| h.index_moved(&rel, &new_rel));
+    Ok(())
 }
 
 #[tauri::command]
-fn note_trash(state: State<'_, Shared>, rel: String) -> Result<(), String> {
-    with_hub_mut(&state, |h| h.note_trash(&rel))
+fn note_trash(app: AppHandle, state: State<'_, Shared>, rel: String) -> Result<(), WriteErr> {
+    with_hub_write(&state, |h| h.note_trash_file(&rel))?;
+    reindex_async(app, move |h| h.index_trashed(&rel));
+    Ok(())
 }
 
 #[tauri::command]
@@ -212,11 +286,14 @@ fn list_trash(state: State<'_, Shared>) -> Result<Vec<TrashRow>, String> {
 
 #[tauri::command]
 fn note_restore(
+    app: AppHandle,
     state: State<'_, Shared>,
     batch: String,
     rel: String,
-) -> Result<(), String> {
-    with_hub_mut(&state, |h| h.note_restore(&batch, &rel))
+) -> Result<(), WriteErr> {
+    with_hub_write(&state, |h| h.note_restore_file(&batch, &rel))?;
+    reindex_async(app, move |h| h.index_one(&rel));
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -1,5 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppInfo, CapturedOut, ListNotes, NoteDetail, TrashRow } from "./types";
+import type { AppInfo, CapturedOut, ListNotes, NoteDetail, NoteSource, TrashRow } from "./types";
+
+/**
+ * 写命令失败时给的是结构化负载 `{kind, message}`（冲突要能分支出来），
+ * 其余命令还是裸字符串。两种都从这里过一遍，别在调用点匹配文案。
+ */
+export function describeError(e: unknown): { kind: string; message: string } {
+  if (e && typeof e === "object" && "kind" in e) {
+    const o = e as { kind?: unknown; message?: unknown };
+    return { kind: String(o.kind ?? "error"), message: String(o.message ?? "") };
+  }
+  return { kind: "error", message: String(e) };
+}
 
 export const inTauri = () => "__TAURI_INTERNALS__" in window;
 
@@ -22,9 +34,10 @@ export const api = {
       "search_keyword",
       { query, limit }
     ),
-  /** 原文。只在进入编辑态时取，普通浏览不付序列化整篇的代价 */
-  readRaw: (rel: string) => invoke<string>("read_raw", { rel }),
-  saveNote: (rel: string, content: string) => invoke<string>("save_note", { rel, content }),
+  /** 原文 + hash。hash 要原样带回 saveNote，服务端才判得出"磁盘这份还是不是你看到的那份" */
+  readRaw: (rel: string) => invoke<NoteSource>("read_raw", { rel }),
+  saveNote: (rel: string, content: string, expectHash?: string) =>
+    invoke<string>("save_note", { rel, content, expectHash: expectHash ?? null }),
   /** 返回新建笔记的相对路径 */
   noteCreate: (title: string) => invoke<string>("note_create", { title }),
   noteRename: (rel: string, newStem: string) =>

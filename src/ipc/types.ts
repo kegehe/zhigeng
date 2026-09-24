@@ -39,6 +39,11 @@ export type CapturedOut = {
   indexMs: number;
 };
 
+export type NoteSource = {
+  content: string;
+  hash: string;
+};
+
 export type TrashRow = {
   batch: string;
   rel: string;

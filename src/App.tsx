@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
-import { api, inTauri } from "./ipc/commands";
+import { api, describeError, inTauri } from "./ipc/commands";
 import type { AppInfo, ListNotes, NoteDetail, TrashRow } from "./ipc/types";
 
 type Theme = "system" | "light" | "dark";
@@ -58,9 +58,13 @@ export function App() {
   const [creating, setCreating] = useState(false);
   const [trash, setTrash] = useState<TrashRow[]>([]);
   const [flash, setFlash] = useState<string | null>(null);
+  const [baseHash, setBaseHash] = useState("");
+  const [savedDraft, setSavedDraft] = useState("");
+  const [saveState, setSaveState] = useState<"clean" | "saving" | "saved" | "conflict">("clean");
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
-  const dirty = mode === "edit" || mode === "rename";
+  const saveTimer = useRef<number | null>(null);
+  const unsaved = mode === "edit" && draft !== savedDraft;
 
   const apply = useCallback(async (app: AppInfo) => {
     setInfo(app);
@@ -151,21 +155,49 @@ export function App() {
     return list.map((n) => ({ rel: n.rel, title: n.title, sub: n.rel, ms: n.updatedMs }));
   }, [searching, hits, list]);
 
-  /** 编辑态下任何"会换掉当前内容"的动作都先挡下——静默丢草稿是最恶劣的失败方式 */
-  const blockedByDraft = () => {
-    if (!dirty) return false;
-    setFlash("先保存或取消当前修改（Ctrl+S / Esc）");
-    return true;
-  };
+  /**
+   * 把当前草稿写盘。自动保存、Ctrl+S、失焦、切笔记前都走这一个入口。
+   * 带 `baseHash` 去存，磁盘上已经不是那份就报冲突——**冲突时不覆盖**，
+   * 让用户选留哪份（docs/02 §写入与外部修改：绝不静默覆盖）。
+   */
+  const persist = useCallback(async (force = false): Promise<boolean> => {
+    if (!selected || draft === savedDraft) return true;
+    setSaveState("saving");
+    try {
+      const h = await api.saveNote(selected.rel, draft, force ? undefined : baseHash);
+      setBaseHash(h);
+      setSavedDraft(draft);
+      setSaveState("saved");
+      return true;
+    } catch (e) {
+      const { kind, message } = describeError(e);
+      if (kind === "conflict") setSaveState("conflict");
+      else setError(message);
+      return false;
+    }
+  }, [selected, draft, savedDraft, baseHash]);
+
+  // 停手 800ms 就存。手动 Ctrl+S 仍然留着——有人不信自动保存
+  useEffect(() => {
+    if (mode !== "edit" || draft === savedDraft) return;
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => void persist(), 800);
+    return () => {
+      if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    };
+  }, [draft, savedDraft, mode, persist]);
 
   const openNote = async (rel: string) => {
-    if (blockedByDraft()) return;
+    if (mode === "edit" && !(await persist())) {
+      setFlash("这篇还没存下来——先处理冲突提示");
+      return;
+    }
     setMode("view");
     setFlash(null);
     try {
       setSelected(await api.readNote(rel));
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e).message);
     }
   };
 
@@ -181,25 +213,40 @@ export function App() {
     setSelected(await api.readNote(rel));
   };
 
-  const startEdit = async () => {
-    if (!selected) return;
+  const startEdit = async (rel?: string) => {
+    const target = rel ?? selected?.rel;
+    if (!target) return;
     try {
-      setDraft(await api.readRaw(selected.rel));
+      const src = await api.readRaw(target);
+      setDraft(src.content);
+      setSavedDraft(src.content);
+      setBaseHash(src.hash);
+      setSaveState("clean");
       setMode("edit");
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e).message);
     }
   };
 
-  const saveDraft = async () => {
+  /** 离开编辑态：先确保存下来了，存不下就不离开（不静默丢用户写的东西） */
+  const leaveEdit = async () => {
+    if (!(await persist())) return;
+    const rel = selected?.rel;
+    setMode("view");
+    if (rel) await afterChange(rel);
+  };
+
+  const reloadDisk = async () => {
     if (!selected) return;
     try {
-      await api.saveNote(selected.rel, draft);
-      setMode("view");
-      await afterChange(selected.rel);
-      setFlash("已保存");
+      const src = await api.readRaw(selected.rel);
+      setDraft(src.content);
+      setSavedDraft(src.content);
+      setBaseHash(src.hash);
+      setSaveState("clean");
+      setFlash("已换成磁盘上的版本，你的草稿被丢弃了");
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e).message);
     }
   };
 
@@ -215,21 +262,24 @@ export function App() {
       setMode("view");
       await afterChange(newRel);
     } catch (e) {
-      setError(String(e));
+      const { kind, message } = describeError(e);
+      setError(kind === "conflict" ? `「${next}」这个位置已经有笔记了，没动你的文件` : message);
     }
   };
 
   const toggleArchive = async () => {
     if (!selected) return;
-    const target = selected.rel.startsWith("archive/")
-      ? `notes/${baseOf(selected.rel)}`
-      : `archive/${baseOf(selected.rel)}`;
+    const from = selected.rel;
+    const target = from.startsWith("archive/")
+      ? `notes/${baseOf(from)}`
+      : `archive/${baseOf(from)}`;
     try {
-      await api.noteMove(selected.rel, target);
+      await api.noteMove(from, target);
       await afterChange(target);
-      setFlash(selected.rel.startsWith("archive/") ? "已移出归档" : "已归档");
+      setFlash(from.startsWith("archive/") ? "已移出归档" : "已归档");
     } catch (e) {
-      setError(String(e));
+      const { kind, message } = describeError(e);
+      setError(kind === "conflict" ? "目标目录里已经有同名笔记了，没动你的文件" : message);
     }
   };
 
@@ -241,34 +291,34 @@ export function App() {
       await afterChange(null);
       setFlash(`「${gone}」已移入回收站`);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e).message);
     }
   };
 
   const createNote = async () => {
     const title = newTitle.trim();
-    if (!title || blockedByDraft()) return;
+    if (!title) return;
+    if (mode === "edit" && !(await persist())) return;
     try {
       const rel = await api.noteCreate(title);
       setNewTitle("");
       setCreating(false);
       setQuery("");
-      await afterChange(rel);
+      setSelected(await api.readNote(rel));
       // 建笔记是为了写，不是为了看一个空壳：直接进正文编辑态
-      setDraft(await api.readRaw(rel));
-      setMode("edit");
+      await startEdit(rel);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e).message);
     }
   };
 
   const openTrash = async () => {
-    if (blockedByDraft()) return;
+    if (mode === "edit" && !(await persist())) return;
     try {
       setTrash(await api.listTrash());
       setMode("trash");
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e).message);
     }
   };
 
@@ -278,8 +328,9 @@ export function App() {
       await refresh();
       setFlash(`已恢复 ${t.rel}`);
     } catch (e) {
+      const { kind, message } = describeError(e);
       // 原位被同名笔记占住是正常结果，报出来就行
-      setError(String(e));
+      setError(kind === "conflict" ? `原位已经有 ${t.rel} 了，先给那边改名或删掉` : message);
     } finally {
       setTrash(await api.listTrash().catch(() => []));
     }
@@ -438,18 +489,24 @@ export function App() {
                     <div className="mb-4 flex items-center gap-2 text-xs">
                       {mode === "edit" ? (
                         <>
-                          <button className={btnPrimary} onClick={() => void saveDraft()}>
-                            保存 (Ctrl+S)
+                          <button className={btnPrimary} onClick={() => void leaveEdit()}>
+                            完成 (Esc)
                           </button>
-                          <button
-                            className={btn}
-                            onClick={() => {
-                              setMode("view");
-                              setFlash(null);
-                            }}
+                          <span
+                            className={
+                              saveState === "conflict"
+                                ? "text-danger"
+                                : unsaved
+                                  ? "text-fg-2"
+                                  : "text-fg-disabled"
+                            }
                           >
-                            取消 (Esc)
-                          </button>
+                            {saveState === "conflict"
+                              ? "这篇在别处被改过，你的修改还没落盘"
+                              : saveState === "saving" || unsaved
+                                ? "未保存的修改"
+                                : "已自动保存"}
+                          </span>
                           <span className="text-fg-disabled">整篇 Markdown 源码</span>
                         </>
                       ) : mode === "rename" ? (
@@ -494,6 +551,20 @@ export function App() {
                         {selected.rel}
                       </span>
                     </div>
+                    {saveState === "conflict" ? (
+                      <div className="mb-4 rounded-md border border-danger bg-danger-soft px-3 py-2 text-sm">
+                        这篇在你编辑期间被别处改过（Obsidian、另一个窗口，或同步）。
+                        你写的还在框里，但还没落盘——选一个：
+                        <div className="mt-3 flex gap-2">
+                          <button className={btn} onClick={() => void reloadDisk()}>
+                            丢掉我的，用磁盘版本
+                          </button>
+                          <button className={btn} onClick={() => void persist(true)}>
+                            仍然存我这份
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     {flash ? <p className="mb-4 text-xs text-fg-2">{flash}</p> : null}
 
                     {mode === "edit" ? (
@@ -502,12 +573,14 @@ export function App() {
                         spellCheck={false}
                         value={draft}
                         onChange={(e) => setDraft(e.target.value)}
+                        onBlur={() => void persist()}
                         onKeyDown={(e) => {
                           if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
                             e.preventDefault();
-                            void saveDraft();
+                            void persist();
                           } else if (e.key === "Escape") {
-                            setMode("view");
+                            e.preventDefault();
+                            void leaveEdit();
                           }
                         }}
                         className="h-[60vh] w-full resize-y rounded-md border border-line bg-sunken p-4 font-mono text-mono leading-body text-fg"
