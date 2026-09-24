@@ -73,9 +73,16 @@ pub fn derive_title(raw: &str) -> String {
 }
 
 /// 构造要落盘的 Markdown。**只有这里决定 inbox 文件的格式**，别处不要复制这段。
+///
+/// 标题写进 front-matter，**不再往正文里插一个 `# 标题`**：速记的标题是从第一行推出来的，
+/// 再插一次就是把同一句话写进两块里——搜索会重复命中，用户看到的也是重复内容。
 pub fn compose_capture(raw: &str, id: &str, created: &str, source_url: Option<&str>) -> String {
     let body = raw.trim_end().replace("\r\n", "\n");
-    let mut fm = format!("---\nid: {id}\ncreated: {created}\n");
+    let title = derive_title(&body);
+    let mut fm = format!(
+        "---\nid: {id}\ntitle: {}\ncreated: {created}\n",
+        yaml_quote(&title)
+    );
     if let Some(u) = source_url.filter(|u| !u.trim().is_empty()) {
         // props.source_url 存在即 origin=clipped，决定它是否受注入防护对待（docs/04）
         fm.push_str("props:\n  source_url: ");
@@ -83,9 +90,7 @@ pub fn compose_capture(raw: &str, id: &str, created: &str, source_url: Option<&s
         fm.push('\n');
     }
     fm.push_str("---\n\n");
-    let title = derive_title(&body);
-    let with_h1 = format!("# {title}\n\n{body}\n");
-    format!("{fm}{with_h1}")
+    format!("{fm}{body}\n")
 }
 
 fn yaml_quote(s: &str) -> String {
@@ -199,21 +204,46 @@ mod tests {
     }
 
     #[test]
-    fn 落盘内容含_frontmatter_与标题() {
+    fn 落盘内容含_frontmatter_且正文不重复() {
         let d = tmp();
         let v = open(d.path()).unwrap();
         let c = capture_text(&v, "第一条想法\n再补一句", None).unwrap();
         let body = String::from_utf8(v.read(&c.rel).unwrap()).unwrap();
         assert!(body.starts_with("---\nid: n-"), "{body}");
+        assert!(
+            body.contains("title: \"第一条想法\""),
+            "标题没进 front-matter: {body}"
+        );
         assert!(body.contains(&format!("id: {}", c.id)), "{body}");
         assert!(body.contains("created: 20"), "{body}");
-        assert!(body.contains("\n---\n\n# 第一条想法\n"), "{body}");
         assert!(body.ends_with("再补一句\n"), "{body}");
+        // 回归：曾经在正文里插一个 `# 标题`，而标题就是第一行本身 → 同一句话在正文写两遍，
+        // 用户看到的是重复内容，搜索也会重复命中。判据只看正文部分（front-matter 里出现
+        // 一次标题是应有的）。
+        let body_only = body.splitn(3, "\n---\n").nth(1).unwrap_or("");
+        assert_eq!(
+            body_only.matches("第一条想法").count(),
+            1,
+            "正文重复:\n{body}"
+        );
+        assert!(!body.contains("# 第一条想法"), "不该再往正文插 H1:\n{body}");
         assert!(
             c.rel.starts_with("inbox/") && c.rel.ends_with(".md"),
             "{}",
             c.rel
         );
+    }
+
+    #[test]
+    fn 标题里的冒号与井号不会破坏_yaml() {
+        let d = tmp();
+        let v = open(d.path()).unwrap();
+        let c = capture_text(&v, "a: b # c\n第二行", None).unwrap();
+        let content = String::from_utf8(v.read(&c.rel).unwrap()).unwrap();
+        let fm = content.split("\n---\n").next().unwrap_or("");
+        assert!(fm.contains("title: \"a: b # c\""), "{content}");
+        // 标题推导与 front-matter 必须一致，否则列表显示的标题和文件里的对不上
+        assert_eq!(c.title, "a: b # c");
     }
 
     #[test]

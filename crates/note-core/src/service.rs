@@ -173,6 +173,15 @@ impl Hub {
         Ok(())
     }
 
+    /// 自检：md 与 db 是否一致。UI 的"索引健康"与 CI 都读这两个。
+    pub fn drift(&self) -> Result<i64> {
+        self.index.drift(&self.vault)
+    }
+
+    pub fn orphan_counts(&self) -> Result<crate::index::Orphans> {
+        self.index.orphan_counts()
+    }
+
     pub fn vault(&self) -> &Vault {
         &self.vault
     }
