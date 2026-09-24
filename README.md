@@ -18,7 +18,8 @@
 | Vault 扫描与排除、路径越界拒绝、原子写、回收站、冲突判定 | `cargo test -p note-core --test vault`（10 项） |
 | SQLite 索引：全量/增量重建一致、无孤儿索引行、中文分词检索、隐私硬门、链接图 | `cargo test -p note-core --test index`（10 项） |
 | 速记捕获：落 `inbox/`、标题推导、重名不覆盖 | `note capture` + 8 项单测 |
-| 服务层端到端：新建→编辑→改名→归档→删除→恢复，全程 md 与索引零漂移；删除后入链转悬空、恢复后自动接回；失败的移动不改索引；悬空锚点不再让保存炸掉 | `cargo test -p note-core --test service`（14 项）+ `note reindex <Vault> --dry-run` |
+| 服务层端到端：新建→编辑→改名→归档→删除→恢复，全程 md 与索引零漂移；删除后入链转悬空、恢复后自动接回；失败的移动不改索引；悬空锚点不再让保存炸掉 | `cargo test -p note-core --test service`（16 项）+ `note reindex <Vault> --dry-run` |
+| **块编辑器的无损门槛**：5 个真实语法样本过编辑器后逐字节等于源文件（什么都不改 / 改一处再改回 / 连算两次不变样 / 勾选待办要落盘 / 空笔记不多出换行） | `pnpm test`（`src/editor/roundtrip.test.ts`，22 项）——**这项不绿，行内编辑器不许接到界面上** |
 | 桌面端：首启选库、列表/搜索/浏览、速记窗 + `Alt+Shift+N`、托盘、明暗主题 | 真机跑通；同步 IPC p95 4.3–4.6ms（G6 预算 8ms） |
 | 编辑与自动保存：停手 800ms 落盘、冲突不覆盖、改名/归档/删除/恢复 | 真机验证；`cargo test -p note-core --test service` |
 | 性能基线与预算检查 | `note bench` / `note ipc-bench` / `note write-bench` / `node scripts/guard.mjs` |
@@ -179,7 +180,7 @@ scripts/        guard.mjs：CI 护栏
 
 - **文档是规格不是笔记**：中文文件名带序号；SQL、目录、字段名即最终规格；同一事实只在一处定义（块类型→02，建议枚举→04，阈值→03，范围→01，里程碑→05）。
 - **推翻既定决定要写 ADR**：`docs/adr/` 下 `ADR-NNN-中文标题.md`，说明背景、选项、结论、代价。已有 4 条，其中 ADR-004 是**被实测数据推翻后重写的**。
-- 提交前跑：`cargo fmt --all` · `cargo test --workspace` · `node scripts/guard.mjs`。
+- 提交前跑：`cargo fmt --all` · `cargo test --workspace` · `pnpm test` · `node scripts/guard.mjs`。
 - 测试名用中文短语（读失败信息更快），已配 `#![allow(non_snake_case)]`。
 
 ## 许可

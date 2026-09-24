@@ -47,12 +47,18 @@ export type NoteSource = {
 /** 与 `note_core::service::EditBlock` 对应。raw 是精确源切片，未改动的块靠它字节级回写 */
 export type EditBlock = {
   kind: string;
+  /** md-kernel 的块 ID，不含 `^`；源文本里的写法是 `^b-xxxxxxxxxx`，且**也在 `raw` 里** */
   id: string | null;
+  /** 该块的精确源切片，**含自己那行的结尾换行**（含块 ID 标记）。未改动的块原样回写它 */
   raw: string;
+  /** 与上一块之间的空白，只是"额外的空白"：块自带的换行不在这里 */
   gapBefore: string;
+  /** 去掉前缀、缩进、块 ID 与行内字段之后的正文，仍含行内语法 */
   content: string;
   level: number | null;
   checked: boolean | null;
+  /** 行内字段（`due::` / `done::`）。`content` 里没有它们，重新产出时必须写回 */
+  fields: [string, string][];
   children: EditBlock[];
 };
 

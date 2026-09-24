@@ -160,7 +160,12 @@ pub fn set_front_title(content: &str, title: &str) -> String {
     if !hit {
         return content.to_string();
     }
-    let new_raw = format!("{}{}{}", &fm.raw[..pos], rebuilt, &fm.raw[pos + fm.yaml.len()..]);
+    let new_raw = format!(
+        "{}{}{}",
+        &fm.raw[..pos],
+        rebuilt,
+        &fm.raw[pos + fm.yaml.len()..]
+    );
     format!("{new_raw}{}", &content[fm.raw.len()..])
 }
 
@@ -366,8 +371,7 @@ mod tests {
         let lf = "---\nid: n-a1\ntitle: \"旧\"\ncreated: 2026-09-24\n---\n\n正文\n";
         let got = set_front_title(lf, "新名字");
         assert_eq!(
-            got,
-            "---\nid: n-a1\ntitle: \"新名字\"\ncreated: 2026-09-24\n---\n\n正文\n",
+            got, "---\nid: n-a1\ntitle: \"新名字\"\ncreated: 2026-09-24\n---\n\n正文\n",
             "{got:?}"
         );
 
@@ -382,7 +386,10 @@ mod tests {
         );
 
         // 没有 front-matter：原样返回，不给用户凭空造一段 YAML
-        assert_eq!(set_front_title("只有一段正文\n", "新名字"), "只有一段正文\n");
+        assert_eq!(
+            set_front_title("只有一段正文\n", "新名字"),
+            "只有一段正文\n"
+        );
 
         // 没有闭合分隔线就不是 front-matter（`---` 只是正文里的一条线），原样返回
         let unclosed = "---\n这是一条分隔线\n\ntitle: 这是正文里的冒号\n";

@@ -149,9 +149,7 @@ impl Index {
         // 级联消失，于是先记下这些 links 行、置空、插完新行再指回来。
         let stale_links: Vec<i64> = match &stale {
             Some(old) => {
-                let mut s = self
-                    .conn
-                    .prepare("SELECT id FROM links WHERE to_note=?1")?;
+                let mut s = self.conn.prepare("SELECT id FROM links WHERE to_note=?1")?;
                 let r = s.query_map([old], |x: &Row| x.get::<_, i64>(0))?;
                 r.filter_map(|x| x.ok()).collect()
             }
@@ -243,9 +241,7 @@ impl Index {
         // 按标题写的链接
         let title: Option<String> = self
             .conn
-            .query_row("SELECT title FROM notes WHERE id=?1", [&id], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT title FROM notes WHERE id=?1", [&id], |r| r.get(0))
             .ok();
         if let Some(t) = title.filter(|t| !t.is_empty()) {
             n += self.conn.execute(
@@ -292,7 +288,12 @@ impl Index {
         }
         let mut n = 0usize;
         for (from, target, anchor, kind) in &rows {
-            let base = target.split('#').next().unwrap_or(target).trim().to_string();
+            let base = target
+                .split('#')
+                .next()
+                .unwrap_or(target)
+                .trim()
+                .to_string();
             let to = find_target(&self.conn, &base)?;
             put_link(
                 &self.conn,
@@ -718,7 +719,13 @@ fn insert_resolved(
     kind: &str,
 ) -> Result<()> {
     let base = target.split('#').next().unwrap_or(target).trim();
-    put_link(conn, from_block, lookup.get(base).map(String::as_str), anchor.filter(|a| a.starts_with("b-")).cloned(), kind)
+    put_link(
+        conn,
+        from_block,
+        lookup.get(base).map(String::as_str),
+        anchor.filter(|a| a.starts_with("b-")).cloned(),
+        kind,
+    )
 }
 
 /// 写一行解析结果。`to_note=None` 即悬空。
@@ -735,8 +742,7 @@ fn put_link(
     let anchor = match (to_note, to_block) {
         (Some(note), Some(a)) => {
             let full = format!("{note}#{a}");
-            conn
-                .query_row("SELECT 1 FROM blocks WHERE id=?1", [&full], |_| Ok(true))
+            conn.query_row("SELECT 1 FROM blocks WHERE id=?1", [&full], |_| Ok(true))
                 .unwrap_or(false)
                 .then_some(full)
         }
@@ -783,7 +789,9 @@ fn find_target(conn: &Connection, base: &str) -> Result<Option<String>> {
         "SELECT id, path FROM notes
          WHERE path LIKE '%/'||?1||'.md' OR path LIKE '%/'||?1||'.markdown'",
     )?;
-    let rows = stmt.query_map([base], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let rows = stmt.query_map([base], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     for row in rows.flatten() {
         let tail = row.1.rsplit('/').next().unwrap_or(&row.1);
         if tail == format!("{base}.md") || tail == format!("{base}.markdown") {

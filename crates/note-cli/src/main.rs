@@ -75,6 +75,9 @@ enum Cmd {
         #[arg(long, default_value_t = 2000)]
         notes: usize,
     },
+    /// 把一篇 md 的编辑器结构（front-matter + 块树 + 每块精确源切片）导成 JSON。
+    /// 前端那个字节级往返测试吃的是这份夹具，保证两边用的是同一份解析结果。
+    EditDoc { file: PathBuf },
     /// 解析一篇笔记，校验字节级无损往返并输出块树
     Parse {
         file: PathBuf,
@@ -99,6 +102,14 @@ fn main() -> Result<()> {
         Cmd::Capture { path, text, bench } => cmd_capture(&path, text.as_deref(), bench),
         Cmd::WriteBench { notes, iters } => cmd_write_bench(notes, iters),
         Cmd::WriteProfile { notes } => cmd_write_profile(notes),
+        Cmd::EditDoc { file } => {
+            let src = std::fs::read_to_string(&file)?;
+            println!(
+                "{}",
+                serde_json::to_string(&note_core::service::edit_doc_of(&src))?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -482,7 +493,13 @@ fn cmd_write_bench(notes: usize, iters: usize) -> Result<()> {
                 q(0.5),
                 q(0.95),
                 s[s.len() - 1],
-                if !gate { "后台" } else if over { "超线" } else { "ok" }
+                if !gate {
+                    "后台"
+                } else if over {
+                    "超线"
+                } else {
+                    "ok"
+                }
             );
         }
         bad

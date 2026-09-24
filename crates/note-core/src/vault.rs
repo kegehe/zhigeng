@@ -344,8 +344,9 @@ impl Vault {
                 };
                 // rel 形如 `.note/trash/<批次>/notes/甲.md`，剥掉三段前缀才是原路径
                 let md = entry.metadata();
-                let Some(orig) =
-                    rel.strip_prefix(&format!("{META_DIR}/trash/{name}/")).map(str::to_owned)
+                let Some(orig) = rel
+                    .strip_prefix(&format!("{META_DIR}/trash/{name}/"))
+                    .map(str::to_owned)
                 else {
                     continue;
                 };
@@ -467,7 +468,8 @@ fn trash_batch() -> String {
     )
 }
 
-fn sibling_tmp(target: &Path) -> PathBuf {    let name = target
+fn sibling_tmp(target: &Path) -> PathBuf {
+    let name = target
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "note.md".into());

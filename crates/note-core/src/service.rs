@@ -113,6 +113,21 @@ pub struct NoteSource {
     pub hash: String,
 }
 
+/// 从源文本算出编辑器要的结构。单独拆出来是为了让 CLI 能把块结构导成 JSON 夹具——
+/// 前端那个字节级往返测试必须吃**同一份解析结果**，否则两边各测各的，契约照样会破。
+pub fn edit_doc_of(src: &str) -> EditDoc {
+    let doc = md_kernel::parse(src);
+    EditDoc {
+        front_matter: doc
+            .front_matter
+            .as_ref()
+            .map(|f| f.raw.clone())
+            .unwrap_or_default(),
+        trailing_gap: doc.trailing_gap,
+        blocks: doc.blocks.iter().map(EditBlock::from).collect(),
+    }
+}
+
 /// 写路径只准落在"扫描器真的会索引"的位置。
 ///
 /// 判据必须与 `is_indexable_rel` 同源，别自己写一份弱的：只挡首段的话，
@@ -140,9 +155,14 @@ pub struct EditBlock {
     pub raw: String,
     pub gap_before: String,
     /// 去掉前缀、缩进与 ID 之后的正文，仍含行内语法。
+    ///
+    /// **不含 `due::` 这类行内字段**（与索引同口径，见 `md_kernel::extract_fields`），
+    /// 所以字段另存在 `fields` 里：前端重新产出这一块时必须把它们写回，
+    /// 否则勾选一次待办就把用户的 `due:: 2026-09-30` 洗掉。
     pub content: String,
     pub level: Option<i64>,
     pub checked: Option<bool>,
+    pub fields: Vec<(String, String)>,
     pub children: Vec<EditBlock>,
 }
 
@@ -161,6 +181,7 @@ impl From<&md_kernel::Block> for EditBlock {
             content: b.content.clone(),
             level,
             checked,
+            fields: b.fields.clone(),
             children: b.children.iter().map(EditBlock::from).collect(),
         }
     }
@@ -289,12 +310,7 @@ impl Hub {
     /// 走的是与索引同一个 `md_kernel::parse`，前端不许自己再切一遍块。
     pub fn note_edit_doc(&self, rel: &str) -> Result<EditDoc> {
         let src = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
-        let doc = md_kernel::parse(&src);
-        Ok(EditDoc {
-            front_matter: doc.front_matter.as_ref().map(|f| f.raw.clone()).unwrap_or_default(),
-            trailing_gap: doc.trailing_gap,
-            blocks: doc.blocks.iter().map(EditBlock::from).collect(),
-        })
+        Ok(edit_doc_of(&src))
     }
 
     /// **同步那一半**：校验 + 冲突判定 + 原子落盘，返回写后的 hash。
@@ -399,7 +415,10 @@ impl Hub {
             return Err(Error::Invalid("新名字是空的".into()));
         }
         let stem = crate::vault::sanitize_file_stem(want);
-        let dir = rel.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
+        let dir = rel
+            .rsplit_once('/')
+            .map(|(d, _)| format!("{d}/"))
+            .unwrap_or_default();
         let new_rel = format!("{dir}{stem}.md");
         if new_rel == rel {
             return Ok(rel.to_string());
@@ -465,7 +484,6 @@ impl Hub {
         self.note_restore_file(batch, rel)?;
         self.index_one(rel)
     }
-
 
     /// 自检：md 与 db 是否一致。UI 的"索引健康"与 CI 都读这两个。
     pub fn drift(&self) -> Result<i64> {

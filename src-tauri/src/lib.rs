@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use note_core::capture::Captured;
-use note_core::service::{AppInfo, EditDoc, HitRow, Hub, NoteDetail, NoteList, NoteSource, TrashRow};
+use note_core::service::{
+    AppInfo, EditDoc, HitRow, Hub, NoteDetail, NoteList, NoteSource, TrashRow,
+};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -86,14 +88,18 @@ fn with_hub_write<T: serde::Serialize>(
     f: impl FnOnce(&mut Hub) -> note_core::Result<T>,
 ) -> Result<T, WriteErr> {
     let mut guard = state.0.lock().map_err(werr_io)?;
-    let hub = guard
-        .as_mut()
-        .ok_or_else(|| WriteErr { kind: "error", message: "尚未选择 Vault".into() })?;
+    let hub = guard.as_mut().ok_or_else(|| WriteErr {
+        kind: "error",
+        message: "尚未选择 Vault".into(),
+    })?;
     f(hub).map_err(werr)
 }
 
 fn werr_io(e: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<Hub>>>) -> WriteErr {
-    WriteErr { kind: "error", message: e.to_string() }
+    WriteErr {
+        kind: "error",
+        message: e.to_string(),
+    }
 }
 
 /// 落盘同步返回、索引挪到后台线程，做完广播 `note://indexed`。
@@ -147,7 +153,9 @@ fn capture_text(
     text: String,
     source_url: Option<String>,
 ) -> Result<Captured, String> {
-    let cap = with_hub_mut(&state, |h| h.capture_write(&text, source_url.as_deref(), true))?;
+    let cap = with_hub_mut(&state, |h| {
+        h.capture_write(&text, source_url.as_deref(), true)
+    })?;
     let rel = cap.rel.clone();
     let content = cap.content.clone();
     reindex_async(app, move |h| h.index_captured(&rel, &content));

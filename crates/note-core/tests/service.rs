@@ -110,7 +110,10 @@ fn 新建改名归档删除恢复全程索引不漂() {
     let archived = format!("archive/{file}");
     hub.note_move(&renamed, &archived).unwrap();
     let row = hub.list_notes(10).unwrap().notes.remove(0);
-    assert_eq!((row.rel.as_str(), row.status.as_str()), (archived.as_str(), "archived"));
+    assert_eq!(
+        (row.rel.as_str(), row.status.as_str()),
+        (archived.as_str(), "archived")
+    );
 
     hub.note_trash(&archived).unwrap();
     assert_eq!(hub.list_notes(10).unwrap().notes.len(), 0);
@@ -143,7 +146,8 @@ fn 删掉被引用的笔记时入链退回悬空而不是静默消失() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
     let target = hub.note_create("目标笔记").unwrap();
-    hub.save_note("notes/引用者.md", "看 [[目标笔记]] 那篇。\n").unwrap();
+    hub.save_note("notes/引用者.md", "看 [[目标笔记]] 那篇。\n")
+        .unwrap();
 
     let conn = open_index(&hub);
     assert_eq!(link_stats(&conn), (1, 0), "新建的链接应当解析成功");
@@ -163,15 +167,25 @@ fn 同名笔记删两次在回收站里不互相覆盖() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
     let rel = hub.note_create("同名").unwrap();
-    hub.save_note(&rel, "---\nid: n-keep0001\ntitle: \"同名\"\n---\n\n第一条内容\n")
-        .unwrap();
+    hub.save_note(
+        &rel,
+        "---\nid: n-keep0001\ntitle: \"同名\"\n---\n\n第一条内容\n",
+    )
+    .unwrap();
     hub.note_trash(&rel).unwrap();
-    hub.save_note(&rel, "---\nid: n-keep0002\ntitle: \"同名\"\n---\n\n第二条内容\n")
-        .unwrap();
+    hub.save_note(
+        &rel,
+        "---\nid: n-keep0002\ntitle: \"同名\"\n---\n\n第二条内容\n",
+    )
+    .unwrap();
     hub.note_trash(&rel).unwrap();
 
     let trash = hub.list_trash().unwrap();
-    assert_eq!(trash.len(), 2, "镜像存放会把第二次覆盖到第一次上: {trash:?}");
+    assert_eq!(
+        trash.len(),
+        2,
+        "镜像存放会把第二次覆盖到第一次上: {trash:?}"
+    );
     assert_ne!(trash[0].batch, trash[1].batch);
     let bodies: Vec<String> = trash
         .iter()
@@ -205,7 +219,8 @@ fn 没有_id_的笔记改名后不留孤儿行() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
     // 手写或从 Obsidian 导入的笔记没有 front-matter id，这类才是大多数
-    hub.save_note("notes/无id.md", "# 无 id\n\n正文甲\n").unwrap();
+    hub.save_note("notes/无id.md", "# 无 id\n\n正文甲\n")
+        .unwrap();
     assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
 
     hub.note_rename("notes/无id.md", "换了名字").unwrap();
@@ -218,8 +233,12 @@ fn 没有_id_的笔记改名后不留孤儿行() {
 fn 写路径拒绝落在应用私有目录与非_md_目标() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
-    hub.save_note("notes/甲.md", "正文
-").unwrap();
+    hub.save_note(
+        "notes/甲.md",
+        "正文
+",
+    )
+    .unwrap();
     // 少了这道闸，save_note(".note/index.db") 能把整个索引覆盖掉
     assert!(matches!(
         hub.save_note(".note/index.db", "x"),
@@ -233,7 +252,10 @@ fn 写路径拒绝落在应用私有目录与非_md_目标() {
         hub.note_move("notes/甲.md", "notes/甲.txt"),
         Err(note_core::Error::Invalid(_))
     ));
-    assert!(matches!(hub.note_create("   "), Err(note_core::Error::Invalid(_))));
+    assert!(matches!(
+        hub.note_create("   "),
+        Err(note_core::Error::Invalid(_))
+    ));
     // 深层点目录同样不可写：扫描器不索引它，写进去就是一条永远对不上的漂移行
     assert!(matches!(
         hub.save_note("notes/.hidden/甲.md", "x"),
@@ -253,21 +275,32 @@ fn 保存被引用的笔记不能弄丢别人的入链() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
     let target = hub.note_create("被引用者").unwrap();
-    hub.save_note("notes/引用方.md", "看 [[被引用者]]。
-").unwrap();
+    hub.save_note(
+        "notes/引用方.md",
+        "看 [[被引用者]]。
+",
+    )
+    .unwrap();
     let conn = open_index(&hub);
     assert_eq!(link_stats(&conn), (1, 0), "前置条件：链接已解析");
 
     // index_file 会先删 notes 行再插回来，而 links.to_note 是 ON DELETE CASCADE
-    hub.save_note(&target, "---
+    hub.save_note(
+        &target,
+        "---
 id: n-being001
 title: \"被引用者\"
 ---
 
 改了一版正文
-")
-        .unwrap();
-    assert_eq!(link_stats(&conn), (1, 0), "保存目标笔记之后，引用方的入链不该消失");
+",
+    )
+    .unwrap();
+    assert_eq!(
+        link_stats(&conn),
+        (1, 0),
+        "保存目标笔记之后，引用方的入链不该消失"
+    );
 }
 
 #[test]
@@ -275,10 +308,18 @@ fn 失败的操作不能把索引改坏() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
     let target = hub.note_create("被引用者").unwrap();
-    hub.save_note("notes/引用方.md", "看 [[被引用者]]。
-").unwrap();
-    hub.save_note("notes/占位.md", "占着位置的
-").unwrap();
+    hub.save_note(
+        "notes/引用方.md",
+        "看 [[被引用者]]。
+",
+    )
+    .unwrap();
+    hub.save_note(
+        "notes/占位.md",
+        "占着位置的
+",
+    )
+    .unwrap();
     let conn = open_index(&hub);
     assert_eq!(link_stats(&conn), (1, 0));
 
@@ -286,18 +327,28 @@ fn 失败的操作不能把索引改坏() {
     assert!(hub.note_move(&target, "notes/占位.md").is_err());
     assert_eq!(link_stats(&conn), (1, 0), "移动失败之后入链仍是悬空态");
     assert_eq!(hub.drift().unwrap(), 0);
-    assert!(hub.vault().resolve(&target).unwrap().exists(), "原文件必须还在");
+    assert!(
+        hub.vault().resolve(&target).unwrap().exists(),
+        "原文件必须还在"
+    );
 }
 
 #[test]
 fn 下划线不会被当成_like_通配符() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
-    hub.save_note("notes/a_b.md", "带下划线的笔记
-").unwrap();
-    hub.save_note("notes/引用方.md", "指向不存在的 [[axb#^b-zzz]]。
-")
-        .unwrap();
+    hub.save_note(
+        "notes/a_b.md",
+        "带下划线的笔记
+",
+    )
+    .unwrap();
+    hub.save_note(
+        "notes/引用方.md",
+        "指向不存在的 [[axb#^b-zzz]]。
+",
+    )
+    .unwrap();
     let conn = open_index(&hub);
     assert_eq!(link_stats(&conn), (1, 1), "前置：这条链接本来就悬空");
 
@@ -305,18 +356,30 @@ fn 下划线不会被当成_like_通配符() {
     hub.note_trash("notes/a_b.md").unwrap();
     let t = hub.list_trash().unwrap();
     hub.note_restore(&t[0].batch, "notes/a_b.md").unwrap();
-    assert_eq!(link_stats(&conn), (1, 1), "毫不相干的悬空链接被错接到了 a_b 上");
+    assert_eq!(
+        link_stats(&conn),
+        (1, 1),
+        "毫不相干的悬空链接被错接到了 a_b 上"
+    );
 }
 
 #[test]
 fn 锚点写错的链接登记得下来而不是让保存炸掉() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
-    hub.save_note("notes/存在.md", "存在的
-").unwrap();
+    hub.save_note(
+        "notes/存在.md",
+        "存在的
+",
+    )
+    .unwrap();
     // 目标笔记存在、锚点不存在：外键不该把整次保存打回去
-    hub.save_note("notes/引用方.md", "看 [[存在#^b-手滑写错的]]。
-").unwrap();
+    hub.save_note(
+        "notes/引用方.md",
+        "看 [[存在#^b-手滑写错的]]。
+",
+    )
+    .unwrap();
     let conn = open_index(&hub);
     assert_eq!(link_stats(&conn), (1, 0), "笔记接得上，锚点先丢着");
     let to_block: Option<String> = conn
@@ -360,6 +423,31 @@ fn 编辑器的块切片重组后与源文件逐字节相同() {
         }
         out.push_str(&doc.trailing_gap);
         assert_eq!(out, src, "{} 的块切片拼不回源文件", path.display());
+        // 前端那份夹具是无损测试的输入：解析器一改形状、夹具却还是旧的，
+        // vitest 就会拿过期的形状跑全绿。所以顺带把 JSON 也钉住。
+        let fix = std::path::Path::new(dir)
+            .parent()
+            .unwrap()
+            .join("editdoc")
+            .join(
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .strip_suffix(".md")
+                    .unwrap(),
+            )
+            .with_extension("json");
+        assert_eq!(
+            serde_json::to_string(&doc).unwrap(),
+            std::fs::read_to_string(&fix)
+                .unwrap_or_else(|e| panic!(
+                    "{} 读不到，用 `note edit-doc` 重新生成：{e}",
+                    fix.display()
+                ))
+                .trim_end(),
+            "{} 与 md-kernel 的输出脱节",
+            fix.display()
+        );
         checked += 1;
     }
     assert!(checked >= 5, "样本没跑全：{checked}");
@@ -379,6 +467,7 @@ fn 两篇笔记共用同一个块锚点也要都能索引() {
     assert_eq!(hub.drift().unwrap(), 0);
     assert!(hub.orphan_counts().unwrap().is_clean());
     // 块级引用仍然精确指向自己那篇的块
-    hub.save_note("notes/丙.md", "指回甲：[[甲#^b-k3x9m2v7qa]]\n").unwrap();
+    hub.save_note("notes/丙.md", "指回甲：[[甲#^b-k3x9m2v7qa]]\n")
+        .unwrap();
     assert_eq!(hub.search_keyword("指回甲", 5).unwrap().len(), 1);
 }
