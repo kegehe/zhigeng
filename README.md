@@ -23,6 +23,7 @@
 | 桌面端：首启选库、列表/搜索/浏览、速记窗 + `Alt+Shift+N`、托盘、明暗主题 | 真机跑通；同步 IPC p95 4.3–4.6ms（G6 预算 8ms） |
 | 编辑与自动保存：停手 800ms 落盘、冲突不覆盖、改名/归档/删除/恢复 | 真机验证；`cargo test -p note-core --test service` |
 | 性能基线与预算检查 | `note bench` / `note ipc-bench` / `note write-bench` / `node scripts/guard.mjs` |
+| 长文档（验收 ⑥，2999 块 / 490KB，release 真机）：滚动 0 掉帧、打字事件处理 p95 0.2ms、打开编辑器 297ms | CDP 发可信按键 + Event Timing，方法写在 [ADR-004] §真机测量结果；"输入到呈现 P95 < 16ms" 这条预算在 60Hz 上不可达，待改口径 |
 
 正文是**自动保存**的：停手 800ms 或失焦就落盘（Ctrl+S 仍在）。保存带 `expect_hash`——这篇在你编辑期间被别处改过时，界面会给你"用磁盘版本 / 仍然存我这份"，不静默覆盖。
 
