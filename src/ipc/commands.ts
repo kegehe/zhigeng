@@ -12,6 +12,8 @@ export const api = {
   listNotes: (limit = 200) => invoke<ListNotes>("list_notes", { limit }),
   readNote: (rel: string) => invoke<NoteDetail>("read_note", { rel }),
   vaultOpen: (path: string) => invoke<AppInfo>("vault_open", { path }),
+  /** 默认 Vault 路径由 Rust 侧算：哪块盘可用来决定，前端猜不出来 */
+  vaultDefaultPath: () => invoke<string>("vault_default_path"),
   /** 只等落盘（含 fsync，实测 p95 5.9ms）。索引在 Rust 侧后台补，别等它 */
   captureText: (text: string, sourceUrl?: string) =>
     invoke<CapturedOut>("capture_text", { text, sourceUrl: sourceUrl ?? null }),

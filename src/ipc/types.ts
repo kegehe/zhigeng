@@ -27,6 +27,7 @@ export type AppInfo = {
   version: string;
   vaultPath: string | null;
   indexNotes: number;
+  schemaVersion: number;
 };
 
 export type CapturedOut = {
@@ -44,5 +45,7 @@ export type CommandName =
   | "hide_capture"
   | "list_notes"
   | "read_note"
+  | "save_note"
+  | "vault_default_path"
   | "vault_open"
   | "search_keyword";

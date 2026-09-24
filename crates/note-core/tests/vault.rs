@@ -180,3 +180,15 @@ fn 新笔记默认落点不覆盖已有文件() {
     assert_eq!(rel, "notes/甲-1.md", "{rel}");
     assert!(!v.root().join(&rel).exists());
 }
+
+#[cfg(windows)]
+#[test]
+fn canonicalize_的_扩展长度前缀_不会漏进_root() {
+    // 前缀一旦漏出去，标题栏就会显示 `\\?\D:\Notes`，last-vault.txt 也会带上它
+    let dir = tmp_vault();
+    let verbatim = std::path::PathBuf::from(format!(r"\\?\{}", dir.path().display()));
+    let v = Vault::open(&verbatim).unwrap();
+    let shown = v.root().display().to_string();
+    assert!(!shown.contains(r"\\?\"), "root 仍带前缀：{shown}");
+    assert!(v.root().is_dir(), "{shown}");
+}

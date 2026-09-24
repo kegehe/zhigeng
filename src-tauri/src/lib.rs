@@ -112,7 +112,12 @@ fn hide_capture(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn app_info(state: State<'_, Shared>) -> Result<AppInfo, String> {
-    with_hub(&state, |h| h.app_info())
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    match guard.as_ref() {
+        Some(hub) => hub.app_info().map_err(|e| e.to_string()),
+        // 没选库不是错误：首启界面要拿到"没有库"这个状态，而不是去匹配错误文案
+        None => Ok(AppInfo::no_vault()),
+    }
 }
 
 #[tauri::command]
@@ -139,12 +144,17 @@ fn search_keyword(
 }
 
 #[tauri::command]
+fn vault_default_path() -> String {
+    note_core::vault::default_vault_path().display().to_string()
+}
+
+#[tauri::command]
 fn vault_open(
     app: tauri::AppHandle,
     state: State<'_, Shared>,
     path: String,
 ) -> Result<AppInfo, String> {
-    let hub = Hub::open(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
+    let hub = Hub::open_or_create(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
     let info = hub.app_info().map_err(|e| e.to_string())?;
     *state.0.lock().map_err(|e| e.to_string())? = Some(hub);
     write_last_vault(&app, std::path::Path::new(&path));
@@ -199,6 +209,7 @@ pub fn run() {
             list_notes,
             read_note,
             search_keyword,
+            vault_default_path,
             vault_open,
             save_note
         ])

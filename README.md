@@ -68,6 +68,9 @@ pnpm tauri dev      # 首次编译较久。默认热键 Alt+Shift+N 唤起速记
 pnpm dev            # 只起前端（http://127.0.0.1:1425/），此时没有 Tauri 运行时，界面会明确提示
 ```
 
+第一次启动会让你**确认笔记目录**（默认 `D:\Notes`，没有 D 盘则回落 `%USERPROFILE%\Notes`），
+不会静默建库。确认后速记内容落 `<Vault>/inbox/`，改目录只要重开一个 Vault。
+
 安装包尚未产出：`src-tauri/tauri.conf.json` 里 `bundle.active` 还是 `false`，图标是脚本画的占位字形。
 
 ---

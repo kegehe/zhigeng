@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::capture::Captured;
 use crate::index::{Index, KeywordHit};
-use crate::vault::{NoteKind, NoteStatus, Vault};
+use crate::vault::{NoteKind, NoteStatus, Vault, INBOX_DIR, NOTES_DIR};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Serialize)]
@@ -23,6 +23,19 @@ pub struct AppInfo {
     pub vault_path: Option<String>,
     pub index_notes: i64,
     pub schema_version: i64,
+}
+
+impl AppInfo {
+    /// 还没选 Vault 时的占位。前端必须能区分"库里没内容"和"根本没选库"，
+    /// 靠匹配错误字符串判定会随文案一起碎掉。
+    pub fn no_vault() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            vault_path: None,
+            index_notes: 0,
+            schema_version: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +112,24 @@ impl Hub {
             index,
             root: opened,
         })
+    }
+
+    /// 首启向导确认路径之后用：目录不存在就建出来，并放好 `inbox/` 与 `notes/`，
+    /// 让新库在资源管理器里一眼看得懂。空目录不算 Vault 存在，所以必须先建再 open。
+    pub fn open_or_create(root: &Path) -> Result<Self> {
+        if !root.is_dir() {
+            for dir in [
+                root.to_path_buf(),
+                root.join(INBOX_DIR),
+                root.join(NOTES_DIR),
+            ] {
+                std::fs::create_dir_all(&dir).map_err(|e| Error::Io {
+                    path: dir.display().to_string(),
+                    source: e,
+                })?;
+            }
+        }
+        Self::open(root)
     }
 
     pub fn app_info(&self) -> Result<AppInfo> {

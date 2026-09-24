@@ -52,6 +52,32 @@ pub struct Vault {
     root: PathBuf,
 }
 
+/// 首启默认路径（docs/03 §Windows 侧要点）：`D:\Notes`，没有 D 盘回落
+/// `%USERPROFILE%\Notes`。这里只**算**路径，不创建——创建必须发生在用户
+/// 在首启界面上确认之后，静默建库会让用户找不到自己的笔记在哪。
+pub fn default_vault_path() -> PathBuf {
+    if Path::new("D:\\").is_dir() {
+        return PathBuf::from("D:\\Notes");
+    }
+    match std::env::var_os("USERPROFILE") {
+        Some(home) => PathBuf::from(home).join("Notes"),
+        None => PathBuf::from("Notes"),
+    }
+}
+
+/// 去掉 Windows 的 `\\?\` 前缀；UNC 共享要还原成 `\\server\share`，
+/// 否则 \\?\UNC\ 会被当成普通名字。非 Windows 路径原样返回。
+fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+    let s = p.display().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p
+    }
+}
+
 impl Vault {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
@@ -68,6 +94,10 @@ impl Vault {
             path: root.display().to_string(),
             source: e,
         })?;
+        // Windows 的 canonicalize 会加 `\\?\` 扩展长度前缀。它属于 IO 调用的细节
+        // （docs/03 §长路径：落盘前才加），一旦进标题栏、进 last-vault.txt 就成了
+        // 用户看得见的乱码，所以在这里剥掉。
+        let root = strip_verbatim_prefix(root);
         Ok(Self { root })
     }
 
