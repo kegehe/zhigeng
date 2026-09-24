@@ -105,24 +105,16 @@ pub struct TrashRow {
     pub updated_ms: i64,
 }
 
-/// 写路径只准落在"会被扫描器当成笔记"的位置。
+/// 写路径只准落在"扫描器真的会索引"的位置。
 ///
-/// 少了这道闸，`save_note(".note/index.db")` 能把整个索引覆盖掉，而写到没有扩展名
-/// 的路径则会在库里留下一条 md 侧永远复现不了的行——两者都直接违反 G1。
+/// 判据必须与 `is_indexable_rel` 同源，别自己写一份弱的：只挡首段的话，
+/// `notes/.hidden/甲.md` 会顺利入库，而扫描器永不复现它——等于凭空造一条漂移行。
+/// 少了这道闸，`save_note(".note/index.db")` 还能把整个索引覆盖掉。
 fn check_note_rel(rel: &str) -> Result<()> {
-    let first = rel
-        .replace('\\', "/")
-        .trim_start_matches('/')
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    if first.is_empty() || first.starts_with('.') {
-        return Err(Error::Invalid(format!("笔记不能落在应用私有目录: {rel}")));
-    }
-    let low = rel.to_ascii_lowercase();
-    if !(low.ends_with(".md") || low.ends_with(".markdown")) {
-        return Err(Error::Invalid(format!("笔记必须是 .md 文件: {rel}")));
+    if !crate::vault::is_indexable_rel(rel) {
+        return Err(Error::Invalid(format!(
+            "该路径不会被当成笔记索引，拒绝写入: {rel}"
+        )));
     }
     Ok(())
 }
@@ -236,10 +228,12 @@ impl Hub {
     /// 全程只碰与这篇有关的链接，不做全库重解析。
     pub fn note_move(&mut self, rel: &str, new_rel: &str) -> Result<()> {
         check_note_rel(new_rel)?;
-        self.index.break_incoming_links(rel)?;
+        // 文件操作必须排在索引改动之前：反过来写的话，一次"目标已存在"的失败改名
+        // 就会留下已经被置悬空的入链，而那篇笔记其实原地未动。
         self.vault.move_file(rel, new_rel)?;
         let content = String::from_utf8_lossy(&self.vault.read(new_rel)?).to_string();
         let file = self.vault.note_file(new_rel)?;
+        self.index.break_incoming_links(rel)?;
         self.index.drop_note(rel)?;
         self.index.index_file(&file, &content)?;
         self.index.rebuild_links_of_note(new_rel)?;
@@ -260,9 +254,11 @@ impl Hub {
         if new_rel == rel {
             return Ok(rel.to_string());
         }
-        self.note_move(rel, &new_rel)?;
-        let content = String::from_utf8_lossy(&self.vault.read(&new_rel)?).to_string();
+        // 先把要打的新内容算出来再动文件：读盘或改 YAML 失败时，改名整个不发生，
+        // 不会留下"文件名改了、标题还是旧的"这种半状态。
+        let content = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
         let patched = crate::capture::set_front_title(&content, &stem);
+        self.note_move(rel, &new_rel)?;
         if patched != content {
             self.save_note(&new_rel, &patched)?;
         }
@@ -272,10 +268,11 @@ impl Hub {
     /// 移进回收站。文件本身还在（`.note/trash/`），所以这条操作不丢内容；
     /// `note_versions` 的 before_delete 快照要等历史/撤销功能一起做（docs/02 §偏差）。
     pub fn note_trash(&mut self, rel: &str) -> Result<()> {
-        // 先把指向它的入链标成悬空再删行：直接删会被 ON DELETE CASCADE 一起带走，
-        // 恢复时就没有"曾经指向它"的记录可接回来了
-        self.index.break_incoming_links(rel)?;
         self.vault.move_to_trash(rel)?;
+        // 入链先置悬空再删行：直接删会被 ON DELETE CASCADE 一起带走，
+        // 恢复时就没有"曾经指向它"的记录可接回来了。放在移文件之后是为了让
+        // 失败的删除不先把索引改坏（理由同 note_move）。
+        self.index.break_incoming_links(rel)?;
         self.index.drop_note(rel)?;
         Ok(())
     }

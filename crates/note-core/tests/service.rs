@@ -234,6 +234,15 @@ fn 写路径拒绝落在应用私有目录与非_md_目标() {
         Err(note_core::Error::Invalid(_))
     ));
     assert!(matches!(hub.note_create("   "), Err(note_core::Error::Invalid(_))));
+    // 深层点目录同样不可写：扫描器不索引它，写进去就是一条永远对不上的漂移行
+    assert!(matches!(
+        hub.save_note("notes/.hidden/甲.md", "x"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(
+        hub.save_note("node_modules/甲.md", "x"),
+        Err(note_core::Error::Invalid(_))
+    ));
     // 被拒的操作不能留下任何痕迹
     assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
     assert_eq!(hub.drift().unwrap(), 0);
@@ -259,4 +268,66 @@ title: \"被引用者\"
 ")
         .unwrap();
     assert_eq!(link_stats(&conn), (1, 0), "保存目标笔记之后，引用方的入链不该消失");
+}
+
+#[test]
+fn 失败的操作不能把索引改坏() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let target = hub.note_create("被引用者").unwrap();
+    hub.save_note("notes/引用方.md", "看 [[被引用者]]。
+").unwrap();
+    hub.save_note("notes/占位.md", "占着位置的
+").unwrap();
+    let conn = open_index(&hub);
+    assert_eq!(link_stats(&conn), (1, 0));
+
+    // 目标位置已有文件：移动必须失败。失败不该是"先把入链置悬空，再发现动不了"
+    assert!(hub.note_move(&target, "notes/占位.md").is_err());
+    assert_eq!(link_stats(&conn), (1, 0), "移动失败之后入链仍是悬空态");
+    assert_eq!(hub.drift().unwrap(), 0);
+    assert!(hub.vault().resolve(&target).unwrap().exists(), "原文件必须还在");
+}
+
+#[test]
+fn 下划线不会被当成_like_通配符() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.save_note("notes/a_b.md", "带下划线的笔记
+").unwrap();
+    hub.save_note("notes/引用方.md", "指向不存在的 [[axb#^b-zzz]]。
+")
+        .unwrap();
+    let conn = open_index(&hub);
+    assert_eq!(link_stats(&conn), (1, 1), "前置：这条链接本来就悬空");
+
+    // 恢复 a_b 时按文件名找"曾经指向它"的链接：`a_b` 当 LIKE 模式会把 `axb` 也捞进来
+    hub.note_trash("notes/a_b.md").unwrap();
+    let t = hub.list_trash().unwrap();
+    hub.note_restore(&t[0].batch, "notes/a_b.md").unwrap();
+    assert_eq!(link_stats(&conn), (1, 1), "毫不相干的悬空链接被错接到了 a_b 上");
+}
+
+#[test]
+fn 锚点写错的链接登记得下来而不是让保存炸掉() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.save_note("notes/存在.md", "存在的
+").unwrap();
+    // 目标笔记存在、锚点不存在：外键不该把整次保存打回去
+    hub.save_note("notes/引用方.md", "看 [[存在#^b-手滑写错的]]。
+").unwrap();
+    let conn = open_index(&hub);
+    assert_eq!(link_stats(&conn), (1, 0), "笔记接得上，锚点先丢着");
+    let to_block: Option<String> = conn
+        .query_row("SELECT to_block FROM links LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(to_block, None, "不存在的块不该硬写进 to_block");
+    drop(conn);
+    // 全量重建走的是同一条解析路径，这里也必须活下来
+    drop(hub);
+    std::fs::remove_file(d.path().join(".note/index.db")).unwrap();
+    let hub = hub_in(d.path());
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 2);
+    assert_eq!(hub.drift().unwrap(), 0);
 }

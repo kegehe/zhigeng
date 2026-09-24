@@ -25,7 +25,8 @@ export function Capture() {
   }, []);
 
   const submit = useCallback(async () => {
-    // Enter 没有守卫的话，手快连按两下就会落两篇——按钮是禁用了，键盘路径也得禁
+    // Enter 没有守卫的话，手快连按两下就会落两篇——按钮是禁用了，键盘路径也得禁。
+    // 相应地 `phase` 必须在 useCallback 的依赖里，不然这里读到的是闭包里的旧值，守卫等于没加。
     if (phase === "saving" || phase === "saved") return;
     const body = text.trim();
     if (!body) {
@@ -47,7 +48,7 @@ export function Capture() {
       setPhase("error");
       setErr(String(e));
     }
-  }, [text]);
+  }, [text, phase]);
 
   useEffect(() => {
     let alive = true;

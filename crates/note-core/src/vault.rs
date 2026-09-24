@@ -288,9 +288,12 @@ impl Vault {
     /// `rename` 会**静默覆盖**上一次的回收件，等于用户删第二条时丢了第一条。
     pub fn move_to_trash(&self, rel: &str) -> Result<PathBuf> {
         let src = self.resolve(rel)?;
+        // 落点用归一化后的相对路径算。直接拿调用方给的 `rel` 拼的话，
+        // `/notes/甲.md` 与 `notes\甲.md` 会存成清单里对不上的位置，恢复就找不到原件。
+        let norm = self.relative(&src)?;
         let dst = self
             .trash_dir(&trash_batch())
-            .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            .join(norm.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io {
                 path: parent.display().to_string(),

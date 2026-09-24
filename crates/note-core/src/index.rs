@@ -226,6 +226,9 @@ impl Index {
         };
         let stem = rel.trim_end_matches(".md").trim_end_matches(".markdown");
         let file = stem.rsplit('/').next().unwrap_or(stem);
+        // `key` 直接拼进 LIKE 的话，文件名里的 `_` 就成了通配符：`a_b` 会连 `axb`
+        // 一起匹配上，把毫不相干的悬空链接错接到这篇。转义之后才是字面量前缀。
+        let esc = |k: &str| k.replace('!', "!!").replace('%', "!%").replace('_', "!_");
         let mut n = 0usize;
         for key in [id.as_str(), rel, stem, file] {
             n += self.conn.execute(
@@ -233,8 +236,8 @@ impl Index {
                  WHERE broken=1 AND to_note IS NULL
                    AND from_block IN (
                      SELECT from_block FROM link_targets
-                     WHERE target=?1 OR target LIKE ?1 || '#%')",
-                params![key, key, id],
+                     WHERE target=?1 OR target LIKE ?2 || '#%' ESCAPE '!')",
+                params![key, esc(key), id],
             )?;
         }
         // 按标题写的链接
@@ -250,8 +253,8 @@ impl Index {
                  WHERE broken=1 AND to_note IS NULL
                    AND from_block IN (
                      SELECT from_block FROM link_targets
-                     WHERE target=?1 OR target LIKE ?1 || '#%')",
-                params![t, id],
+                     WHERE target=?1 OR target LIKE ?3 || '#%' ESCAPE '!')",
+                params![t, id, esc(&t)],
             )?;
         }
         Ok(n)
@@ -726,16 +729,22 @@ fn put_link(
     to_block: Option<String>,
     kind: &str,
 ) -> Result<()> {
+    // 锚点可能写着不存在的块（`[[笔记#^b-手滑]]`）。`links.to_block` 有外键，
+    // 不判一下就让整次保存失败——而 docs/02 要的恰恰是"悬空也要登记得住"。
+    let anchor = to_block.filter(|b| {
+        conn.query_row("SELECT 1 FROM blocks WHERE id=?1", [b], |_| Ok(true))
+            .unwrap_or(false)
+    });
     match to_note {
         Some(to) => conn.execute(
             "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
              VALUES(?1,?2,?3,?4,'human',0)",
-            params![from_block, to, to_block, kind],
+            params![from_block, to, anchor, kind],
         )?,
         None => conn.execute(
             "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
              VALUES(?1,NULL,?2,?3,'human',1)",
-            params![from_block, to_block, kind],
+            params![from_block, anchor, kind],
         )?,
     };
     Ok(())
