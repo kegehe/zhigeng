@@ -115,8 +115,18 @@
     font-family: var(--font-mono);
     font-size: var(--text-mono);
     background: var(--bg-sunken);
+    /* 暗色下 sunken(14%) 与页面底(17%) 只差 3% 光亮度，行内码等于隐形。
+       不加亮底色（`--bg-active` 在 [06] 里语义是"交互反馈底"），改成补一条描边 */
+    border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     padding: 0 0.3em;
+  }
+  /* 链接得看得出是链接：继承正文颜色 + 无下划线等于隐形，浏览视图里尤其明显 */
+  .prose-note a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-decoration-color: var(--border-strong);
+    text-underline-offset: 2px;
   }
   .prose-note pre {
     font-family: var(--font-mono);
@@ -130,6 +140,7 @@
   }
   .prose-note pre code {
     background: none;
+    border: none;
     padding: 0;
   }
   .prose-note blockquote {
@@ -137,6 +148,48 @@
     padding-inline-start: var(--space-4);
     border-inline-start: 3px solid var(--border-strong);
     color: var(--text-secondary);
+  }
+
+  /* 块编辑器：浏览与编辑同一套排版（`.prose-note` 给通用排版，这里只补它自己的节点）。
+     列表符号与待办框由 data-marker 带出来，这样"看到的前缀"与"写回文件的前缀"是同一份
+     判定，不会显示一套写另一套。缩进走 `--md-indent`（节点上算好的层数）：直接写
+     padding-left 的内联样式会盖掉 `.prose-note pre` 的 padding，代码块会贴边。 */
+  .block-editor .ProseMirror {
+    min-height: 60vh;
+    cursor: text;
+  }
+  /* 编辑区拿到焦点时给一条安静的描边，而不是全局那圈 accent 环——整篇文章套亮蓝圈太抢眼。
+     注意：**鼠标点进来也会有这圈**，Chrome 对"可编辑的 contenteditable"在指针聚焦时同样判
+     `:focus-visible`（去掉 preventDefault 与程序化 focus() 都一样，真机量过）。要去掉只能
+     `outline: none`，而 [06] §4 禁止那么干，所以先留着；观感要不要另想办法，是样式决定。 */
+  .block-editor .ProseMirror:focus-visible {
+    outline: 2px solid var(--border-strong);
+    outline-offset: var(--space-2);
+    border-radius: var(--radius-md);
+  }
+  .block-editor [data-md-item] {
+    position: relative;
+    margin: 0 0 var(--gap-list);
+    padding-left: calc(1.5em + var(--md-indent, 0) * 1.5em);
+    line-height: var(--leading-body);
+  }
+  .block-editor [data-md-item]::before {
+    content: attr(data-marker);
+    position: absolute;
+    inset-inline-start: calc(var(--md-indent, 0) * 1.5em);
+    color: var(--text-secondary);
+  }
+  /* 行内字段（due:: / done::）不在正文里，却占着文件的字节：灰色带出来，别让它隐形 */
+  .block-editor [data-fields]::after {
+    content: " " attr(data-fields);
+    color: var(--text-disabled);
+  }
+  .block-editor [data-md-raw] {
+    margin-left: calc(var(--md-indent, 0) * 1.5em);
+    white-space: pre-wrap; /* 窄栏里代码/表格换行，别逼人横向滚动 */
+  }
+  .block-editor [data-md-raw]:last-child {
+    margin-bottom: var(--gap-para);
   }
 
   /* Windows 材质（Mica/Acrylic）在降级档下关闭；也用于旧机器掉帧时的兜底 */
@@ -200,30 +253,5 @@
 @keyframes shimmer {
   to {
     background-position: -200% 0;
-  }
-  /* 行内块编辑器：列表符号与待办框由 data-marker 带出来，
-     这样"看到的前缀"与"写回文件的前缀"是同一份判定，不会显示一套写另一套 */
-  .block-editor .ProseMirror {
-    min-height: 60vh;
-    cursor: text;
-  }
-  .block-editor [data-md-item] {
-    position: relative;
-  }
-  .block-editor [data-md-item]::before {
-    content: attr(data-marker);
-    position: absolute;
-    inset-inline-start: 0;
-    color: var(--text-secondary);
-  }
-  .block-editor [data-md-raw] {
-    font-family: var(--font-mono);
-    font-size: var(--text-mono);
-    white-space: pre-wrap;
-    background: var(--bg-sunken);
-    border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
-    padding: var(--space-4);
-    color: var(--text-secondary);
   }
 }

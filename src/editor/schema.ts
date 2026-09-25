@@ -1,6 +1,7 @@
 import { Extension, Mark, Node, type Attributes } from "@tiptap/core";
 import { Plugin, type Transaction } from "@tiptap/pm/state";
 import { history } from "@tiptap/pm/history";
+import { numberedOrdinal } from "./blocks";
 
 /**
  * 与 md-kernel 块模型一一对应的节点集，加上五个行内标记。
@@ -27,10 +28,22 @@ const mdAttributes: Attributes = {
   mdSig: { default: "" },
 };
 
-/** md* 属性是编辑器的私有账本，不进 DOM：否则 raw 整段变成 `<p mdRaw="...">` */
+/** 每个 md* 属性都是编辑器的私有账本，不进 DOM；行内字段额外带一份成 `data-fields` */
 function domAttrs(attrs: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(attrs)) if (!k.startsWith("md")) out[k] = v;
+  return out;
+}
+
+/**
+ * `due::` / `done::` 这类行内字段不在块正文里（md-kernel 与索引同口径把它们剥了），
+ * 但它确实占着文件的一段字节。界面上不显示，用户就会在一截看不见的尾巴前面打字，
+ * 而且永远想不通为什么存完盘多了几个字符。所以带出来给 CSS 画成灰色后缀。
+ */
+function viewAttrs(attrs: Record<string, unknown>): Record<string, unknown> {
+  const out = domAttrs(attrs);
+  const fields = attrs.mdFields as [string, string][] | undefined;
+  if (fields?.length) out["data-fields"] = fields.map(([k, v]) => `${k}:: ${v}`).join(" ");
   return out;
 }
 
@@ -61,7 +74,7 @@ export const MdParagraph = Node.create({
     return [{ tag: "p" }];
   },
   renderHTML({ HTMLAttributes }) {
-    return ["p", domAttrs(HTMLAttributes), 0];
+    return ["p", viewAttrs(HTMLAttributes), 0];
   },
 });
 
@@ -77,7 +90,7 @@ export const MdHeading = Node.create({
   },
   renderHTML({ node, HTMLAttributes }) {
     const level = Math.min(6, Math.max(1, Number(node.attrs.mdLevel ?? 1)));
-    return [`h${level}`, domAttrs(HTMLAttributes), 0];
+    return [`h${level}`, viewAttrs(HTMLAttributes), 0];
   },
 });
 
@@ -96,14 +109,20 @@ export const MdItem = Node.create({
   renderHTML({ node, HTMLAttributes }) {
     const kind = String(node.attrs.mdKind ?? "bullet");
     const marker =
-      kind === "numbered" ? "1." : kind === "todo" ? (node.attrs.mdChecked ? "☑" : "☐") : "•";
+      kind === "numbered"
+        ? `${numberedOrdinal(String(node.attrs.mdRaw ?? ""))}.`
+        : kind === "todo"
+          ? node.attrs.mdChecked
+            ? "☑"
+            : "☐"
+          : "•";
     return [
       "div",
       {
-        ...domAttrs(HTMLAttributes),
+        ...viewAttrs(HTMLAttributes),
         "data-md-item": kind,
         "data-marker": marker,
-        style: `padding-left:${8 + 16 * Number(node.attrs.mdDepth ?? 0)}px`,
+        style: `--md-indent:${Number(node.attrs.mdDepth ?? 0)}`,
       },
       0,
     ];
@@ -137,7 +156,7 @@ export const MdOpaque = Node.create({
       {
         ...domAttrs(HTMLAttributes),
         "data-md-raw": String(node.attrs.mdKind ?? "raw"),
-        style: `padding-left:${8 + 16 * Number(node.attrs.mdDepth ?? 0)}px`,
+        style: `--md-indent:${Number(node.attrs.mdDepth ?? 0)}`,
       },
       ["code", 0],
     ];

@@ -140,6 +140,17 @@ function anchorSuffix(id: unknown): string {
   return typeof id === "string" && id ? ` ^${id}` : "";
 }
 
+/**
+ * 有序项的序号。md-kernel 不把它存成结构化字段——序号只活在 `raw` 的前缀里，
+ * 所以"界面上显示几"与"落盘写几"必须由同一个函数从同一份 `raw` 上算，
+ * 否则改一个字就把 `3.` 落回 `1.`，屏幕上还写着 3。
+ * 新建的块没有历史 `raw`，退回 1：CommonMark 按位置重编号，源码写几不影响语义。
+ */
+export function numberedOrdinal(raw: string): number {
+  const m = /^\s*(\d+)[.)]/.exec(raw);
+  return m ? Number(m[1]) : 1;
+}
+
 /** 行内字段：与 md-kernel `render_block` 同一写法（` key:: value`，跟在正文后、锚点前） */
 function fieldSuffix(fields: unknown): string {
   if (!Array.isArray(fields)) return "";
@@ -163,7 +174,11 @@ function serializeNode(node: PmNode): string {
     case "mdItem": {
       const kind = String(a.mdKind ?? "bullet");
       const marker =
-        kind === "numbered" ? "1. " : kind === "todo" ? `- [${a.mdChecked ? "x" : " "}] ` : "- ";
+        kind === "numbered"
+          ? `${numberedOrdinal(String(a.mdRaw ?? ""))}. `
+          : kind === "todo"
+            ? `- [${a.mdChecked ? "x" : " "}] `
+            : "- ";
       return (
         indent +
         marker +

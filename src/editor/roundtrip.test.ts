@@ -115,6 +115,25 @@ describe("块编辑器字节级往返", () => {
     editor.destroy();
   });
 
+  it("改一个有序项的文字，序号仍按源文件里写的那个数落盘", () => {
+    // 序号不是结构化字段，只活在 raw 的前缀里。显示与落盘必须由同一个函数算，
+    // 否则改一个字就把 `3.` 落回 `1.`，而屏幕上还写着 3
+    const { doc } = load("02-列表");
+    const editor = createTestEditor(doc);
+    let pos = -1;
+    editor.state.doc.forEach((node, offset) => {
+      if (pos < 0 && node.attrs.mdKind === "numbered" && node.textContent.includes("第三项"))
+        pos = offset;
+    });
+    expect(pos).toBeGreaterThanOrEqual(0);
+    const node = editor.state.doc.nodeAt(pos)!;
+    editor.view.dispatch(editor.state.tr.insertText("。", pos + node.nodeSize - 1));
+    const md = docToMarkdown(editor.state.doc, doc);
+    expect(md).toContain("3. 第三项");
+    expect(md).not.toContain("1. 第三项");
+    editor.destroy();
+  });
+
   it("勾选待办必须落到文件里（块的语义属性不算编辑器账本）", () => {
     const { doc, src: original } = load("02-列表");
     const editor = createTestEditor(doc);

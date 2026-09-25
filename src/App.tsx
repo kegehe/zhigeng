@@ -1,14 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri } from "./ipc/commands";
-import type { AppInfo, EditDoc, ListNotes, NoteDetail, TrashRow } from "./ipc/types";
+import type { AppInfo, EditDoc, ListNotes, TrashRow } from "./ipc/types";
 
 type Theme = "system" | "light" | "dark";
 /** 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。 */
 type Mode = "view" | "inline" | "source" | "rename" | "trash";
+/** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
+type Opened = { rel: string; title: string };
 
 function useTheme() {
   const [theme, setTheme] = useState<Theme>("system");
@@ -47,7 +56,7 @@ const btnPrimary =
 export function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [notes, setNotes] = useState<ListNotes | null>(null);
-  const [selected, setSelected] = useState<NoteDetail | null>(null);
+  const [selected, setSelected] = useState<Opened | null>(null);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Awaited<ReturnType<typeof api.searchKeyword>>>([]);
   const [error, setError] = useState<string | null>(null);
@@ -169,6 +178,8 @@ export function App() {
    * 让用户选留哪份（docs/02 §写入与外部修改：绝不静默覆盖）。
    */
   const persist = useCallback(async (force = false): Promise<boolean> => {
+    // 浏览态永不落盘：打开一篇看看就写文件，等于把"看"变成"改"。读一篇笔记永远不该动它
+    if (mode === "view") return true;
     // 行内模式现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）
     const md = mode === "inline" && editApi.current ? editApi.current() : draft;
     if (!selected || md === savedDraft) return true;
@@ -199,6 +210,29 @@ export function App() {
     };
   }, [inlineRev, draft, dirty, editing, persist]);
 
+  /**
+   * 打开一篇要备齐三样：列表要的元信息、正文要的块树、落盘要的 `baseHash`。
+   *
+   * 浏览用的就是块编辑器本身（同一份渲染、同一套排版），所以块树不能等点"编辑"时才现取——
+   * 那样每进一次编辑都要付"整篇解析 + 重挂载"，3000 块实测 297ms，直接把 G7 的 100ms 顶穿。
+   * `editEpoch` 同时递增：编辑器只在换篇或磁盘内容变了时才重挂载。
+   */
+  const loadNote = async (rel: string) => {
+    const [detail, src, blocks] = await Promise.all([
+      api.readNote(rel),
+      api.readRaw(rel),
+      api.noteEditDoc(rel),
+    ]);
+    setSelected(detail);
+    setDraft(src.content);
+    setSavedDraft(src.content);
+    setBaseHash(src.hash);
+    setSaveState("clean");
+    setEditDoc(blocks);
+    setInlineRev(0);
+    setEditEpoch((n) => n + 1);
+  };
+
   const openNote = async (rel: string) => {
     if (editing && !(await persist())) {
       setFlash("这篇还没存下来——先处理冲突提示");
@@ -207,7 +241,7 @@ export function App() {
     setMode("view");
     setFlash(null);
     try {
-      setSelected(await api.readNote(rel));
+      await loadNote(rel);
     } catch (e) {
       setError(describeError(e).message);
     }
@@ -222,29 +256,32 @@ export function App() {
       setMode("view");
       return;
     }
-    setSelected(await api.readNote(rel));
+    await loadNote(rel);
   };
 
   /**
-   * 装载行内编辑要的块树。`editEpoch` 同时递增：编辑器只在 rel 变化时才重挂载，
-   * 而"同一篇看完再进来编辑""冲突后换成磁盘版本"都是同一个 rel、不同的内容。
+   * 进编辑态。行内模式下编辑器浏览时就挂好了，盘没变过就只翻 `editable`。
+   *
+   * 判断"变没变"只能问磁盘的 hash：浏览期间 Obsidian 或另一个窗口可能改过盘。
+   * 这时**不能只把 baseHash 更新成新值**——那等于让过期的一份盖掉外部改动，
+   * 违反 docs/02 的"绝不静默覆盖"。浏览态没有用户写的东西可丢，所以直接重装载。
    */
-  const loadEditDoc = async (rel: string) => {
-    setEditDoc(await api.noteEditDoc(rel));
-    setInlineRev(0);
-    setEditEpoch((n) => n + 1);
-  };
-
   const startEdit = async (rel?: string, surface: "inline" | "source" = "inline") => {
     const target = rel ?? selected?.rel;
     if (!target) return;
     try {
-      const src = await api.readRaw(target);
-      setDraft(src.content);
-      setSavedDraft(src.content);
-      setBaseHash(src.hash);
-      setSaveState("clean");
-      if (surface === "inline") await loadEditDoc(target);
+      if (surface === "inline" && editDoc && selected?.rel === target) {
+        const src = await api.readRaw(target);
+        if (src.hash === baseHash) {
+          setDraft(src.content);
+          setSavedDraft(src.content);
+          setBaseHash(src.hash);
+          setSaveState("clean");
+          setMode("inline");
+          return;
+        }
+      }
+      await loadNote(target);
       setMode(surface);
     } catch (e) {
       setError(describeError(e).message);
@@ -267,20 +304,15 @@ export function App() {
       return;
     }
     if (!selected) return;
-    await loadEditDoc(selected.rel);
+    // 源码框那份刚落过盘：块树得按磁盘上的新内容重算，不能拿旧的挂载顶着
+    await loadNote(selected.rel);
     setMode("inline");
   };
 
   const reloadDisk = async () => {
     if (!selected) return;
     try {
-      const src = await api.readRaw(selected.rel);
-      setDraft(src.content);
-      setSavedDraft(src.content);
-      setBaseHash(src.hash);
-      setSaveState("clean");
-      // 行内模式下编辑器显示的就是被丢弃的那份：不重装载，下一次按键又把旧内容写回去
-      if (mode === "inline") await loadEditDoc(selected.rel);
+      await loadNote(selected.rel);
       setFlash("已换成磁盘上的版本，你的草稿被丢弃了");
     } catch (e) {
       setError(describeError(e).message);
@@ -341,8 +373,8 @@ export function App() {
       setNewTitle("");
       setCreating(false);
       setQuery("");
-      setSelected(await api.readNote(rel));
-      // 建笔记是为了写，不是为了看一个空壳：直接进正文编辑态
+      // 建笔记是为了写，不是为了看一个空壳：直接进正文编辑态。
+      // 装载交给 startEdit——它会把列表元信息、块树与 baseHash 一次取齐
       await startEdit(rel);
     } catch (e) {
       setError(describeError(e).message);
@@ -356,6 +388,17 @@ export function App() {
       setMode("trash");
     } catch (e) {
       setError(describeError(e).message);
+    }
+  };
+
+  /** 正文区（行内与源码共用）的两个键。浏览态按 Esc 什么都不做：那时没有编辑态要离开 */
+  const bodyKeys = <T extends HTMLElement>(e: ReactKeyboardEvent<T>) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      void persist();
+    } else if (e.key === "Escape" && editing) {
+      e.preventDefault();
+      void leaveEdit();
     }
   };
 
@@ -611,22 +654,17 @@ export function App() {
                     ) : null}
                     {flash ? <p className="mb-4 text-xs text-fg-2">{flash}</p> : null}
 
-                    {mode === "inline" && editDoc ? (
+                    {mode !== "source" && editDoc ? (
                       <div
+                        className="block-editor"
                         onBlur={() => void persist()}
-                        onKeyDown={(e) => {
-                          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-                            e.preventDefault();
-                            void persist();
-                          } else if (e.key === "Escape") {
-                            e.preventDefault();
-                            void leaveEdit();
-                          }
-                        }}
+                        onKeyDown={bodyKeys}
                       >
                         <BlockEditor
                           key={`${selected.rel}:${editEpoch}`}
                           doc={editDoc}
+                          editable={mode === "inline"}
+                          onEditStart={() => setMode("inline")}
                           onEdit={() => setInlineRev((n) => n + 1)}
                           editApi={editApi}
                         />
@@ -638,39 +676,16 @@ export function App() {
                         value={draft}
                         onChange={(e) => setDraft(e.target.value)}
                         onBlur={() => void persist()}
-                        onKeyDown={(e) => {
-                          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-                            e.preventDefault();
-                            void persist();
-                          } else if (e.key === "Escape") {
-                            e.preventDefault();
-                            void leaveEdit();
-                          }
-                        }}
+                        onKeyDown={bodyKeys}
                         className="h-[60vh] w-full resize-y rounded-md border border-line bg-sunken p-4 font-mono text-mono leading-body text-fg"
                       />
                     ) : (
-                      <>
-                        <h1>{selected.title}</h1>
-                        {selected.blocks
-                          // 标题就是首行时（速记进来的笔记常见），首块标题不再重复渲染一遍
-                          .filter(
-                            (b, i) =>
-                              !(
-                                i === 0 &&
-                                b.type === "heading" &&
-                                b.text.trim() === selected.title.trim()
-                              )
-                          )
-                          .map((b) => {
-                            if (b.type === "heading") {
-                              const level = b.headingLevel ?? 2;
-                              const Tag = (`h${Math.min(6, Math.max(2, level))}`) as "h2";
-                              return <Tag key={b.id}>{b.text}</Tag>;
-                            }
-                            return <p key={b.id}>{b.text}</p>;
-                          })}
-                      </>
+                      // 装载中：既不给上一篇留着，也不闪一个空框——骨架意味着"路上有东西"
+                      <div className="flex flex-col gap-2">
+                        <div className="skeleton h-4 w-2/3" />
+                        <div className="skeleton h-3 w-full" />
+                        <div className="skeleton h-3 w-5/6" />
+                      </div>
                     )}
                   </>
                 ) : (
