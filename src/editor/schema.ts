@@ -1,7 +1,7 @@
 import { Extension, Mark, Node, type Attributes } from "@tiptap/core";
 import { Plugin, type Transaction } from "@tiptap/pm/state";
 import { history } from "@tiptap/pm/history";
-import { numberedOrdinal } from "./blocks";
+import { numberedMarker } from "./blocks";
 
 /**
  * 与 md-kernel 块模型一一对应的节点集，加上五个行内标记。
@@ -110,7 +110,7 @@ export const MdItem = Node.create({
     const kind = String(node.attrs.mdKind ?? "bullet");
     const marker =
       kind === "numbered"
-        ? `${numberedOrdinal(String(node.attrs.mdRaw ?? ""))}.`
+        ? numberedMarker(String(node.attrs.mdRaw ?? ""))
         : kind === "todo"
           ? node.attrs.mdChecked
             ? "☑"

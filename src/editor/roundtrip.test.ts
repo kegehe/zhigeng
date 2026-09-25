@@ -120,17 +120,25 @@ describe("块编辑器字节级往返", () => {
     // 否则改一个字就把 `3.` 落回 `1.`，而屏幕上还写着 3
     const { doc } = load("02-列表");
     const editor = createTestEditor(doc);
-    let pos = -1;
-    editor.state.doc.forEach((node, offset) => {
-      if (pos < 0 && node.attrs.mdKind === "numbered" && node.textContent.includes("第三项"))
-        pos = offset;
-    });
-    expect(pos).toBeGreaterThanOrEqual(0);
-    const node = editor.state.doc.nodeAt(pos)!;
-    editor.view.dispatch(editor.state.tr.insertText("。", pos + node.nodeSize - 1));
-    const md = docToMarkdown(editor.state.doc, doc);
+    const editNumbered = (needle: string) => {
+      let pos = -1;
+      editor.state.doc.forEach((node, offset) => {
+        if (pos < 0 && node.attrs.mdKind === "numbered" && node.textContent.includes(needle))
+          pos = offset;
+      });
+      expect(pos).toBeGreaterThanOrEqual(0);
+      const node = editor.state.doc.nodeAt(pos)!;
+      editor.view.dispatch(editor.state.tr.insertText("。", pos + node.nodeSize - 1));
+      return docToMarkdown(editor.state.doc, doc);
+    };
+    const md = editNumbered("第三项");
     expect(md).toContain("3. 第三项");
     expect(md).not.toContain("1. 第三项");
+    // 记号本身也不能改：内核把 `1)` 与 `1.` 都认（`Kind::Ordered { marker }` 原样写回），
+    // 编辑器把两种都写成 `.` 就是与内核分叉——同一篇经 UI 与经 CLI 落出不同的字节
+    const paren = editNumbered("记号不该被写成点");
+    expect(paren).toContain("2) 编辑这一项时记号不该被写成点。");
+    expect(paren).not.toContain("2. 编辑这一项");
     editor.destroy();
   });
 

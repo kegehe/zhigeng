@@ -4,7 +4,6 @@ import type {
   CapturedOut,
   EditDoc,
   ListNotes,
-  NoteDetail,
   NoteSource,
   TrashRow,
 } from "./types";
@@ -30,7 +29,6 @@ export const inTauri = () => "__TAURI_INTERNALS__" in window;
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
   listNotes: (limit = 200) => invoke<ListNotes>("list_notes", { limit }),
-  readNote: (rel: string) => invoke<NoteDetail>("read_note", { rel }),
   vaultOpen: (path: string) => invoke<AppInfo>("vault_open", { path }),
   /** 默认 Vault 路径由 Rust 侧算：哪块盘可用来决定，前端猜不出来 */
   vaultDefaultPath: () => invoke<string>("vault_default_path"),

@@ -211,19 +211,21 @@ export function App() {
   }, [inlineRev, draft, dirty, editing, persist]);
 
   /**
-   * 打开一篇要备齐三样：列表要的元信息、正文要的块树、落盘要的 `baseHash`。
+   * 打开一篇要备齐两样：正文要的块树，与落盘要的 `baseHash`。
    *
    * 浏览用的就是块编辑器本身（同一份渲染、同一套排版），所以块树不能等点"编辑"时才现取——
    * 那样每进一次编辑都要付"整篇解析 + 重挂载"，3000 块实测 297ms，直接把 G7 的 100ms 顶穿。
    * `editEpoch` 同时递增：编辑器只在换篇或磁盘内容变了时才重挂载。
+   *
+   * **不再调 `readNote`**：那份按索引平铺的块列表在界面上已经没人用了（正文由编辑器渲染），
+   * 留着等于每开一篇白付一次 IPC。标题只用于一条提示文案，由列表行带进来。
    */
-  const loadNote = async (rel: string) => {
-    const [detail, src, blocks] = await Promise.all([
-      api.readNote(rel),
-      api.readRaw(rel),
-      api.noteEditDoc(rel),
-    ]);
-    setSelected(detail);
+  const loadNote = async (rel: string, title?: string) => {
+    const [src, blocks] = await Promise.all([api.readRaw(rel), api.noteEditDoc(rel)]);
+    setSelected({
+      rel,
+      title: title ?? (selected?.rel === rel ? selected.title : undefined) ?? stemOf(rel),
+    });
     setDraft(src.content);
     setSavedDraft(src.content);
     setBaseHash(src.hash);
@@ -233,7 +235,7 @@ export function App() {
     setEditEpoch((n) => n + 1);
   };
 
-  const openNote = async (rel: string) => {
+  const openNote = async (rel: string, title?: string) => {
     if (editing && !(await persist())) {
       setFlash("这篇还没存下来——先处理冲突提示");
       return;
@@ -241,7 +243,7 @@ export function App() {
     setMode("view");
     setFlash(null);
     try {
-      await loadNote(rel);
+      await loadNote(rel, title);
     } catch (e) {
       setError(describeError(e).message);
     }
@@ -506,7 +508,7 @@ export function App() {
                 return (
                   <button
                     key={n.rel}
-                    onClick={() => void openNote(n.rel)}
+                    onClick={() => void openNote(n.rel, n.title)}
                     className={
                       "block w-full px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) " +
                       (active ? "bg-accent-soft text-fg" : "hover:bg-hover")

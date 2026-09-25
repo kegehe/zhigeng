@@ -11,18 +11,6 @@ export type ListNotes = {
   indexed: number;
 };
 
-export type NoteDetail = {
-  rel: string;
-  title: string;
-  blocks: {
-    id: string;
-    type: string;
-    text: string;
-    headingLevel: number | null;
-    lineStart: number;
-  }[];
-};
-
 export type AppInfo = {
   version: string;
   vaultPath: string | null;

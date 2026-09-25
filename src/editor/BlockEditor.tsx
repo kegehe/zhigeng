@@ -39,6 +39,10 @@ export function BlockEditor({
   const editableRef = useRef(editable);
   const editRef = useRef(onEdit);
   const startRef = useRef(onEditStart);
+  // 打签名那笔事务不是用户改的。`onCreate` 在 `useEditor` 里同步跑完，所以用一个
+  // 一次性闸门把它挡住：不挡，一进编辑态界面就显示"未保存的修改"，800ms 后还白跑
+  // 一次 persist（内容一致所以不会写坏文件，但那圈状态是错的）。
+  const stamping = useRef(true);
   editRef.current = onEdit;
   startRef.current = onEditStart;
 
@@ -49,9 +53,10 @@ export function BlockEditor({
     onCreate: ({ editor: e }) => {
       const tr = stampSignatures(e.state);
       if (tr) e.view.dispatch(tr);
+      stamping.current = false;
     },
     onUpdate: () => {
-      if (editableRef.current) editRef.current();
+      if (editableRef.current && !stamping.current) editRef.current();
     },
   });
 
