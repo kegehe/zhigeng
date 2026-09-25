@@ -5,6 +5,7 @@ import type {
   EditDoc,
   ListNotes,
   NoteSource,
+  SnapshotRow,
   TrashRow,
 } from "./types";
 
@@ -55,4 +56,12 @@ export const api = {
   listTrash: () => invoke<TrashRow[]>("list_trash"),
   noteRestore: (batch: string, rel: string) =>
     invoke<void>("note_restore", { batch, rel }),
+  /** 备份：设目录（path=null + disabled=true 是"我不备份"），返回新的 app_info */
+  backupSet: (path: string | null, disabled: boolean) =>
+    invoke<AppInfo>("backup_set", { path, disabled }),
+  backupRun: () => invoke<SnapshotRow | null>("backup_run"),
+  backupRecent: (limit = 10) => invoke<SnapshotRow[]>("backup_recent", { limit }),
+  backupHistory: (rel: string) => invoke<SnapshotRow[]>("backup_history", { rel }),
+  /** 恢复只等落盘，索引照旧在后台补；被覆盖的那份会先进 .note/conflicts/ */
+  backupRestore: (rel: string, id: string) => invoke<string>("backup_restore", { rel, id }),
 };

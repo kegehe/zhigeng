@@ -501,3 +501,71 @@ fn 后台索引握着它那条连接时读命令照常返回() {
     assert_eq!(hub.drift().unwrap(), 0, "经第二条连接索引后 md 与 db 漂移");
     assert!(hub.orphan_counts().unwrap().is_clean());
 }
+
+#[test]
+fn 从快照恢复一篇被改坏的笔记() {
+    // 验收 ⑨ 的服务层这条路：配置 → 快照 → 改坏 → 恢复。
+    // 走的是界面用的那几个方法，不是直接调 snapshot::run。
+    let d = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.set_backup(Some(backup.path().to_str().unwrap()), false)
+        .unwrap();
+    assert!(hub.app_info().unwrap().backup_dir.is_some());
+
+    let original = "# 周记\n\n第一版内容。\n";
+    hub.save_note("notes/周记.md", original).unwrap();
+    let first = hub.snapshot_now(true).unwrap().expect("该做出第一份");
+
+    hub.save_note("notes/周记.md", "# 周记\n\n被我改坏了。\n")
+        .unwrap();
+    hub.snapshot_now(true).unwrap().unwrap();
+
+    let hist = hub.snapshots_of("notes/周记.md").unwrap();
+    assert_eq!(hist.len(), 2, "两份快照都该含这一篇: {hist:?}");
+    assert_eq!(hist.last().unwrap().id, first.id, "列表要新的在前");
+
+    // 恢复的是"第一份"里那个字节
+    hub.snapshot_restore("notes/周记.md", &first.id).unwrap();
+    assert_eq!(hub.read_raw("notes/周记.md").unwrap().content, original);
+    hub.index_one("notes/周记.md").unwrap();
+    assert_eq!(hub.drift().unwrap(), 0, "恢复后 md 与 db 漂移");
+
+    // 被覆盖掉的那一份必须留得下来
+    let kept = d.path().join(".note/conflicts/notes/周记.md");
+    assert!(
+        kept.exists(),
+        "恢复是覆盖动作，被覆盖的那份得留在 conflicts 里"
+    );
+    assert!(std::fs::read_to_string(&kept)
+        .unwrap()
+        .contains("被我改坏了"));
+}
+
+#[test]
+fn 备份目录没配置时相关命令都是空操作而不是报错() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.capture("没备份的库也该照常能用", None).unwrap();
+    assert!(hub.snapshot_now(true).unwrap().is_none());
+    assert!(hub.snapshots_recent(10).unwrap().is_empty());
+    assert!(hub.snapshots_of("inbox/x.md").unwrap().is_empty());
+    // 显式关掉之后，"还没引导过"这个提醒位就该熄灭
+    assert!(hub.app_info().unwrap().backup_unconfigured);
+    hub.set_backup(None, true).unwrap();
+    let info = hub.app_info().unwrap();
+    assert!(info.backup_disabled && !info.backup_unconfigured);
+}
+
+#[test]
+fn 备份目录指向库内会被拒绝() {
+    let d = tempfile::tempdir().unwrap();
+    let hub = hub_in(d.path());
+    let inside = d.path().join("backups");
+    let err = hub
+        .set_backup(Some(inside.to_str().unwrap()), false)
+        .unwrap_err();
+    assert!(err.to_string().contains("不能放在 Vault 里面"), "{err}");
+    // 拒绝的同时不能留下半套配置
+    assert!(hub.app_info().unwrap().backup_dir.is_none());
+}

@@ -3,10 +3,11 @@
 //! 现在提供 `scan`（应用 docs/02 的排除规则遍历 Vault）与 `parse`（把一篇笔记
 //! 解析成块树并校验无损往返），后续陆续加 `reindex` / `search` / `bench` / `eval`。
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
+use note_core::service::Hub;
 use note_core::vault::Vault;
 
 #[derive(Parser)]
@@ -24,6 +25,29 @@ enum Cmd {
         path: PathBuf,
         #[arg(long)]
         json: bool,
+    },
+    /// 备份：配置第二个目录、跑一次增量快照、看某篇的历史、从快照恢复
+    Backup {
+        /// Vault 根目录
+        path: PathBuf,
+        /// 把备份指到这个目录（另一块盘 / NAS 挂载点）
+        #[arg(long)]
+        dir: Option<String>,
+        /// 显式关掉备份（与"还没配置"是两回事）
+        #[arg(long)]
+        disable: bool,
+        /// 列出最近的快照
+        #[arg(long)]
+        list: bool,
+        /// 列出某篇文件的快照历史
+        #[arg(long)]
+        history: Option<String>,
+        /// 恢复这个相对路径；要配 --from 指定哪一份
+        #[arg(long)]
+        restore: Option<String>,
+        /// 从哪份快照恢复（配合 --restore）
+        #[arg(long)]
+        from: Option<String>,
     },
     /// 全量重建索引并报告统计与自检结果
     Reindex {
@@ -95,6 +119,23 @@ fn main() -> Result<()> {
             file,
             check_canonical,
         } => cmd_parse(file, check_canonical),
+        Cmd::Backup {
+            path,
+            dir,
+            disable,
+            list,
+            history,
+            restore,
+            from,
+        } => cmd_backup(
+            &path,
+            dir.as_deref(),
+            disable,
+            list,
+            history.as_deref(),
+            restore.as_deref(),
+            from.as_deref(),
+        ),
         Cmd::Reindex { path, dry_run } => cmd_reindex(path, dry_run),
         Cmd::Search { path, query, limit } => cmd_search(path, &query, limit),
         Cmd::Bench { notes, out } => cmd_bench(notes, out),
@@ -111,6 +152,80 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// 备份的命令行入口。产品里这些动作各有界面，但按 docs/03 的纪律每一条都要能脱离壳
+/// 验证——CLI 与 UI 走出不一样的备份，是最难查的那类 bug。
+fn cmd_backup(
+    path: &Path,
+    dir: Option<&str>,
+    disable: bool,
+    list: bool,
+    history: Option<&str>,
+    restore: Option<&str>,
+    from: Option<&str>,
+) -> Result<()> {
+    let mut hub = Hub::open(path)?;
+    if dir.is_some() || disable {
+        hub.set_backup(dir, disable)?;
+        if disable {
+            println!("已关闭备份（显式选择，界面不再提醒）");
+        } else {
+            println!("备份目录：{}", dir.unwrap_or(""));
+        }
+        return Ok(());
+    }
+    if let Some(rel) = history {
+        let rows = hub.snapshots_of(rel)?;
+        if rows.is_empty() {
+            println!("快照里没有 {rel}");
+        }
+        for r in rows {
+            println!("{}  {}  收了 {} 个文件", r.id, r.taken_at, r.copied_files);
+        }
+        return Ok(());
+    }
+    if list {
+        let rows = hub.snapshots_recent(30)?;
+        if rows.is_empty() {
+            println!("还没有快照。先用 --dir 指到另一个盘上的目录");
+        }
+        for r in rows {
+            println!(
+                "{}  {}  增量 {} / 全库 {}",
+                r.id, r.taken_at, r.copied_files, r.total_files
+            );
+        }
+        return Ok(());
+    }
+    if let Some(rel) = restore {
+        let id = from.ok_or_else(|| anyhow!("--restore 要配 --from <快照 id>"))?;
+        hub.snapshot_restore(rel, id)?;
+        // CLI 这条路没有"后台"，恢复完顺手重新索引，一步到位更好验
+        hub.index_one(rel)?;
+        println!("已从 {id} 恢复 {rel}，并重新索引");
+        return Ok(());
+    }
+    match hub.snapshot_now(true)? {
+        Some(s) => println!(
+            "快照 {} 完成：增量 {} 个文件，全库 {} 个",
+            s.id, s.copied_files, s.total_files
+        ),
+        None => {
+            let info = hub.app_info()?;
+            println!(
+                "{}",
+                if info.backup_disabled {
+                    "备份已关闭（显式选择）"
+                } else if info.backup_dir.is_none() {
+                    "没配备份目录，什么都没做"
+                } else {
+                    "今天已经快照过了"
+                }
+            );
+        }
+    }
+    Ok(())
 }
 
 fn cmd_reindex(path: PathBuf, dry_run: bool) -> Result<()> {

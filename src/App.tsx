@@ -11,11 +11,11 @@ import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri } from "./ipc/commands";
-import type { AppInfo, EditDoc, ListNotes, TrashRow } from "./ipc/types";
+import type { AppInfo, EditDoc, ListNotes, SnapshotRow, TrashRow } from "./ipc/types";
 
 type Theme = "system" | "light" | "dark";
 /** 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。 */
-type Mode = "view" | "inline" | "source" | "rename" | "trash";
+type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
 
@@ -74,6 +74,10 @@ export function App() {
   const [editEpoch, setEditEpoch] = useState(0);
   const [inlineRev, setInlineRev] = useState(0);
   const [saveState, setSaveState] = useState<"clean" | "saving" | "saved" | "conflict">("clean");
+  const [snapshots, setSnapshots] = useState<SnapshotRow[]>([]);
+  const [history, setHistory] = useState<SnapshotRow[]>([]);
+  const [backupDraft, setBackupDraft] = useState("");
+  const [backupBusy, setBackupBusy] = useState(false);
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
@@ -393,6 +397,69 @@ export function App() {
     }
   };
 
+  /** 备份面板：状态 + 最近几份 + 当前这篇的历史，一次拉齐 */
+  const openBackup = async () => {
+    if (editing && !(await persist())) return;
+    setMode("backup");
+    setBackupDraft(info?.backupDir ?? "");
+    try {
+      setSnapshots(await api.backupRecent(20));
+      setHistory(selected ? await api.backupHistory(selected.rel) : []);
+    } catch (e) {
+      setError(describeError(e).message);
+    }
+  };
+
+  const applyBackup = async (dir: string | null) => {
+    setBackupBusy(true);
+    setError(null);
+    try {
+      setInfo(await api.backupSet(dir, dir === null));
+      setSnapshots(await api.backupRecent(20));
+      setHistory(selected ? await api.backupHistory(selected.rel) : []);
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const runBackup = async () => {
+    setBackupBusy(true);
+    setError(null);
+    try {
+      const made = await api.backupRun();
+      await refresh();
+      setSnapshots(await api.backupRecent(20));
+      // 当前这篇的历史也要跟着刷：不刷的话"立即备份"之后列表还是旧的，
+      // 刚备份完却看不到那一份，用户只会以为没备份上
+      setHistory(selected ? await api.backupHistory(selected.rel) : []);
+      setFlash(made ? `已备份，这次收了 ${made.copiedFiles} 个文件` : "今天已经备份过了，什么都没做");
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const restoreFrom = async (id: string) => {
+    if (!selected) return;
+    const rel = selected.rel;
+    setBackupBusy(true);
+    setError(null);
+    try {
+      await api.backupRestore(rel, id);
+      await loadNote(rel);
+      await refresh();
+      setFlash(`已从 ${id} 恢复。被覆盖的那份留在 .note/conflicts/ 里`);
+      setMode("view");
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
   /** 正文区（行内与源码共用）的两个键。浏览态按 Esc 什么都不做：那时没有编辑态要离开 */
   const bodyKeys = <T extends HTMLElement>(e: ReactKeyboardEvent<T>) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
@@ -534,11 +601,119 @@ export function App() {
               >
                 回收站
               </button>
+              {/* 没备份是产品最坏的状态（docs/03：唯一副本 = 没有副本），入口上要看得见 */}
+              <button
+                className={btn + (mode === "backup" ? " bg-active" : "")}
+                onClick={() => void (mode === "backup" ? setMode("view") : openBackup())}
+              >
+                备份
+                {info && (info.backupUnconfigured || info.backupDisabled) ? (
+                  <span className="ml-1 text-danger">· 没开</span>
+                ) : null}
+              </button>
             </div>
           </aside>
 
           <main className="min-w-0 flex-1 overflow-y-auto">
-            {mode === "trash" ? (
+            {mode === "backup" ? (
+              <div className="px-6 py-8">
+                {/* flash 原本只在正文那一支渲染：结果"立即备份"的反馈在它自己的面板里看不见 */}
+                {flash ? <p className="mb-4 text-sm text-fg-2">{flash}</p> : null}
+                <h2 className="text-xl text-fg">备份与快照</h2>
+                <p className="mt-2 text-sm text-fg-2">
+                  每天第一次启动时，把库里<span className="text-fg">变化过的文件</span>增量快照到另一个目录，保留最近
+                  30 份。文件原样存着，不压缩：备份要能被资源管理器直接看懂。
+                </p>
+                <div className="mt-4 rounded-md border border-line bg-raised px-4 py-3 text-sm">
+                  {info?.backupDisabled ? (
+                    <span className="text-danger">备份已关闭：你的笔记只存在一块盘上。</span>
+                  ) : info?.backupUnconfigured ? (
+                    <span className="text-danger">还没配置备份目录：同上。</span>
+                  ) : (
+                    <span>
+                      备份到{" "}
+                      <span className="font-mono text-mono">{info?.backupDir}</span>
+                      {info?.backupLastAt
+                        ? ` · 最近一次 ${new Date(info.backupLastAt).toLocaleString()}`
+                        : " · 还没做过快照"}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button
+                    className={btnPrimary}
+                    disabled={backupBusy}
+                    onClick={() => void runBackup()}
+                  >
+                    立即备份
+                  </button>
+                  <input
+                    className="min-w-64 flex-1 rounded-md border border-line bg-base px-3 py-1.5 font-mono text-mono text-fg"
+                    value={backupDraft}
+                    spellCheck={false}
+                    placeholder="E:\\笔记备份"
+                    onChange={(e) => setBackupDraft(e.target.value)}
+                  />
+                  <button
+                    className={btn}
+                    disabled={backupBusy || !backupDraft.trim()}
+                    onClick={() => void applyBackup(backupDraft.trim())}
+                  >
+                    用这个目录
+                  </button>
+                  <button className={btn} disabled={backupBusy} onClick={() => void applyBackup(null)}>
+                    不备份
+                  </button>
+                </div>
+
+                <h3 className="mt-8 text-sm text-fg-2">
+                  {selected ? `这篇的快照 · ${selected.title}` : "选一篇笔记，就能看它的历史版本"}
+                </h3>
+                <div className="mt-2 flex flex-col gap-1">
+                  {selected && history.length === 0 ? (
+                    <div className="text-sm text-fg-disabled">快照里还没有这一篇。</div>
+                  ) : null}
+                  {selected
+                    ? history.map((r) => (
+                        <div
+                          key={r.id}
+                          className="flex items-baseline gap-3 rounded-md border border-line bg-raised px-3 py-2"
+                        >
+                          <span className="min-w-0 flex-1 truncate font-mono text-xs">{r.id}</span>
+                          <span className="shrink-0 text-xs text-fg-disabled">
+                            {new Date(r.takenAt).toLocaleString()}
+                          </span>
+                          <button
+                            className={btnPrimary}
+                            disabled={backupBusy}
+                            onClick={() => void restoreFrom(r.id)}
+                          >
+                            恢复成这一版
+                          </button>
+                        </div>
+                      ))
+                    : null}
+                </div>
+
+                <h3 className="mt-8 text-sm text-fg-2">最近的快照</h3>
+                <div className="mt-2 flex flex-col gap-1">
+                  {snapshots.length === 0 ? (
+                    <div className="text-sm text-fg-disabled">还没有快照。</div>
+                  ) : null}
+                  {snapshots.map((r) => (
+                    <div
+                      key={r.id}
+                      className="flex items-baseline gap-3 rounded-md border border-line px-3 py-2 text-sm"
+                    >
+                      <span className="min-w-0 flex-1 truncate font-mono text-xs">{r.id}</span>
+                      <span className="shrink-0 text-xs text-fg-disabled">
+                        {new Date(r.takenAt).toLocaleString()} · 增量 {r.copiedFiles} / 全库 {r.totalFiles}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : mode === "trash" ? (
               <div className="px-6 py-8">
                 <h2 className="text-xl text-fg">回收站</h2>
                 <p className="mt-2 text-sm text-fg-2">

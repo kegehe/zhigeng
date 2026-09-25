@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use crate::capture::Captured;
 use crate::index::{Index, KeywordHit};
+use crate::snapshot;
 use crate::vault::{NoteKind, NoteStatus, Vault, INBOX_DIR, NOTES_DIR};
 use crate::{Error, Result};
 
@@ -24,6 +25,12 @@ pub struct AppInfo {
     pub vault_path: Option<String>,
     pub index_notes: i64,
     pub schema_version: i64,
+    /// 备份三态：目录 / 显式关掉 / 还没引导过（前端据此决定要不要提醒）。
+    /// 判据来自 docs/03 §备份——"唯一副本 = 没有副本"。
+    pub backup_dir: Option<String>,
+    pub backup_disabled: bool,
+    pub backup_unconfigured: bool,
+    pub backup_last_at: Option<String>,
 }
 
 impl AppInfo {
@@ -35,6 +42,10 @@ impl AppInfo {
             vault_path: None,
             index_notes: 0,
             schema_version: 0,
+            backup_dir: None,
+            backup_disabled: false,
+            backup_unconfigured: false,
+            backup_last_at: None,
         }
     }
 }
@@ -196,6 +207,34 @@ impl From<&md_kernel::Block> for EditBlock {
     }
 }
 
+/// 后台快照入口：只要一个 `Vault` 克隆，**不排主锁**。
+/// 壳里的"当日首次启动后跑一次"用的就是这条（docs/03 §备份、§后端调用纪律）。
+pub fn snapshot_vault(vault: &Vault, force: bool) -> Result<Option<SnapshotRow>> {
+    Ok(snapshot::run(vault, force)?.map(SnapshotRow::of))
+}
+
+/// 快照列表里的一行。**不把 `files` 全量清单带给前端**——那是两万条 hash，
+/// 界面只要"哪一份、什么时候、动了几个文件"。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotRow {
+    pub id: String,
+    pub taken_at: String,
+    pub copied_files: usize,
+    pub total_files: usize,
+}
+
+impl SnapshotRow {
+    fn of(s: snapshot::Snapshot) -> Self {
+        Self {
+            id: s.id,
+            taken_at: s.taken_at,
+            copied_files: s.copied.len(),
+            total_files: s.files.len(),
+        }
+    }
+}
+
 /// 一整篇给编辑器的输入。front-matter 与文件末尾空白**不是块**，
 /// 不单独带回去的话，保存一次就把用户的 YAML 和结尾换行吃掉了。
 #[derive(Debug, Clone, Serialize)]
@@ -297,12 +336,101 @@ impl Hub {
     }
 
     pub fn app_info(&self) -> Result<AppInfo> {
+        let cfg = snapshot::load_config(&self.vault)?;
+        let last = match cfg.target() {
+            Some(dir) => snapshot::vault_dir(&self.vault, dir)
+                .ok()
+                .and_then(|d| snapshot::list(&d).ok())
+                .and_then(|v| v.last().map(|s| s.taken_at.clone())),
+            None => None,
+        };
         Ok(AppInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             vault_path: Some(self.root.display().to_string()),
             index_notes: self.index.count_notes()?,
             schema_version: self.index.schema_version()?,
+            backup_dir: cfg.dir.clone(),
+            backup_disabled: cfg.disabled,
+            // 既没选目录也没显式关掉 = 还没引导过，界面该提醒而不是安静地不备份
+            backup_unconfigured: cfg.dir.is_none() && !cfg.disabled,
+            backup_last_at: last,
         })
+    }
+
+    // ---- 备份与快照（docs/03 §备份：每日一次增量快照到第二个目录）----
+
+    /// 设备份目录，或显式关掉（`disabled = true`）。非法路径直接报错，不写坏配置。
+    pub fn set_backup(&self, dir: Option<&str>, disabled: bool) -> Result<()> {
+        let cfg = snapshot::BackupConfig {
+            dir: dir.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            disabled,
+        };
+        if let Some(target) = cfg.target() {
+            let per_vault = snapshot::vault_dir(&self.vault, target)?;
+            std::fs::create_dir_all(&per_vault).map_err(|e| Error::Io {
+                path: per_vault.display().to_string(),
+                source: e,
+            })?;
+        }
+        snapshot::save_config(&self.vault, &cfg)
+    }
+
+    /// 跑一次快照。`None` = 今天已经做过，或压根没配备份目录。
+    ///
+    /// 走 `Hub` 的那条路会握着主锁跑完整库遍历——两万篇时又是几十秒的读命令阻塞，
+    /// 与刚拆掉的索引抢锁是同一个病。后台触发一律用自由函数 [`snapshot_vault`]，
+    /// 它只要一个 `Vault` 克隆（这里保留的方法给 CLI 与测试）。
+    pub fn snapshot_now(&self, force: bool) -> Result<Option<SnapshotRow>> {
+        snapshot_vault(&self.vault, force)
+    }
+
+    fn backup_dir_of(&self) -> Result<Option<std::path::PathBuf>> {
+        let cfg = snapshot::load_config(&self.vault)?;
+        match cfg.target() {
+            Some(d) => Ok(Some(snapshot::vault_dir(&self.vault, d)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 最近的几份快照（新的在前）。
+    pub fn snapshots_recent(&self, limit: usize) -> Result<Vec<SnapshotRow>> {
+        let Some(dir) = self.backup_dir_of()? else {
+            return Ok(Vec::new());
+        };
+        let mut rows: Vec<SnapshotRow> = snapshot::list(&dir)?
+            .into_iter()
+            .map(SnapshotRow::of)
+            .collect();
+        rows.reverse();
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    /// 某篇文件的快照历史（新的在前）。只看哪些快照目录里真的有它的实体。
+    pub fn snapshots_of(&self, rel: &str) -> Result<Vec<SnapshotRow>> {
+        let Some(dir) = self.backup_dir_of()? else {
+            return Ok(Vec::new());
+        };
+        Ok(snapshot::history_of(&dir, rel)?
+            .into_iter()
+            .map(SnapshotRow::of)
+            .collect())
+    }
+
+    /// 把某篇从某份快照里取回来。**只落盘，不索引**——与保存同一条纪律
+    /// （同步那一半 ≤ 8ms，索引交给后台）。当前版本与快照不同时会先存进
+    /// `.note/conflicts/`：恢复是覆盖动作，被覆盖的那份得留得下来。
+    pub fn snapshot_restore(&mut self, rel: &str, id: &str) -> Result<String> {
+        let dir = self
+            .backup_dir_of()?
+            .ok_or_else(|| Error::Invalid("还没配置备份目录".into()))?;
+        let bytes = snapshot::read_file(&dir, id, rel)?;
+        if let Ok(current) = self.vault.read(rel) {
+            if current != bytes {
+                self.vault.keep_conflict(rel, &current)?;
+            }
+        }
+        self.vault.write_atomic(rel, &bytes)
     }
 
     pub fn list_notes(&self, limit: usize) -> Result<NoteList> {

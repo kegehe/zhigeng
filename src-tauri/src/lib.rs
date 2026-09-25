@@ -4,8 +4,8 @@ use std::sync::Mutex;
 use note_core::capture::Captured;
 use note_core::index::Index;
 use note_core::service::{
-    reindex_captured, reindex_moved, reindex_note, unindex, AppInfo, EditDoc, HitRow, Hub,
-    NoteDetail, NoteList, NoteSource, TrashRow,
+    reindex_captured, reindex_moved, reindex_note, snapshot_vault, unindex, AppInfo, EditDoc,
+    HitRow, Hub, NoteDetail, NoteList, NoteSource, SnapshotRow, TrashRow,
 };
 use note_core::vault::Vault;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -133,6 +133,26 @@ where
         };
         // 前端靠它把"已存"变成"已可搜"；失败时下次 reindex 会兜底
         let _ = app.emit("note://indexed", ok);
+    });
+}
+
+/// 当日做一次快照。启动后跑，不挡启动、不排主锁——整库遍历在两万篇下是秒级的，
+/// 握着锁做就等于把刚拆掉的"隐形预算"从后门请回来。
+fn snapshot_daily(app: AppHandle) {
+    let vault = match app
+        .state::<Shared>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|h| h.vault().clone()))
+    {
+        Some(v) => v,
+        None => return, // 还没选库，没什么可备份
+    };
+    tauri::async_runtime::spawn_blocking(move || match snapshot_vault(&vault, false) {
+        Ok(Some(s)) => log::info!("每日快照完成 {}，收了 {} 个文件", s.id, s.copied_files),
+        Ok(None) => log::debug!("今天已经快照过，或没配备份目录"),
+        Err(e) => log::warn!("每日快照失败：{e}"),
     });
 }
 
@@ -328,6 +348,63 @@ fn note_restore(
     Ok(())
 }
 
+// ---- 备份与快照（docs/03 §备份：唯一副本 = 没有副本）----
+
+/// 设备份目录，或显式关掉（`path: null, disabled: true`）。
+/// 非法路径直接报错且不落配置；返回新的 app_info，界面一次往返就能把三态画对。
+#[tauri::command]
+fn backup_set(
+    state: State<'_, Shared>,
+    path: Option<String>,
+    disabled: bool,
+) -> Result<AppInfo, String> {
+    with_hub_write(&state, |h| {
+        h.set_backup(path.as_deref(), disabled)?;
+        h.app_info()
+    })
+    .map_err(|e| e.message)
+}
+
+/// "立即备份"。整库遍历在库里跑，所以只在取 `Vault` 克隆的那一瞬锁主锁。
+#[tauri::command]
+fn backup_run(state: State<'_, Shared>) -> Result<Option<SnapshotRow>, String> {
+    let vault = {
+        let guard = state.0.lock().map_err(|e| e.to_string())?;
+        guard
+            .as_ref()
+            .ok_or_else(|| "尚未选择 Vault".to_string())?
+            .vault()
+            .clone()
+    };
+    snapshot_vault(&vault, true).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn backup_recent(
+    state: State<'_, Shared>,
+    limit: Option<usize>,
+) -> Result<Vec<SnapshotRow>, String> {
+    with_hub(&state, |h| h.snapshots_recent(limit.unwrap_or(10)))
+}
+
+#[tauri::command]
+fn backup_history(state: State<'_, Shared>, rel: String) -> Result<Vec<SnapshotRow>, String> {
+    with_hub(&state, |h| h.snapshots_of(&rel))
+}
+
+/// 从某份快照取回一篇。落盘同步返回，索引照旧走后台——与保存同一条纪律。
+#[tauri::command]
+fn backup_restore(
+    app: AppHandle,
+    state: State<'_, Shared>,
+    rel: String,
+    id: String,
+) -> Result<String, WriteErr> {
+    let hash = with_hub_write(&state, |h| h.snapshot_restore(&rel, &id))?;
+    reindex_async(app, move |vault, index| reindex_note(vault, index, &rel));
+    Ok(hash)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -379,7 +456,12 @@ pub fn run() {
             note_move,
             note_trash,
             list_trash,
-            note_restore
+            note_restore,
+            backup_set,
+            backup_run,
+            backup_recent,
+            backup_history,
+            backup_restore
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -390,6 +472,9 @@ pub fn run() {
                     Ok(hub) => {
                         *state.0.lock().unwrap() = Some(hub);
                         log::info!("已打开 Vault {}", p.display());
+                        // 当日还没快照过就补一次（docs/03 §备份）。放在这里而不是
+                        // 定时器：规格要的是"当日首次启动后"，不是固定钟点。
+                        snapshot_daily(handle.clone());
                     }
                     Err(e) => log::warn!("打开上次 Vault 失败 {p:?}: {e}"),
                 }

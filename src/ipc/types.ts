@@ -16,6 +16,19 @@ export type AppInfo = {
   vaultPath: string | null;
   indexNotes: number;
   schemaVersion: number;
+  /** 备份三态：目录 / 显式关掉 / 还没引导过（界面据此决定要不要提醒） */
+  backupDir: string | null;
+  backupDisabled: boolean;
+  backupUnconfigured: boolean;
+  backupLastAt: string | null;
+};
+
+/** 快照列表里的一行。全量清单留在 Rust 侧，两万条 hash 不该过 IPC */
+export type SnapshotRow = {
+  id: string;
+  takenAt: string;
+  copiedFiles: number;
+  totalFiles: number;
 };
 
 export type CapturedOut = {

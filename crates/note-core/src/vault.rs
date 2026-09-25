@@ -76,7 +76,10 @@ pub fn default_vault_path() -> PathBuf {
 
 /// 去掉 Windows 的 `\\?\` 前缀；UNC 共享要还原成 `\\server\share`，
 /// 否则 \\?\UNC\ 会被当成普通名字。非 Windows 路径原样返回。
-fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
+///
+/// crate 内共用：任何拿绝对路径做包含比较的地方（备份目录那条判据）都必须走
+/// 同一套归一化——一边带前缀一边不带，比较会静默失效。
+pub(crate) fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
     let s = p.display().to_string();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
