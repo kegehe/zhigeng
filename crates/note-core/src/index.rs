@@ -7,7 +7,7 @@
 //!    的顺序手工清理，否则留下孤儿索引行让 AI 引用到已删内容。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use md_kernel::{Block, Doc, Kind};
 use rusqlite::{params, Connection, Row};
@@ -26,6 +26,7 @@ const CHUNK_TARGET_CHARS: usize = 400;
 /// 打开（或创建）索引库。vec 扩展必须在任何连接建立前静态注册（ADR-003）。
 pub struct Index {
     conn: Connection,
+    path: PathBuf,
 }
 
 static VEC_REGISTERED: std::sync::Once = std::sync::Once::new();
@@ -38,6 +39,30 @@ impl Index {
             source: e,
         })?;
         Self::open_path(&dir.join("index.db"))
+    }
+
+    /// 第二条连接指向同一个库。后台索引拿它干活，读命令就不会排这把写锁
+    /// （WAL 下读与写互不挡）。docs/03 §后端调用纪律 的"隐形预算"就是这么来的。
+    pub fn fork(&self) -> Result<Self> {
+        Self::open_path(&self.path)
+    }
+
+    /// 一串写包进一个事务。rusqlite 的事务是**连接态**：`BEGIN` 之后这条连接上的
+    /// 所有语句都在事务里，所以被包的这些方法照旧各用 `self.conn`，不必改签名。
+    /// 2999 块的长文档逐条自动提交要 2 秒，事务里一次提交是几十毫秒量级。
+    pub fn in_tx<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        match f() {
+            Ok(v) => {
+                tx.commit()?;
+                Ok(v)
+            }
+            Err(e) => {
+                // 未 commit 的 Transaction 在 drop 时回滚，不会把半截索引留在库里
+                drop(tx);
+                Err(e)
+            }
+        }
     }
 
     pub fn open_path(path: &Path) -> Result<Self> {
@@ -53,7 +78,17 @@ impl Index {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let me = Self { conn };
+        // 两条连接偶尔会同时想写（前台保存撞上后台补索引）。SQLite 单写者，
+        // 让它等而不是直接报 SQLITE_BUSY——等的是那一条，读命令不受影响。
+        conn.busy_timeout(std::time::Duration::from_millis(5000))
+            .map_err(|e| Error::Io {
+                path: path.display().to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::Other, e),
+            })?;
+        let me = Self {
+            conn,
+            path: path.to_path_buf(),
+        };
         me.ensure_schema()?;
         Ok(me)
     }
@@ -108,7 +143,7 @@ impl Index {
     }
 
     /// 全量重建：清空派生表后逐篇索引。与增量走同一条 `index_file` 路径。
-    pub fn rebuild_all(&mut self, vault: &Vault) -> Result<RebuildStats> {
+    pub fn rebuild_all(&self, vault: &Vault) -> Result<RebuildStats> {
         let t0 = std::time::Instant::now();
         self.conn
             .execute_batch("DELETE FROM blocks_fts; DELETE FROM chunks_fts; DELETE FROM notes;")?;
@@ -132,7 +167,7 @@ impl Index {
     /// 删一次就把所有指向这篇笔记的反链带走了，而引用方一个字都没改。所以：
     /// 认得出同一篇（id 相同）就原地更新；认不出但路径上压着一行旧 id（用户改了
     /// front-matter 的 id）就把入链迁移到新行，再清旧行。
-    pub fn index_file(&mut self, f: &NoteFile, src: &str) -> Result<RebuildStats> {
+    pub fn index_file(&self, f: &NoteFile, src: &str) -> Result<RebuildStats> {
         let doc = md_kernel::parse(src);
         let note_id = note_id_of(&doc, &f.rel);
         let mut stats = RebuildStats::default();
@@ -183,18 +218,18 @@ impl Index {
 
     /// 笔记被删除/移进回收站后清掉它的全部索引。按路径清（此时 front-matter 里的
     /// id 已经不在手上），派生表清理顺序与 `index_file` 完全一致。
-    pub fn drop_note(&mut self, rel: &str) -> Result<()> {
+    pub fn drop_note(&self, rel: &str) -> Result<()> {
         purge_by_key(&self.conn, rel, "")
     }
 
     /// 全量重解析链接图。删除/恢复会让别人的入链悬空，只有全量能把它退回 `broken=1`。
-    pub fn rebuild_links(&mut self) -> Result<usize> {
+    pub fn rebuild_links(&self) -> Result<usize> {
         rebuild_links(&self.conn)
     }
 
     /// 把指向某篇笔记的入链标成悬空（而不是随 `notes` 行级联消失）。
     /// 删除与移动的前半段用它的旧身份，恢复/移动的后半段用 `resolve_broken_to` 接回来。
-    pub fn break_incoming_links(&mut self, rel: &str) -> Result<usize> {
+    pub fn break_incoming_links(&self, rel: &str) -> Result<usize> {
         let Ok(id) = self
             .conn
             .query_row("SELECT id FROM notes WHERE path=?1", [rel], |r| {
@@ -212,7 +247,7 @@ impl Index {
 
     /// 重新解析"当前悬空、且写法正好指向这篇笔记"的链接。
     /// 只扫 `link_targets.target` 的那几个等值/前缀形式，代价与全库笔记数无关。
-    pub fn resolve_broken_to(&mut self, rel: &str) -> Result<usize> {
+    pub fn resolve_broken_to(&self, rel: &str) -> Result<usize> {
         let Some(id) = self
             .conn
             .query_row("SELECT id FROM notes WHERE path=?1", [rel], |r| {
@@ -258,7 +293,7 @@ impl Index {
 
     /// 只重算一篇笔记**发出**的链接。`links.to_note` 存的是 id，所以改名/移动不会
     /// 弄坏别人的入链，被指方不需要跟着重建——这点决定了写路径不必每次全量重建链接图。
-    pub fn rebuild_links_of_note(&mut self, rel: &str) -> Result<usize> {
+    pub fn rebuild_links_of_note(&self, rel: &str) -> Result<usize> {
         let Ok(note_id) = self
             .conn
             .query_row("SELECT id FROM notes WHERE path=?1", [rel], |r| {

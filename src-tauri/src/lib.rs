@@ -2,9 +2,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use note_core::capture::Captured;
+use note_core::index::Index;
 use note_core::service::{
-    AppInfo, EditDoc, HitRow, Hub, NoteDetail, NoteList, NoteSource, TrashRow,
+    reindex_captured, reindex_moved, reindex_note, unindex, AppInfo, EditDoc, HitRow, Hub,
+    NoteDetail, NoteList, NoteSource, TrashRow,
 };
+use note_core::vault::Vault;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -107,17 +110,26 @@ fn werr_io(e: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<Hub>>>) ->
 /// 这不是"为了快"而牺牲正确性：实测单篇索引要 8–10ms，留在同步路径上就把
 /// G6 的 8ms 红线顶穿了（docs/03 §后端调用纪律 明确 8ms–300ms 一律异步 + 乐观 UI）。
 /// 文件在同步那一步已经 fsync 落盘，所以返回即代表内容不会丢。
+///
+/// 后台这一半走 `Hub::indexer()` 那条**独立的连接**，并且只在取句柄的一瞬锁主锁。
+/// 上一版它在主锁里跑完整篇：保存 2999 块后，下一个读命令等了 3.26 秒。
 fn reindex_async<F>(app: AppHandle, job: F)
 where
-    F: FnOnce(&mut Hub) -> note_core::Result<()> + Send + 'static,
+    F: FnOnce(&Vault, &Index) -> note_core::Result<()> + Send + 'static,
 {
     tauri::async_runtime::spawn_blocking(move || {
-        let ok = match app.state::<Shared>().0.lock() {
-            Ok(mut guard) => match guard.as_mut() {
-                Some(hub) => job(hub).is_ok(),
-                None => false,
+        let handles = app
+            .state::<Shared>()
+            .0
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|h| (h.vault().clone(), h.indexer())));
+        let ok = match handles {
+            Some((vault, bg)) => match bg.lock() {
+                Ok(index) => job(&vault, &index).is_ok(),
+                Err(_) => false,
             },
-            Err(_) => false,
+            None => false,
         };
         // 前端靠它把"已存"变成"已可搜"；失败时下次 reindex 会兜底
         let _ = app.emit("note://indexed", ok);
@@ -158,7 +170,9 @@ fn capture_text(
     })?;
     let rel = cap.rel.clone();
     let content = cap.content.clone();
-    reindex_async(app, move |h| h.index_captured(&rel, &content));
+    reindex_async(app, move |vault, index| {
+        reindex_captured(vault, index, &rel, &content)
+    });
     Ok(cap)
 }
 
@@ -245,7 +259,7 @@ fn save_note(
     let hash = with_hub_write(&state, |h| {
         h.save_note_write(&rel, &content, expect_hash.as_deref())
     })?;
-    reindex_async(app, move |h| h.index_one(&rel));
+    reindex_async(app, move |vault, index| reindex_note(vault, index, &rel));
     Ok(hash)
 }
 
@@ -257,7 +271,7 @@ fn note_create(
 ) -> Result<String, WriteErr> {
     let rel = with_hub_write(&state, |h| h.note_create_file(&title))?;
     let shown = rel.clone();
-    reindex_async(app, move |h| h.index_one(&rel));
+    reindex_async(app, move |vault, index| reindex_note(vault, index, &rel));
     Ok(shown)
 }
 
@@ -270,7 +284,9 @@ fn note_rename(
 ) -> Result<String, WriteErr> {
     let new_rel = with_hub_write(&state, |h| h.note_rename_file(&rel, &new_stem))?;
     let shown = new_rel.clone();
-    reindex_async(app, move |h| h.index_moved(&rel, &new_rel));
+    reindex_async(app, move |vault, index| {
+        reindex_moved(vault, index, &rel, &new_rel)
+    });
     Ok(shown)
 }
 
@@ -282,14 +298,16 @@ fn note_move(
     new_rel: String,
 ) -> Result<(), WriteErr> {
     with_hub_write(&state, |h| h.note_move_file(&rel, &new_rel))?;
-    reindex_async(app, move |h| h.index_moved(&rel, &new_rel));
+    reindex_async(app, move |vault, index| {
+        reindex_moved(vault, index, &rel, &new_rel)
+    });
     Ok(())
 }
 
 #[tauri::command]
 fn note_trash(app: AppHandle, state: State<'_, Shared>, rel: String) -> Result<(), WriteErr> {
     with_hub_write(&state, |h| h.note_trash_file(&rel))?;
-    reindex_async(app, move |h| h.index_trashed(&rel));
+    reindex_async(app, move |_vault, index| unindex(index, &rel));
     Ok(())
 }
 
@@ -306,7 +324,7 @@ fn note_restore(
     rel: String,
 ) -> Result<(), WriteErr> {
     with_hub_write(&state, |h| h.note_restore_file(&batch, &rel))?;
-    reindex_async(app, move |h| h.index_one(&rel));
+    reindex_async(app, move |vault, index| reindex_note(vault, index, &rel));
     Ok(())
 }
 

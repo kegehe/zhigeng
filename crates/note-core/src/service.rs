@@ -4,8 +4,9 @@
 //! 三条纪律在这里体现：
 //! 1. 返回的都是 DTO，不把 `NoteFile`/`Block` 等内部结构泄漏给前端；
 //! 2. 任何同步命令的预算是 8ms（G6），因此这里只做索引查询，不碰 AI 与网络；
-//! 3. M0 用一个 `Mutex` 串行化 SQLite 访问。连接池与单写者队列在 M1 引入，
-//!    但**接口形状现在就这样定**，避免以后改所有调用点。
+//! 3. 同步命令的预算是 8ms（G6）。SQLite 侧因此是**两条连接**：前台一条（读写都短），
+//!    后台补索引一条（长）。WAL 下读不挡写，所以"索引在后台"不再等于"读命令排队等锁"。
+//!    两条连接同时想写时靠 `busy_timeout` 等，等的是写者，读者不受影响。
 
 use std::path::{Path, PathBuf};
 
@@ -92,6 +93,9 @@ pub struct HitRow {
 pub struct Hub {
     vault: Vault,
     index: Index,
+    /// 后台索引专用的第二条连接（同一个库文件）。**这是把 2 秒从读路径上摘下来的全部机制**：
+    /// 补索引不再握着主锁，读命令于是与它无关（WAL 下读不挡写）。docs/03 §后端调用纪律。
+    bg: std::sync::Arc<std::sync::Mutex<Index>>,
     root: PathBuf,
 }
 
@@ -200,13 +204,55 @@ pub struct EditDoc {
 /// 编辑器的保存输入仍是整篇 Markdown（未改动的块由前端原样回显），
 /// 所以这里不需要"逐块提交"的 DTO——少一条会与 `save_note` 分叉的写路径。
 
+/// 补一篇的索引：写内容与块 → 重建本篇出链 → 把别人悬空指向它的链接接回来。
+///
+/// 三步在**一个事务**里。2999 块逐条自动提交要 2 秒，一次提交是几十毫秒量级；
+/// 而这段时间正是后台握着写者的长度。签名取 `&Index` 而不是 `&mut Hub`，
+/// 是为了让 `spawn_blocking` 能拿着第二条连接做这件事，不把主锁一起带走。
+pub fn reindex_note(vault: &Vault, index: &Index, rel: &str) -> Result<()> {
+    let file = vault.note_file(rel)?;
+    let content = String::from_utf8_lossy(&vault.read(rel)?).to_string();
+    index.in_tx(|| {
+        index.index_file(&file, &content)?;
+        index.rebuild_links_of_note(rel)?;
+        // 这篇新写出来的链接里，可能有别人早就悬空指向它的
+        index.resolve_broken_to(rel)?;
+        Ok(())
+    })
+}
+
+/// 换路径（改名 / 归档 / 从回收站放回）。旧行先摘，再按新路径补。
+pub fn reindex_moved(vault: &Vault, index: &Index, rel: &str, new_rel: &str) -> Result<()> {
+    if rel == new_rel {
+        return reindex_note(vault, index, new_rel);
+    }
+    unindex(index, rel)?;
+    reindex_note(vault, index, new_rel)
+}
+
+/// 把一篇从索引里摘掉，并把它人的入链退回悬空（不随 `ON DELETE CASCADE` 静默消失）。
+pub fn unindex(index: &Index, rel: &str) -> Result<()> {
+    index.in_tx(|| {
+        index.break_incoming_links(rel)?;
+        index.drop_note(rel)?;
+        Ok(())
+    })
+}
+
+/// 速记落盘后的补索引：只有一篇新文件，没有链接要接，所以不套事务。
+pub fn reindex_captured(vault: &Vault, index: &Index, rel: &str, content: &str) -> Result<()> {
+    let file = vault.note_file(rel)?;
+    index.index_file(&file, content)?;
+    Ok(())
+}
+
 impl Hub {
     /// 打开 Vault 并确保索引存在。首启只建表不重建（重建交给显式任务，
     /// 否则冷启动会被全量索引拖过 1.5s 预算）。
     pub fn open(root: &Path) -> Result<Self> {
         let vault = Vault::open(root)?;
         let opened = vault.root().to_path_buf();
-        let mut index = Index::open(&vault)?;
+        let index = Index::open(&vault)?;
         // 首启只在这时建一次索引；后续启动交给显式任务，
         // 否则冷启动会被全量重建拖过 1.5s 预算。
         if index.count_notes()? == 0 {
@@ -214,9 +260,16 @@ impl Hub {
         }
         Ok(Self {
             vault,
+            bg: std::sync::Arc::new(std::sync::Mutex::new(index.fork()?)),
             index,
             root: opened,
         })
+    }
+
+    /// 后台索引的句柄。给 `spawn_blocking` 之前先拿这个，**拿完就把主锁还回去**——
+    /// 让读命令等一把锁等到补完 2999 块，就是上一版 3.26 秒的来源。
+    pub fn indexer(&self) -> std::sync::Arc<std::sync::Mutex<Index>> {
+        self.bg.clone()
     }
 
     /// 首启向导确认路径之后用：目录不存在就建出来，并放好 `inbox/` 与 `notes/`，
@@ -291,9 +344,7 @@ impl Hub {
 
     /// 第二步：单篇增量索引。与落盘分开，这样速记窗不必等它（docs/04 §1）。
     pub fn index_captured(&mut self, rel: &str, content: &str) -> Result<()> {
-        let file = self.vault.note_file(rel)?;
-        self.index.index_file(&file, content)?;
-        Ok(())
+        reindex_captured(&self.vault, &self.index, rel, content)
     }
 
     /// 编辑器加载一篇：内容和 hash 一起给。前端把 hash 原样带回来，
@@ -341,13 +392,7 @@ impl Hub {
     /// 与落盘分开是因为它实测要 8–10ms，留在同步路径上就把 G6 顶穿了
     /// （docs/03 §后端调用纪律：8ms–300ms 一律异步 + 乐观 UI）。
     pub fn index_one(&mut self, rel: &str) -> Result<()> {
-        let file = self.vault.note_file(rel)?;
-        let content = String::from_utf8_lossy(&self.vault.read(rel)?).to_string();
-        self.index.index_file(&file, &content)?;
-        self.index.rebuild_links_of_note(rel)?;
-        // 这篇新写出来的链接里，可能有别人早就悬空指向它的
-        self.index.resolve_broken_to(rel)?;
-        Ok(())
+        reindex_note(&self.vault, &self.index, rel)
     }
 
     /// 落盘 + 索引一起做。CLI、测试与批量路径用；GUI 走拆分后的两步。
@@ -393,12 +438,7 @@ impl Hub {
     /// 换路径等于换 id，旧行匹配不上就会留下指向已消失文件的幽灵行——照样能搜到。
     /// 入链先置悬空再删行，最后按新路径接回来；全程只碰与这篇相关的链接。
     pub fn index_moved(&mut self, rel: &str, new_rel: &str) -> Result<()> {
-        if rel == new_rel {
-            return self.index_one(new_rel);
-        }
-        self.index.break_incoming_links(rel)?;
-        self.index.drop_note(rel)?;
-        self.index_one(new_rel)
+        reindex_moved(&self.vault, &self.index, rel, new_rel)
     }
 
     /// 移动或换目录（`notes/甲.md` → `archive/甲.md`），落盘 + 索引一起做。
@@ -449,8 +489,7 @@ impl Hub {
     /// 直接删行会被 `ON DELETE CASCADE` 把入链一起带走，恢复时就没有
     /// "曾经指向它"的记录可接回来了。
     pub fn index_trashed(&mut self, rel: &str) -> Result<()> {
-        self.index.break_incoming_links(rel)?;
-        self.index.drop_note(rel)
+        unindex(&self.index, rel)
     }
 
     /// 移进回收站。文件本身还在（`.note/trash/`），所以这条操作不丢内容；

@@ -47,7 +47,10 @@ tempfile = "3"
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
-correctness = "deny"
+# 组必须比同表里的单条 lint 优先级低，否则 clippy 直接报错退出：
+# "lint group `correctness` has the same priority (0) as a lint"。
+# 这条配置写下来那天起 `cargo clippy` 就没跑通过，所以它deny 的东西一次也没生效过。
+correctness = { level = "deny", priority = -1 }
 dbg_macro = "deny"
 todo = "warn"
 

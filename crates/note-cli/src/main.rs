@@ -125,7 +125,7 @@ fn cmd_reindex(path: PathBuf, dry_run: bool) -> Result<()> {
         }
         return Ok(());
     }
-    let mut idx = note_core::index::Index::open(&vault)?;
+    let idx = note_core::index::Index::open(&vault)?;
     let t = std::time::Instant::now();
     let stats = idx.rebuild_all(&vault)?;
     let secs = t.elapsed().as_secs_f64();
@@ -148,7 +148,7 @@ fn cmd_reindex(path: PathBuf, dry_run: bool) -> Result<()> {
 
 fn cmd_search(path: PathBuf, query: &str, limit: usize) -> Result<()> {
     let vault = Vault::open(&path)?;
-    let mut idx = note_core::index::Index::open(&vault)?;
+    let idx = note_core::index::Index::open(&vault)?;
     if idx.table_counts()?.get("notes").copied().unwrap_or(0) == 0 {
         idx.rebuild_all(&vault)?;
     }
@@ -204,7 +204,7 @@ title: 基准笔记 {i}
     }
     let write_ms = t0.elapsed().as_millis() as u64;
     let v = Vault::open(&dir)?;
-    let mut idx = note_core::index::Index::open(&v)?;
+    let idx = note_core::index::Index::open(&v)?;
     let stats = idx.rebuild_all(&v)?;
     let scan_t = std::time::Instant::now();
     let n_files = v.scan()?.len();
@@ -540,7 +540,7 @@ fn cmd_write_profile(notes: usize) -> Result<()> {
             v
         };
     }
-    let mut idx = Index::open(&v)?;
+    let idx = Index::open(&v)?;
     idx.rebuild_all(&v)?;
     let rel = "notes/00000.md";
     let file = v.note_file(rel)?;

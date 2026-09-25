@@ -2,7 +2,7 @@
 //! 服务层端到端：README 里写的那条命令流程，这里跑一遍同样的路径。
 //! 手工跑一次才发现的"正文被写两遍"这类问题，必须留在测试里。
 
-use note_core::service::Hub;
+use note_core::service::{reindex_note, Hub};
 
 fn hub_in(dir: &std::path::Path) -> Hub {
     std::fs::create_dir_all(dir).unwrap();
@@ -470,4 +470,34 @@ fn 两篇笔记共用同一个块锚点也要都能索引() {
     hub.save_note("notes/丙.md", "指回甲：[[甲#^b-k3x9m2v7qa]]\n")
         .unwrap();
     assert_eq!(hub.search_keyword("指回甲", 5).unwrap().len(), 1);
+}
+
+#[test]
+fn 后台索引握着它那条连接时读命令照常返回() {
+    // 钉的是 docs/03 §后端调用纪律 的机制本身：补索引走第二条连接，读命令不排它的锁。
+    // 上一版两者共用一把锁，保存 2999 块之后第一个读命令等了 3.26 秒。
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let c = hub.capture("速记的一条，作为读的目标", None).unwrap();
+    hub.index_one(&c.rel).unwrap();
+
+    let bg = hub.indexer();
+    let held = bg.lock().unwrap();
+    assert_eq!(
+        held.count_notes().unwrap(),
+        1,
+        "第二条连接看到的不是同一个库文件"
+    );
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
+    assert!(hub.read_raw(&c.rel).unwrap().content.contains("速记的一条"));
+    assert_eq!(hub.search_keyword("读的目标", 10).unwrap().len(), 1);
+    drop(held);
+
+    // 反过来：写走第二条连接也得留下一致的状态（否则"后台"只是把漂移挪了个地方）
+    let bg = hub.indexer();
+    let idx = bg.lock().unwrap();
+    reindex_note(hub.vault(), &idx, &c.rel).unwrap();
+    drop(idx);
+    assert_eq!(hub.drift().unwrap(), 0, "经第二条连接索引后 md 与 db 漂移");
+    assert!(hub.orphan_counts().unwrap().is_clean());
 }
