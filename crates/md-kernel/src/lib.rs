@@ -337,7 +337,7 @@ fn render_block(out: &mut String, b: &Block) {
         let sub_indent = format!("{}  ", b.indent);
         for line in split_keep_eol(&sub) {
             if line.trim().is_empty() {
-                body.push_str(&line);
+                body.push_str(line);
             } else {
                 body.push_str(&sub_indent);
                 body.push_str(line.trim_start_matches([' ', '\t']));
@@ -345,13 +345,10 @@ fn render_block(out: &mut String, b: &Block) {
         }
     }
 
-    match &b.id {
-        // 简单块的 ID 一律附在末行尾部（Obsidian 语法）
-        Some(id) => {
-            body.push_str(" ^");
-            body.push_str(id);
-        }
-        None => {}
+    // 简单块的 ID 一律附在末行尾部（Obsidian 语法）
+    if let Some(id) = &b.id {
+        body.push_str(" ^");
+        body.push_str(id);
     }
     // 文件末行原本没有换行时不能凭空补一个，否则破坏字节相等
     if b.raw.ends_with('\n') {
@@ -372,8 +369,7 @@ const KNOWN_FIELDS: &[&str] = &["due", "done"];
 pub fn extract_fields(text: &str) -> (Vec<(String, String)>, String) {
     let mut fields = Vec::new();
     let mut rest = text.to_string();
-    loop {
-        let Some(pos) = rest.rfind("::") else { break };
+    while let Some(pos) = rest.rfind("::") {
         let head = rest[..pos].trim_end();
         let value = rest[pos + 2..].trim();
         let Some(key_start) = head.rfind([' ', '\t']) else {
@@ -1379,8 +1375,7 @@ fn build_list_item(marker: String, orig: &[Line], body: &[Line], _col: usize) ->
 
 fn take_paragraph(c: &mut Cursor) -> Option<Block> {
     let mut lines: Vec<Line> = Vec::new();
-    loop {
-        let Some(l) = c.cur().cloned() else { break };
+    while let Some(l) = c.cur().cloned() {
         if l.text.trim().is_empty() {
             break;
         }

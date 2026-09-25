@@ -183,7 +183,7 @@ scripts/        guard.mjs：护栏脚本（手跑；仓库里还没有 CI 配置
 
 - **文档是规格不是笔记**：中文文件名带序号；SQL、目录、字段名即最终规格；同一事实只在一处定义（块类型→02，建议枚举→04，阈值→03，范围→01，里程碑→05）。
 - **推翻既定决定要写 ADR**：`docs/adr/` 下 `ADR-NNN-中文标题.md`，说明背景、选项、结论、代价。已有 4 条，其中 ADR-004 是**被实测数据推翻后重写的**。
-- 提交前跑：`cargo fmt --all` · `cargo test --workspace` · `pnpm test` · `node scripts/guard.mjs`。
+- 提交前跑：`cargo fmt --all` · `cargo test --workspace` · `cargo clippy --workspace --all-targets`（应 0 条）· `pnpm test` · `node scripts/guard.mjs`。
 - 测试名用中文短语（读失败信息更快），已配 `#![allow(non_snake_case)]`。
 
 ## 许可

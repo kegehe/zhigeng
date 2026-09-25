@@ -41,7 +41,7 @@ fn open(dir: &std::path::Path) -> (Vault, Index) {
 #[test]
 fn 全量重建产出完整索引且无漂移() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     let stats = idx.rebuild_all(&v).unwrap();
     assert_eq!(stats.notes, 6, "{stats:?}");
     assert!(stats.blocks >= 9, "块过少 {stats:?}");
@@ -54,7 +54,7 @@ fn 全量重建产出完整索引且无漂移() {
 #[test]
 fn 增量重建与全量重建逐表一致() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let full = idx.table_counts().unwrap();
 
@@ -72,13 +72,13 @@ fn 增量重建与全量重建逐表一致() {
 #[test]
 fn 删除库文件后能完整重建() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let before = idx.table_counts().unwrap();
 
     drop(idx);
     std::fs::remove_file(v.meta_dir().join("index.db")).unwrap();
-    let (v2, mut idx2) = open(dir.path());
+    let (v2, idx2) = open(dir.path());
     idx2.rebuild_all(&v2).unwrap();
     assert_eq!(before, idx2.table_counts().unwrap(), "删库重建后表计数变了");
 }
@@ -86,7 +86,7 @@ fn 删除库文件后能完整重建() {
 #[test]
 fn 同篇重复索引不留孤儿() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let f = v
         .scan()
@@ -110,7 +110,7 @@ fn 同篇重复索引不留孤儿() {
 #[test]
 fn 中文分词后能命中词组() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
 
     let hits = idx.search_keyword("打扰预算", 10).unwrap();
@@ -129,7 +129,7 @@ fn 中文分词后能命中词组() {
 #[test]
 fn 隐私硬门在SQL层生效() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let hits = idx.search_keyword("银行卡", 20).unwrap();
     assert!(
@@ -150,7 +150,7 @@ fn 隐私硬门在SQL层生效() {
 #[test]
 fn 归档默认排除但已索引() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let n: i64 = idx
         .conn()
@@ -171,7 +171,7 @@ fn 归档默认排除但已索引() {
 #[test]
 fn 视图定义不进块表也不进检索() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let n: i64 = idx
         .conn()
@@ -192,7 +192,7 @@ fn 视图定义不进块表也不进检索() {
 #[test]
 fn 链接图解析出双向与悬空() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let resolved: i64 = idx
         .conn()
@@ -225,7 +225,7 @@ fn 链接图解析出双向与悬空() {
 #[test]
 fn 切片带标题面包屑且行内字段入库() {
     let dir = fixture();
-    let (v, mut idx) = open(dir.path());
+    let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let crumbs: i64 = idx
         .conn()

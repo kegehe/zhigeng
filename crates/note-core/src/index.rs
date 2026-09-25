@@ -67,13 +67,21 @@ impl Index {
 
     pub fn open_path(path: &Path) -> Result<Self> {
         VEC_REGISTERED.call_once(|| unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            // sqlite-vec 把入口点声明成无参无返回，而 SQLite 的 `auto_extension` 要的是
+            // 三参 `xEntryPoint`（C ABI 下多传的参数被调用方忽略，所以转过去是安全的）。
+            // 类型写全而不是裸 `transmute`：让编译器替我们盯住这个不匹配的签名。
+            type VecInit = unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::ffi::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> std::ffi::c_int;
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<*const (), VecInit>(
                 sqlite_vec::sqlite3_vec_init as *const (),
             )));
         });
         let conn = Connection::open(path).map_err(|e| Error::Io {
             path: path.display().to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e),
+            source: std::io::Error::other(e),
         })?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -83,7 +91,7 @@ impl Index {
         conn.busy_timeout(std::time::Duration::from_millis(5000))
             .map_err(|e| Error::Io {
                 path: path.display().to_string(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, e),
+                source: std::io::Error::other(e),
             })?;
         let me = Self {
             conn,
@@ -579,14 +587,14 @@ fn insert_note(
         params![
             note_id,
             f.rel,
-            title_of(&doc, f),
+            title_of(doc, f),
             status_str(f.status),
-            created_of(&doc),
+            created_of(doc),
             f.mtime_ms,
             content_hash_str(src),
-            ai_flag(&doc, "private"),
-            ai_flag(&doc, "no_ai"),
-            origin_of(&doc),
+            ai_flag(doc, "private"),
+            ai_flag(doc, "no_ai"),
+            origin_of(doc),
             kind_str(f.kind),
         ],
     )?;

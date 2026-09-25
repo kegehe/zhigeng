@@ -167,7 +167,7 @@ impl Vault {
         {
             let entry = entry.map_err(|e| Error::Io {
                 path: self.root.display().to_string(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, e),
+                source: std::io::Error::other(e),
             })?;
             if !entry.file_type().is_file() {
                 continue;
@@ -334,12 +334,12 @@ impl Vault {
             for entry in walkdir::WalkDir::new(batch.path()).follow_links(false) {
                 let entry = entry.map_err(|e| Error::Io {
                     path: name.clone(),
-                    source: std::io::Error::new(std::io::ErrorKind::Other, e),
+                    source: std::io::Error::other(e),
                 })?;
                 if !entry.file_type().is_file() {
                     continue;
                 }
-                let Ok(rel) = self.relative(&entry.path().to_path_buf()) else {
+                let Ok(rel) = self.relative(entry.path()) else {
                     continue;
                 };
                 // rel 形如 `.note/trash/<批次>/notes/甲.md`，剥掉三段前缀才是原路径
@@ -363,7 +363,7 @@ impl Vault {
                 });
             }
         }
-        out.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+        out.sort_by_key(|n| std::cmp::Reverse(n.mtime_ms));
         Ok(out)
     }
 
@@ -374,7 +374,7 @@ impl Vault {
         let rel = self.relative(&checked)?;
         let batch = batch
             .split(['/', '\\'])
-            .last()
+            .next_back()
             .filter(|s| !s.is_empty() && *s != "." && *s != "..")
             .ok_or_else(|| Error::OutsideVault(batch.to_string()))?;
         Ok(self
@@ -545,7 +545,7 @@ pub fn sanitize_file_stem(title: &str) -> String {
         .chars()
         .map(|c| if BAD.contains(&c) { ' ' } else { c })
         .collect();
-    s = s.trim().split_whitespace().collect::<Vec<_>>().join(" ");
+    s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if s.is_empty() {
         s = "未命名".to_string();
     }

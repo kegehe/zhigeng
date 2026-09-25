@@ -291,7 +291,7 @@ mod tests {
         // 回归：曾经在正文里插一个 `# 标题`，而标题就是第一行本身 → 同一句话在正文写两遍，
         // 用户看到的是重复内容，搜索也会重复命中。判据只看正文部分（front-matter 里出现
         // 一次标题是应有的）。
-        let body_only = body.splitn(3, "\n---\n").nth(1).unwrap_or("");
+        let body_only = body.split("\n---\n").nth(1).unwrap_or("");
         assert_eq!(
             body_only.matches("第一条想法").count(),
             1,
