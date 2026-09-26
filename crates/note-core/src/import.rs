@@ -255,6 +255,8 @@ pub fn import_and_index(
 
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)] // 测试名是给人读的中文短语
+
     use super::*;
 
     fn map(names: &[&str]) -> Vec<String> {

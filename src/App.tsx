@@ -133,13 +133,21 @@ export function App() {
     void refresh();
   }, [refresh]);
 
-  // 索引是异步补的。速记落盘后主窗必须自己长回来，否则新笔记要重启才看得见
+  // 索引是异步补的。速记落盘后主窗必须自己长回来，否则新笔记要重启才看得见。
+  // 事件负载是"变了哪些路径"：正在看的那一篇如果被外部（Obsidian、同步盘）改了，
+  // 浏览态要整个重装载——停在旧内容上是验收 ⑤ 没通过的样子。**编辑态不动**：
+  // 那时框里是用户还没落盘的东西，覆盖它比显示旧内容更糟。
   useEffect(() => {
     if (!inTauri()) return;
     let alive = true;
     let un: (() => void) | undefined;
-    void listen("note://indexed", () => {
-      if (alive) void refresh();
+    void listen<string[]>("note://indexed", (e) => {
+      if (!alive) return;
+      void refresh();
+      const rels = e.payload ?? [];
+      if (mode === "view" && selected && rels.includes(selected.rel)) {
+        void loadNote(selected.rel).catch((err) => setError(describeError(err).message));
+      }
     }).then((f) => {
       if (alive) un = f;
       else f();
@@ -148,7 +156,9 @@ export function App() {
       alive = false;
       un?.();
     };
-  }, [refresh]);
+    // 少了 mode / selected 就是白订阅一次：闭包永远停在挂载时那份 selected = null，
+    // 外部改动的事件到了、列表也刷了，只有正文不动。速记窗那个"连按守卫"踩过同一类坑。
+  }, [refresh, mode, selected]);
 
   useEffect(() => {
     if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);

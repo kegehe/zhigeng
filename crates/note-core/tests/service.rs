@@ -569,3 +569,110 @@ fn 备份目录指向库内会被拒绝() {
     // 拒绝的同时不能留下半套配置
     assert!(hub.app_info().unwrap().backup_dir.is_none());
 }
+
+#[test]
+fn 外部改动的收敛只重算真变了的那几篇() {
+    use note_core::service::apply_external;
+    use note_core::watch::Change;
+
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let c = hub.capture("最初的一条 关键词阿尔法", None).unwrap();
+    let abs = d
+        .path()
+        .join(c.rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+
+    // 自己刚写完的那一次：监听器一定报，但内容没变，就该什么都不做
+    let bg = hub.indexer();
+    let idx = bg.lock().unwrap();
+    assert_eq!(
+        apply_external(hub.vault(), &idx, &[Change::Touched(c.rel.clone())]).unwrap(),
+        0,
+        "自我写入被 hash 闸门挡住了吗"
+    );
+
+    // 外部（Obsidian / 编辑器）改了内容
+    std::fs::write(&abs, "改过的一条 关键词贝塔\n").unwrap();
+    assert_eq!(
+        apply_external(hub.vault(), &idx, &[Change::Touched(c.rel.clone())]).unwrap(),
+        1
+    );
+    drop(idx);
+    assert_eq!(
+        hub.search_keyword("贝塔", 5).unwrap().len(),
+        1,
+        "外部改动没刷进索引"
+    );
+    assert_eq!(hub.search_keyword("阿尔法", 5).unwrap().len(), 0);
+
+    // 外部删了文件：报 Touched 还是 Removed 都该收敛到"摘掉"
+    std::fs::remove_file(&abs).unwrap();
+    let idx = bg.lock().unwrap();
+    assert_eq!(
+        apply_external(hub.vault(), &idx, &[Change::Removed(c.rel.clone())]).unwrap(),
+        1
+    );
+    assert_eq!(
+        apply_external(
+            hub.vault(),
+            &idx,
+            &[Change::Touched("notes/从没存在过.md".into())]
+        )
+        .unwrap(),
+        0,
+        "库里没有、盘上也没有的路径不该动任何东西"
+    );
+    drop(idx);
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 0);
+    assert_eq!(hub.drift().unwrap(), 0, "摘掉之后 md 与 db 该一致");
+    assert!(hub.orphan_counts().unwrap().is_clean());
+}
+
+/// 监听器的过滤规则与扫描器的排除规则**不是同一套**：`node_modules/` 下的 `.md`
+/// 会报上来，而扫描器不收。收敛必须以扫描器为准，否则索引里多出一行、全库自检从此
+/// 报漂移，而且没有别的路径会把它摘掉。
+#[test]
+fn 收敛不收扫描器排除的路径() {
+    use note_core::service::apply_external;
+    use note_core::watch::Change;
+
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let c = hub.capture("正经一篇 关键词伽马", None).unwrap();
+
+    std::fs::create_dir_all(d.path().join("node_modules/pkg")).unwrap();
+    std::fs::write(
+        d.path().join("node_modules/pkg/README.md"),
+        "依赖包里的说明 关键词德尔塔\n",
+    )
+    .unwrap();
+
+    let bg = hub.indexer();
+    let idx = bg.lock().unwrap();
+    // 一批里好坏混着：被排除的那条不该进索引，也不该影响同批那篇正文的改动
+    std::fs::write(
+        d.path()
+            .join(c.rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
+        "外部改过的正经一篇\n",
+    )
+    .unwrap();
+    assert_eq!(
+        apply_external(
+            hub.vault(),
+            &idx,
+            &[
+                Change::Touched("node_modules/pkg/README.md".into()),
+                Change::Touched(c.rel.clone()),
+            ]
+        )
+        .unwrap(),
+        1,
+        "被排除的路径不该算进动了几篇"
+    );
+    assert_eq!(hub.search_keyword("德尔塔", 5).unwrap().len(), 0);
+    assert_eq!(hub.search_keyword("外部改过", 5).unwrap().len(), 1);
+    drop(idx);
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
+    assert_eq!(hub.drift().unwrap(), 0, "排除目录不该造成漂移");
+    assert!(hub.orphan_counts().unwrap().is_clean());
+}

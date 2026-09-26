@@ -5,8 +5,8 @@ use note_core::capture::Captured;
 use note_core::import::{Entry as ImportEntry, Report as ImportReport};
 use note_core::index::Index;
 use note_core::service::{
-    reindex_captured, reindex_moved, reindex_note, snapshot_vault, unindex, AppInfo, EditDoc,
-    HitRow, Hub, NoteDetail, NoteList, NoteSource, SnapshotRow, TrashRow,
+    apply_external, reindex_captured, reindex_moved, reindex_note, snapshot_vault, unindex,
+    AppInfo, EditDoc, HitRow, Hub, NoteDetail, NoteList, NoteSource, SnapshotRow, TrashRow,
 };
 use note_core::vault::Vault;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -20,7 +20,13 @@ const CAPTURE_SHORTCUT: &str = "Alt+Shift+N";
 
 /// 壳只持有状态与命令注册。业务判断一律在 `note-core`——
 /// 因为 CLI / MCP 必须走到完全相同的代码（docs/03 §后端 = 本地服务层）。
-struct Shared(Mutex<Option<Hub>>);
+///
+/// 第二个槽是文件监听器：**换库时必须换掉它**，否则旧库的事件会写进新库的索引。
+/// drop 即停止监听，所以"赋新值丢旧值"就是收尾。
+struct Shared(
+    Mutex<Option<Hub>>,
+    Mutex<Option<note_core::watch::WatcherHandle>>,
+);
 
 /// "上一次打开的 Vault 在哪"这个指针必须存在 Vault 之外（否则先有 Vault 还是先有指针）。
 /// 这是元数据而非用户内容，所以不违反 docs/03 §路径归属。
@@ -114,7 +120,9 @@ fn werr_io(e: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<Hub>>>) ->
 ///
 /// 后台这一半走 `Hub::indexer()` 那条**独立的连接**，并且只在取句柄的一瞬锁主锁。
 /// 上一版它在主锁里跑完整篇：保存 2999 块后，下一个读命令等了 3.26 秒。
-fn reindex_async<F>(app: AppHandle, job: F)
+/// 后台补索引，做完广播"变了哪些路径"。前端拿这个决定：列表要刷，
+/// 正在看的那一篇如果也在里面且没在编辑，就整个重装载（否则界面停在旧内容上）。
+fn reindex_async<F>(app: AppHandle, rels: Vec<String>, job: F)
 where
     F: FnOnce(&Vault, &Index) -> note_core::Result<()> + Send + 'static,
 {
@@ -125,16 +133,50 @@ where
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|h| (h.vault().clone(), h.indexer())));
-        let ok = match handles {
+        let done: Vec<String> = match handles {
             Some((vault, bg)) => match bg.lock() {
-                Ok(index) => job(&vault, &index).is_ok(),
-                Err(_) => false,
+                Ok(index) if job(&vault, &index).is_ok() => rels,
+                _ => Vec::new(),
             },
-            None => false,
+            None => Vec::new(),
         };
         // 前端靠它把"已存"变成"已可搜"；失败时下次 reindex 会兜底
-        let _ = app.emit("note://indexed", ok);
+        let _ = app.emit("note://indexed", done);
     });
+}
+
+/// 起文件监听。外部改了库里的文件时重算那几篇，然后广播 `note://indexed`
+/// 让列表与正文自己刷新——docs/05 验收 ⑤ 的"要么刷新"那一半，之前只有"不覆盖"。
+///
+/// 起不来不是致命错误：记一条日志继续跑，用户至少还能手动刷新。
+fn start_watcher(app: &AppHandle, hub: &Hub) -> Option<note_core::watch::WatcherHandle> {
+    let vault = hub.vault().clone();
+    let bg = hub.indexer();
+    let handle = app.clone();
+    match note_core::watch::spawn(hub.vault(), note_core::watch::DEBOUNCE, move |changes| {
+        let Ok(index) = bg.lock() else { return };
+        match apply_external(&vault, &index, &changes) {
+            Ok(0) => {}
+            Ok(count) => {
+                log::info!("外部改了 {count} 篇，索引已跟上");
+                let rels: Vec<String> = changes
+                    .iter()
+                    .map(|c| match c {
+                        note_core::watch::Change::Touched(r)
+                        | note_core::watch::Change::Removed(r) => r.clone(),
+                    })
+                    .collect();
+                let _ = handle.emit("note://indexed", rels);
+            }
+            Err(e) => log::warn!("外部改动收敛失败：{e}"),
+        }
+    }) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            log::warn!("文件监听起不来（界面不会自动刷新，手动刷新仍可用）：{e}");
+            None
+        }
+    }
 }
 
 /// 当日做一次快照。启动后跑，不挡启动、不排主锁——整库遍历在两万篇下是秒级的，
@@ -201,7 +243,8 @@ async fn import_apply(app: AppHandle, src: String) -> Result<ImportReport, Strin
     })
     .await
     .map_err(|e| e.to_string())??;
-    let _ = handle.emit("note://indexed", true);
+    let rels = report.notes.clone();
+    let _ = handle.emit("note://indexed", rels);
     Ok(report)
 }
 
@@ -239,7 +282,7 @@ fn capture_text(
     })?;
     let rel = cap.rel.clone();
     let content = cap.content.clone();
-    reindex_async(app, move |vault, index| {
+    reindex_async(app, vec![rel.clone()], move |vault, index| {
         reindex_captured(vault, index, &rel, &content)
     });
     Ok(cap)
@@ -310,7 +353,9 @@ fn vault_open(
 ) -> Result<AppInfo, String> {
     let hub = Hub::open_or_create(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
     let info = hub.app_info().map_err(|e| e.to_string())?;
+    let watcher = start_watcher(&app, &hub);
     *state.0.lock().map_err(|e| e.to_string())? = Some(hub);
+    *state.1.lock().map_err(|e| e.to_string())? = watcher;
     write_last_vault(&app, std::path::Path::new(&path));
     Ok(info)
 }
@@ -328,7 +373,9 @@ fn save_note(
     let hash = with_hub_write(&state, |h| {
         h.save_note_write(&rel, &content, expect_hash.as_deref())
     })?;
-    reindex_async(app, move |vault, index| reindex_note(vault, index, &rel));
+    reindex_async(app, vec![rel.clone()], move |vault, index| {
+        reindex_note(vault, index, &rel)
+    });
     Ok(hash)
 }
 
@@ -340,7 +387,9 @@ fn note_create(
 ) -> Result<String, WriteErr> {
     let rel = with_hub_write(&state, |h| h.note_create_file(&title))?;
     let shown = rel.clone();
-    reindex_async(app, move |vault, index| reindex_note(vault, index, &rel));
+    reindex_async(app, vec![rel.clone()], move |vault, index| {
+        reindex_note(vault, index, &rel)
+    });
     Ok(shown)
 }
 
@@ -353,9 +402,11 @@ fn note_rename(
 ) -> Result<String, WriteErr> {
     let new_rel = with_hub_write(&state, |h| h.note_rename_file(&rel, &new_stem))?;
     let shown = new_rel.clone();
-    reindex_async(app, move |vault, index| {
-        reindex_moved(vault, index, &rel, &new_rel)
-    });
+    reindex_async(
+        app,
+        vec![rel.clone(), new_rel.clone()],
+        move |vault, index| reindex_moved(vault, index, &rel, &new_rel),
+    );
     Ok(shown)
 }
 
@@ -367,16 +418,20 @@ fn note_move(
     new_rel: String,
 ) -> Result<(), WriteErr> {
     with_hub_write(&state, |h| h.note_move_file(&rel, &new_rel))?;
-    reindex_async(app, move |vault, index| {
-        reindex_moved(vault, index, &rel, &new_rel)
-    });
+    reindex_async(
+        app,
+        vec![rel.clone(), new_rel.clone()],
+        move |vault, index| reindex_moved(vault, index, &rel, &new_rel),
+    );
     Ok(())
 }
 
 #[tauri::command]
 fn note_trash(app: AppHandle, state: State<'_, Shared>, rel: String) -> Result<(), WriteErr> {
     with_hub_write(&state, |h| h.note_trash_file(&rel))?;
-    reindex_async(app, move |_vault, index| unindex(index, &rel));
+    reindex_async(app, vec![rel.clone()], move |_vault, index| {
+        unindex(index, &rel)
+    });
     Ok(())
 }
 
@@ -393,7 +448,9 @@ fn note_restore(
     rel: String,
 ) -> Result<(), WriteErr> {
     with_hub_write(&state, |h| h.note_restore_file(&batch, &rel))?;
-    reindex_async(app, move |vault, index| reindex_note(vault, index, &rel));
+    reindex_async(app, vec![rel.clone()], move |vault, index| {
+        reindex_note(vault, index, &rel)
+    });
     Ok(())
 }
 
@@ -450,7 +507,9 @@ fn backup_restore(
     id: String,
 ) -> Result<String, WriteErr> {
     let hash = with_hub_write(&state, |h| h.snapshot_restore(&rel, &id))?;
-    reindex_async(app, move |vault, index| reindex_note(vault, index, &rel));
+    reindex_async(app, vec![rel.clone()], move |vault, index| {
+        reindex_note(vault, index, &rel)
+    });
     Ok(hash)
 }
 
@@ -487,7 +546,7 @@ pub fn run() {
     );
 
     builder
-        .manage(Shared(Mutex::new(None)))
+        .manage(Shared(Mutex::new(None), Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             app_info,
             capture_text,
@@ -521,7 +580,9 @@ pub fn run() {
             if let Some(p) = read_last_vault(&handle) {
                 match Hub::open(&p) {
                     Ok(hub) => {
+                        let watcher = start_watcher(&handle, &hub);
                         *state.0.lock().unwrap() = Some(hub);
+                        *state.1.lock().unwrap() = watcher;
                         log::info!("已打开 Vault {}", p.display());
                         // 当日还没快照过就补一次（docs/03 §备份）。放在这里而不是
                         // 定时器：规格要的是"当日首次启动后"，不是固定钟点。

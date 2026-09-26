@@ -367,3 +367,182 @@ fn 旧库的链接暂存表在打开时重灌锚点不再丢() {
         "块级引用没解析出来"
     );
 }
+
+#[test]
+fn 标签与属性按类型落进各自的列() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic(
+        "notes/带属性.md",
+        "---\nid: n-prop0001\ntitle: 带属性\ntags: [ai-native, m4, ai-native]\nprops:\n  priority: high\n  as_of: 2026-09-22\n  weight: 3\n  已确认: true\n---\n\n一段正文。\n"
+            .as_bytes(),
+    )
+    .unwrap();
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+
+    let tags: Vec<String> = {
+        let mut s = idx
+            .conn()
+            .prepare("SELECT tag FROM tags ORDER BY tag")
+            .unwrap();
+        s.query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .collect()
+    };
+    assert_eq!(tags, vec!["ai-native", "m4"], "重复的只留一条: {tags:?}");
+
+    // (key, text, num, date, json)——五元组写 inline 太糊，起个名字
+    type PropRow = (
+        String,
+        Option<String>,
+        Option<f64>,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<PropRow> = {
+        let mut s = idx
+            .conn()
+            .prepare(
+                "SELECT key, value_text, value_num, value_date, value_json FROM props ORDER BY key",
+            )
+            .unwrap();
+        s.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .filter_map(|x| x.ok())
+        .collect()
+    };
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    // 分列存的意义：按 due 排序、按 priority 分组不用在 SQL 里现解析字符串
+    assert_eq!(
+        rows.iter()
+            .find(|(k, ..)| k == "as_of")
+            .unwrap()
+            .3
+            .as_deref(),
+        Some("2026-09-22"),
+        "日期该落在 value_date: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter().find(|(k, ..)| k == "weight").unwrap().2,
+        Some(3.0),
+        "数字该落在 value_num: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|(k, ..)| k == "priority")
+            .unwrap()
+            .1
+            .as_deref(),
+        Some("high")
+    );
+}
+
+#[test]
+fn 改了frontmatter旧标签不会留在库里() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let 初版 = "---\nid: n-tag0001\ntags: [甲, 乙]\nprops:\n  priority: high\n---\n\n内容。\n";
+    v.write_atomic("notes/甲.md", 初版.as_bytes()).unwrap();
+    let (v2, idx) = open(dir.path());
+    idx.rebuild_all(&v2).unwrap();
+    let count = |sql: &str| -> i64 { idx.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT COUNT(*) FROM tags"), 2);
+    assert_eq!(count("SELECT COUNT(*) FROM props"), 1);
+
+    // 日常保存路径：换标签、删属性
+    v2.write_atomic(
+        "notes/甲.md",
+        "---\nid: n-tag0001\ntags: [丙]\n---\n\n内容。\n".as_bytes(),
+    )
+    .unwrap();
+    let f = v2.note_file("notes/甲.md").unwrap();
+    idx.index_file(&f, "---\nid: n-tag0001\ntags: [丙]\n---\n\n内容。\n")
+        .unwrap();
+    let tags: Vec<String> = {
+        let mut s = idx.conn().prepare("SELECT tag FROM tags").unwrap();
+        s.query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .collect()
+    };
+    assert_eq!(tags, vec!["丙"], "旧标签洗掉了没有: {tags:?}");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM props"),
+        0,
+        "front-matter 里删掉的属性必须跟着消失"
+    );
+    assert!(idx.orphan_counts().unwrap().is_clean());
+}
+
+#[test]
+fn 删掉一篇后标签与属性不留孤儿() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic(
+        "notes/甲.md",
+        "---\nid: n-del0001\ntags: [留痕]\nprops:\n  as_of: 2026-09-22\n---\n\n内容。\n".as_bytes(),
+    )
+    .unwrap();
+    let (v2, idx) = open(dir.path());
+    idx.rebuild_all(&v2).unwrap();
+    assert_eq!(
+        idx.conn()
+            .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    std::fs::remove_file(v2.root().join("notes").join("甲.md")).unwrap();
+    idx.rebuild_all(&v2).unwrap();
+    let 剩 = |t: &str| {
+        idx.conn()
+            .query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        剩("tags"),
+        0,
+        "文件没了标签还在，标签视图就会多出一个点不开的标签"
+    );
+    assert_eq!(剩("props"), 0);
+    assert!(idx.orphan_counts().unwrap().is_clean());
+}
+
+#[test]
+fn 视图文件的标签不进标签表() {
+    // views/ 是查询定义，不参与检索（docs/02）；标签与属性同一口径，
+    // 否则"按标签筛选"的结果里会混进视图自己
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic(
+        "views/待办.md",
+        "---\nid: n-view0001\ntags: [视图标签]\nprops:\n  priority: high\n---\n".as_bytes(),
+    )
+    .unwrap();
+    let (v2, idx) = open(dir.path());
+    idx.rebuild_all(&v2).unwrap();
+    assert_eq!(
+        idx.conn()
+            .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "视图本身还是要登记的"
+    );
+    assert_eq!(
+        idx.conn()
+            .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        idx.conn()
+            .query_row("SELECT COUNT(*) FROM props", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}

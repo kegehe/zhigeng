@@ -253,6 +253,7 @@ impl Index {
             purge_children(&self.conn, &note_id)?;
         }
         insert_note(&self.conn, f, src, &doc, &note_id, &mut stats)?;
+        write_meta(&self.conn, &doc, &note_id, f.kind)?;
         for lid in stale_links {
             self.conn.execute(
                 "UPDATE links SET to_note=?1, broken=0 WHERE id=?2",
@@ -452,7 +453,26 @@ impl Index {
     }
 
     /// 孤儿索引行：派生表里有、主表里没有。非零即红（docs/03 §可观测性）。
+    /// 库里给这篇记的内容 hash。外部改动的收敛拿它判断"是不是真的变了"——
+    /// 原子写一定会触发监听事件，没有这道闸门就每次保存都白跑两遍索引。
+    pub fn stored_hash(&self, rel: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT content_hash FROM notes WHERE path=?1", [rel], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok())
+    }
+
     pub fn orphan_counts(&self) -> Result<Orphans> {
+        // 派生表里指向已不存在的笔记的行
+        let dangling = |conn: &rusqlite::Connection, t: &str, col: &str| -> Result<i64> {
+            Ok(conn.query_row(
+                &format!("SELECT count(*) FROM {t} t LEFT JOIN notes n ON n.id=t.{col} WHERE n.id IS NULL"),
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        };
         let fts = |t: &str, main: &str| -> Result<i64> {
             Ok(self.conn.query_row(
                 &format!(
@@ -470,6 +490,8 @@ impl Index {
                 [],
                 |r| r.get(0),
             )?,
+            tags: dangling(&self.conn, "tags", "note_id")?,
+            props: dangling(&self.conn, "props", "note_id")?,
         })
     }
 
@@ -537,6 +559,9 @@ pub struct Orphans {
     pub blocks_fts: i64,
     pub chunks_fts: i64,
     pub chunks_no_blocks: i64,
+    /// 标签与属性指向已不存在的笔记。它们没有内容可还原，留着就是标签视图里的幽灵计数
+    pub tags: i64,
+    pub props: i64,
 }
 
 impl Orphans {
@@ -546,6 +571,8 @@ impl Orphans {
                 blocks_fts: 0,
                 chunks_fts: 0,
                 chunks_no_blocks: 0,
+                tags: 0,
+                props: 0,
             }
     }
 }
@@ -595,6 +622,9 @@ fn purge_children(conn: &Connection, note_id: &str) -> Result<()> {
     // 这里要原地留着 notes 行，所以得自己删。
     conn.execute("DELETE FROM chunks WHERE note_id=?1", [note_id])?;
     conn.execute("DELETE FROM blocks WHERE note_id=?1", [note_id])?;
+    // 标签与属性也是这篇的派生物：不一起删，改一次 front-matter 就留下洗不掉的旧标签
+    conn.execute("DELETE FROM tags WHERE note_id=?1", [note_id])?;
+    conn.execute("DELETE FROM props WHERE note_id=?1", [note_id])?;
     Ok(())
 }
 
@@ -609,6 +639,33 @@ fn vec_tables_of(conn: &Connection) -> Vec<String> {
         return Vec::new();
     };
     rows.filter_map(|x| x.ok()).collect()
+}
+
+/// 标签与属性：纯派生自 front-matter（docs/02 §标签/属性）。
+///
+/// 视图文件不收——它是查询定义，不是知识内容。收进来就会让"按标签筛选"的结果里
+/// 混进视图自己，而 `views/` 下的东西本来就不该参与检索（与 chunks/FTS 同一口径）。
+fn write_meta(conn: &Connection, doc: &Doc, note_id: &str, kind: NoteKind) -> Result<()> {
+    if matches!(kind, NoteKind::View) {
+        return Ok(());
+    }
+    let yaml = doc.front_matter.as_ref().map_or("", |fm| fm.yaml.as_str());
+    let meta = crate::meta::parse(yaml);
+    for tag in &meta.tags {
+        conn.execute(
+            "INSERT OR IGNORE INTO tags(note_id, tag) VALUES(?1,?2)",
+            params![note_id, tag],
+        )?;
+    }
+    for (key, value) in &meta.props {
+        let (text, num, date, json) = value.columns();
+        conn.execute(
+            "INSERT OR REPLACE INTO props(note_id, key, value_text, value_num, value_date, value_json)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![note_id, key, text, num, date, json],
+        )?;
+    }
+    Ok(())
 }
 
 /// 解析 + 落库。`reindex` 与增量走这一个函数（docs/02：重建器与解析器同源）。

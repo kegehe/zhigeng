@@ -213,6 +213,47 @@ pub fn snapshot_vault(vault: &Vault, force: bool) -> Result<Option<SnapshotRow>>
     Ok(snapshot::run(vault, force)?.map(SnapshotRow::of))
 }
 
+/// 外部改动的收敛（docs/05 验收 ⑤ 的"要么刷新"那一半）。返回动了几篇。
+///
+/// 两条判据都**不信监听器的分类**，只看现在的事实：
+///
+/// - 文件在，且磁盘 hash 与库里记的不一样 → 重索引。相等就是我们自己刚写的那一次
+///   （原子写必然触发事件），于是 no-op——没有这道闸门，每次保存都会掀起一轮停不下来的事件。
+/// - 文件不在，但库里有行 → 摘掉。监听器把改名报成 `Removed` 还是 `Touched` 都收敛到同一结果。
+///
+/// "在不在"是直接读出来的，不是先 `exists()` 再读：两次判断之间文件可能被删，
+/// 而让那一次失败冒到上层等于**把整批其他路径一起丢掉**——事件不会再来第二次。
+pub fn apply_external(
+    vault: &Vault,
+    index: &Index,
+    changes: &[crate::watch::Change],
+) -> Result<usize> {
+    let mut done = 0usize;
+    for c in changes {
+        let rel = match c {
+            crate::watch::Change::Touched(r) | crate::watch::Change::Removed(r) => r,
+        };
+        let on_disk = vault.read(rel).map(|b| crate::hash::content_hash(&b)).ok();
+        let stored = index.stored_hash(rel)?;
+        match (on_disk, stored) {
+            (Some(h), Some(old)) if h == old => {} // 自己刚写的那一次
+            // 扫描器不收的路径（被排除的目录、`.md` 之外的东西）也不能在这儿收进来：
+            // 那会让索引里多出一行、全库自检从此报漂移，而监听器不知道这些规矩。
+            (Some(_), _) if !crate::vault::is_indexable_rel(rel) => {}
+            (Some(_), _) => {
+                reindex_note(vault, index, rel)?;
+                done += 1;
+            }
+            (None, Some(_)) => {
+                unindex(index, rel)?;
+                done += 1;
+            }
+            (None, None) => {} // 盘上没有、库里也没有
+        }
+    }
+    Ok(done)
+}
+
 /// 快照列表里的一行。**不把 `files` 全量清单带给前端**——那是两万条 hash，
 /// 界面只要"哪一份、什么时候、动了几个文件"。
 #[derive(Debug, Clone, Serialize)]
