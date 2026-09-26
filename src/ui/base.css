@@ -296,7 +296,7 @@
      常驻入口——气泡要先选中文本才现身，这条不用。 */
   .block-editor .handle {
     position: absolute;
-    left: -26px;
+    left: -24px; /* 正好落在正文容器的 24px 页边内：窗口再窄也不会被裁掉 */
     width: 20px;
     border-radius: var(--radius-sm);
     color: var(--text-disabled);

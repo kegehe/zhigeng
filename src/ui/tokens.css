@@ -66,7 +66,7 @@
   --space-12: 48px;
 
   /* ---- 排版约束 ---- */
-  --measure: 46rem; /* 正文 65–75 字符 */
+  --measure: min(72rem, 100%); /* 中文一行 ~74 字，见 [06] §正文排版细则 */
   --gap-para: 1.15em;
   --gap-list: 0.35em;
   --gap-h-top: 1.8em;
