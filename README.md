@@ -168,7 +168,7 @@ src/            React 19 + TS + Tailwind v4；ui/tokens.css 是全仓库唯一�
 docs/           规格即真相：00 导航 · 01 范围 · 02 数据模型 · 03 架构 · 04 AI · 05 路线图 · 06 样式 · adr/
 testdata/       往返 golden 语料
 probes/         一次性验证原型（Spike C，允许丢弃）
-scripts/        check.mjs：一条命令跑完所有门禁 · guard.mjs：护栏三项 · hooks/pre-push：可选的 push 前拦截
+scripts/        check.mjs：一条命令跑完所有门禁 · guard.mjs：护栏四项（依赖方向 / 预算键 / 样式禁止清单 / 悬空依赖声明）· hooks/pre-push：可选的 push 前拦截
 ```
 
 依赖方向单向：`src-tauri` / `note-cli` / `note-mcp` → `note-core` → `md-kernel`。

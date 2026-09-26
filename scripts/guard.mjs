@@ -1,9 +1,10 @@
-// 护栏：三件事必须在每次提交前成立（`node scripts/check.mjs` 把这一项接进去了）。
+// 护栏：四件事必须在每次提交前成立（`node scripts/check.mjs` 把这一项接进去了）。
 // 成本极低，但不做就会慢慢烂掉。
 // 1) 依赖方向：note-core / md-kernel / note-cli 不许链接 Tauri，md-kernel 不许链接 SQLite
 // 2) perf-budget.json 的键必须齐，且与 docs/03 §性能预算 对得上
 // 3) 样式禁止清单（docs/06 §4）：字面量颜色、裸 z-index、transition:all、去掉焦点环、联网取字体
-import { readFileSync, readdirSync, statSync } from "node:fs";
+// 4) `[workspace.dependencies]` 里不许有"声明了没人引用"的依赖
+import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const fail = [];
@@ -49,6 +50,32 @@ for (const k of [
 }
 if (budget["同步IPC调用_p95_ms"] !== 8) {
   fail.push("同步 IPC 预算被改动，需同步改 docs/00 的 G6 与 docs/03");
+}
+
+// ---- 悬空的 workspace 依赖 ----
+// 三次同一种事故：`notify` 声明了没有一个 .rs 引用它（于是"外部改动只靠保存时拦"），
+// `criterion` 声明了没有 `[[bench]]` target（于是"微基准每次合入记录"是空的），
+// `note-mcp` 被文档记成已交付而 crate 根本不存在。前两条人肉翻代码才发现，
+// 一条断言就能永久挡住：**声明 ≠ 使用**。
+const wsToml = readFileSync("Cargo.toml", "utf8");
+const wsStart = wsToml.indexOf("[workspace.dependencies]");
+if (wsStart < 0) {
+  fail.push("Cargo.toml 里没有 [workspace.dependencies]，检查这条护栏是否该改");
+} else {
+  const rest = wsToml.slice(wsStart + "[workspace.dependencies]".length);
+  const sectionEnd = rest.search(/^\s*\[/m);
+  const block = sectionEnd < 0 ? rest : rest.slice(0, sectionEnd);
+  const declared = [...block.matchAll(/^([A-Za-z0-9_-]+)\s*=/gm)].map((m) => m[1]);
+  const consumers = ["crates/md-kernel", "crates/note-core", "crates/note-cli", "src-tauri"]
+    .map((d) => join(d, "Cargo.toml"))
+    .filter((f) => existsSync(f))
+    .map((f) => readFileSync(f, "utf8"));
+  for (const name of declared) {
+    const used = consumers.some((t) =>
+      new RegExp(`^\\s*"?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"?\\s*=`, "m").test(t),
+    );
+    if (!used) fail.push(`[workspace.dependencies] 里的 ${name} 没有任何 crate 引用它（声明了没用掉）`);
+  }
 }
 
 // ---- 样式禁止清单 ----
