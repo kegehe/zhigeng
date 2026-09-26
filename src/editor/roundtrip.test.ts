@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
 import {
   applyBlockType,
@@ -362,6 +362,115 @@ describe("拖拽重排：空白按 Markdown 的规矩重算，锚点跟着自己
     editor.view.dispatch(moveBlock(editor.state, from, 4)!);
     const 内容行 = (s: string) => s.split("\n").filter((l) => l.trim()).sort();
     expect(内容行(docToMarkdown(editor.state.doc, doc))).toEqual(内容行(src));
+    editor.destroy();
+  });
+});
+
+/**
+ * 键盘通路。测的是**按键本身有没有绑上**——直接调命令测不到这件事，
+ * 而手柄 `⋮` 是鼠标 affordance，没有键盘等价形式就是"能看不能做"。
+ */
+describe("块操作的键盘快捷键", () => {
+  const 键盘样本 = () => {
+    const b = (raw: string, gapBefore: string, content: string, id: string | null = null) => ({
+      kind: "paragraph",
+      id,
+      raw,
+      gapBefore,
+      content,
+      level: null,
+      checked: null,
+      fields: [],
+      children: [],
+    });
+    const blocks: EditDoc["blocks"] = [
+      b("第一段 ^b-p1\n", "", "第一段", "b-p1"),
+      b("第二段 ^b-p2\n", "\n", "第二段", "b-p2"),
+      b("第三段 ^b-p3\n", "\n", "第三段", "b-p3"),
+    ];
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    return { doc, src: reassemble(doc) };
+  };
+
+  /** 走真实分发：快捷键挂在 ProseMirror 的 handleKeyDown 上 */
+  const KEY_CODES: Record<string, number> = { ArrowDown: 40, ArrowUp: 38 };
+  beforeAll(() => {
+    // jsdom 没实现 `getClientRects`。快捷键**没接住**的那个键会落到 ProseMirror 自己的
+    // 上下键选区逻辑，那里要量几何 ⇒ 直接抛 `TypeError`。补一个空实现，让这条测试测的
+    // 是"这个键没被绑上"，而不是 jsdom 的洞。
+    const 零矩形 = () => Object.assign([], { item: () => null });
+    const 零盒 = () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0 });
+    for (const proto of [Range.prototype, Element.prototype] as unknown as Array<Record<string, unknown>>) {
+      if (typeof proto.getClientRects !== "function") proto.getClientRects = 零矩形;
+      if (typeof proto.getBoundingClientRect !== "function") proto.getBoundingClientRect = 零盒;
+    }
+  });
+  const 按键 = (
+    editor: ReturnType<typeof createTestEditor>,
+    key: string,
+    修饰: { alt?: boolean; ctrl?: boolean; shift?: boolean } = {},
+  ) => {
+    const ev = new KeyboardEvent("keydown", {
+      key,
+      bubbles: true,
+      cancelable: true,
+      altKey: !!修饰.alt,
+      ctrlKey: !!修饰.ctrl,
+      shiftKey: !!修饰.shift,
+    });
+    // `KeyboardEvent` 构造器不收 `keyCode`（已废弃），但按键解析要看它——真实浏览器里
+    // 这两个字段都有值。不补就等于在测一个真机上不存在的按键形状。
+    const code = key.length === 1 ? key.toUpperCase().charCodeAt(0) : KEY_CODES[key] ?? 0;
+    Object.defineProperty(ev, "keyCode", { value: code });
+    Object.defineProperty(ev, "which", { value: code });
+    editor.view.dom.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+
+  const 光标在 = (editor: ReturnType<typeof createTestEditor>) =>
+    editor.state.selection.$from.parent.textContent;
+
+  it("Alt+↓ 把当前块下移，**光标跟着块走**（连按两次移的还是同一块）", () => {
+    const { doc } = 键盘样本();
+    const editor = createTestEditor(doc);
+    // 光标放进第一块
+    editor.commands.setTextSelection(2);
+    expect(按键(editor, "ArrowDown", { alt: true })).toBe(true);
+    expect(光标在(editor)).toBe("第一段");
+    expect(按键(editor, "ArrowDown", { alt: true })).toBe(true);
+    expect(光标在(editor)).toBe("第一段");
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("第二段 ^b-p2\n\n第三段 ^b-p3\n\n第一段 ^b-p1\n");
+    editor.destroy();
+  });
+
+  it("Alt+↑ 到顶之后不再动（不给空事务，也就不产生一次落盘）", () => {
+    const { doc, src } = 键盘样本();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2); // 已经在第一块，上面就是边界
+    expect(按键(editor, "ArrowUp", { alt: true })).toBe(false);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("Ctrl+Alt+2 变二级标题、Ctrl+Shift+8 变列表项，落盘就是那两个前缀", () => {
+    const { doc } = 键盘样本();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    expect(按键(editor, "2", { ctrl: true, alt: true })).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc).startsWith("## 第一段 ^b-p1\n")).toBe(true);
+    expect(按键(editor, "8", { ctrl: true, shift: true })).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc).startsWith("- 第一段 ^b-p1\n")).toBe(true);
+    editor.destroy();
+  });
+
+  it("Ctrl+Alt+0 回到正文：绕一圈仍然等于源文件", () => {
+    const { doc, src } = 键盘样本();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    按键(editor, "2", { ctrl: true, alt: true });
+    按键(editor, "8", { ctrl: true, shift: true });
+    expect(按键(editor, "0", { ctrl: true, alt: true })).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
 });

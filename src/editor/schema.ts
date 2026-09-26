@@ -1,7 +1,7 @@
-import { Extension, Mark, Node, type Attributes } from "@tiptap/core";
-import { Plugin, type Transaction } from "@tiptap/pm/state";
+import { Extension, Mark, Node, type Attributes, type Editor } from "@tiptap/core";
+import { Plugin, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { history } from "@tiptap/pm/history";
-import { applyBlockType, numberedMarker, type BlockTypeId } from "./blocks";
+import { applyBlockType, moveBlock, numberedMarker, type BlockTypeId } from "./blocks";
 
 /**
  * 与 md-kernel 块模型一一对应的节点集，加上五个行内标记。
@@ -232,6 +232,74 @@ export const History = Extension.create({
 });
 
 /**
+ * 块操作的键盘通路。
+ *
+ * 手柄 `⋮` 是鼠标 affordance（悬停才出现、按住才拖），所以这些操作必须有键盘等价形式，
+ * 否则"能看不能做"。记法跟 Google Docs：`Ctrl+Alt+0–3` 改正文与标题层级，
+ * `Ctrl+Shift+7/8/9` 改有序 / 无序 / 待办，`Alt+↑/↓` 上下移动整块。
+ *
+ * **一律走 `applyBlockType` / `moveBlock`**，不另写第二套落盘逻辑——那两处各自演化的
+ * 分叉这一轮已经付过一次学费（显示用一套、序列化用另一套）。
+ *
+ * 移动之后要把光标放回那一块：`moveBlock` 是整树替换，选区映射后可能落在别的块上，
+ * 于是"连按两次 Alt+↓"第二次移的就不是同一块了。这类"看起来能用、第二次就错"的 bug
+ * 只能靠显式放回选区来断根。
+ */
+export const BlockKeys = Extension.create({
+  name: "blockKeys",
+  addKeyboardShortcuts() {
+    const setType = (id: BlockTypeId) => ({ editor }: { editor: Editor }) => {
+      const { state } = editor;
+      const { $from } = state.selection;
+      if (!$from.depth) return false;
+      const tr = applyBlockType(state, $from.before(1), id);
+      if (!tr) return false;
+      editor.view.dispatch(tr.scrollIntoView());
+      return true;
+    };
+    const move = (delta: number) => ({ editor }: { editor: Editor }) => {
+      const { state } = editor;
+      const { $from } = state.selection;
+      if (!$from.depth || delta === 0) return false;
+      const start = $from.before(1);
+      let index = -1;
+      let i = 0;
+      state.doc.forEach((_n, off) => {
+        if (off === start) index = i;
+        i++;
+      });
+      if (index < 0) return false;
+      // to 的口径是"最终落在原序号 to 的位置"：下移一格要跨过紧跟的那一块
+      const to = delta < 0 ? index - 1 : index + 2;
+      const tr = moveBlock(state, index, to);
+      if (!tr) return false;
+      const newIndex = delta < 0 ? index - 1 : index + 1;
+      // 移动后那一块的新起点 + 原来在块内的偏移 = 光标该回到的位置
+      let newStart = 0;
+      let k = 0;
+      tr.doc.forEach((n, off) => {
+        if (k === newIndex) newStart = off;
+        k++;
+      });
+      const back = Math.min($from.parentOffset, tr.doc.nodeAt(newStart)!.content.size);
+      editor.view.dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve(newStart + 1 + back))).scrollIntoView());
+      return true;
+    };
+    return {
+      "Ctrl-Alt-0": setType("paragraph"),
+      "Ctrl-Alt-1": setType("heading1"),
+      "Ctrl-Alt-2": setType("heading2"),
+      "Ctrl-Alt-3": setType("heading3"),
+      "Ctrl-Shift-8": setType("bullet"),
+      "Ctrl-Shift-7": setType("numbered"),
+      "Ctrl-Shift-9": setType("todo"),
+      "Alt-ArrowUp": move(-1),
+      "Alt-ArrowDown": move(1),
+    };
+  },
+});
+
+/**
  * 焦点指示落在**当前块**，不是整篇文章。
  *
  * 为什么不用一圈描边：Chrome 对可编辑的 contenteditable 在**鼠标**聚焦时也判
@@ -369,6 +437,7 @@ export const mdExtensions = [
   MdLink,
   BlockIdGuard,
   BlockTools,
+  BlockKeys,
   FocusIndicator,
   History,
 ];
