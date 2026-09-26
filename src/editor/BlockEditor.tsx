@@ -6,6 +6,7 @@ import {
   BLOCK_TYPES,
   docToMarkdown,
   docToJson,
+  moveBlock,
   stampSignatures,
   type BlockTypeId,
   type EditDoc,
@@ -66,7 +67,13 @@ export function BlockEditor({
   startRef.current = onEditStart;
   const wrap = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<Float | null>(null);
-  const [slash, setSlash] = useState<Float | null>(null);
+  /** 块菜单：`/` 与行首手柄共用同一个浮层。`dropSlash` 是选中后要删掉的那个 `/` 的位置 */
+  const [menu, setMenu] = useState<{ top: number; left: number; start: number; dropSlash?: number } | null>(null);
+  /** 鼠标停在哪个顶层块上（手柄跟着它走） */
+  const [hover, setHover] = useState<{ top: number; height: number; start: number; index: number } | null>(null);
+  /** 拖拽时的落位指示线 */
+  const [drop, setDrop] = useState<{ top: number; index: number } | null>(null);
+  const dropRef = useRef<{ top: number; index: number } | null>(null);
   const [linking, setLinking] = useState(false);
   const [href, setHref] = useState("");
 
@@ -116,6 +123,24 @@ export function BlockEditor({
     return () => dom.removeEventListener("mousedown", onMouseDown);
   }, [editor]);
 
+  // 鼠标停在哪个块上，手柄就贴到那一块旁边。只在块或位置真的变了时 setState——
+  // mousemove 的频率比击键还高，每下都渲染等于把 G6 的预算花在画一个 ⋮ 上
+  useEffect(() => {
+    if (!editor) return;
+    const dom = editor.view.dom;
+    const onMove = (ev: MouseEvent) => {
+      const b = blockAt(ev.clientX, ev.clientY);
+      setHover((h) => (b ? (h && h.start === b.start && h.top === b.top ? h : b) : null));
+    };
+    const onLeave = () => setHover(null);
+    dom.addEventListener("mousemove", onMove);
+    dom.addEventListener("mouseleave", onLeave);
+    return () => {
+      dom.removeEventListener("mousemove", onMove);
+      dom.removeEventListener("mouseleave", onLeave);
+    };
+  }, [editor]);
+
   /**
    * 选中文字 → 气泡工具条；插件抛的 `md-slash` DOM 事件 → 块菜单。
    *
@@ -145,12 +170,18 @@ export function BlockEditor({
       const host = wrap.current?.getBoundingClientRect();
       if (!host) return;
       const c = editor.view.coordsAtPos(pos);
-      setSlash({ top: c.bottom - host.top + 6, left: c.left - host.left, pos });
+      const $p = editor.state.doc.resolve(pos);
+      setMenu({
+        top: c.bottom - host.top + 6,
+        left: c.left - host.left,
+        start: $p.depth ? $p.before(1) : 0,
+        dropSlash: pos,
+      });
     };
     // 继续打字就把菜单关掉：块里不再是光秃秃一个 `/` 时，留着它只会挡路
     const closeSlash = () => {
       const { $from } = editor.state.selection;
-      if ($from.parentOffset !== 1 || $from.parent.textContent !== "/") setSlash(null);
+      if ($from.parentOffset !== 1 || $from.parent.textContent !== "/") setMenu(null);
     };
     editor.on("selectionUpdate", syncSel);
     editor.on("update", closeSlash);
@@ -177,18 +208,78 @@ export function BlockEditor({
 
   if (!editor) return null;
 
-  const pickType = (id: BlockTypeId) => {
-    const pos = slash?.pos;
-    if (!pos) return;
+  /** 屏幕坐标 → 那个顶层块的信息。手柄跟谁、拖到哪，都问 ProseMirror 的几何，不自己算布局 */
+  const blockAt = (x: number, y: number) => {
+    // **x 要夹进正文列内**：手柄本身就画在左页边的空白里，不夹的话"按住手柄往下拖"
+    // 这一路问出来的坐标全在编辑器外面，`posAtCoords` 返回 null，落位线永远不出现
+    // （真机第一轮就是这样，拖了个空）。
+    const rect = editor.view.dom.getBoundingClientRect();
+    const cx = Math.min(Math.max(x, rect.left + 2), rect.right - 2);
+    const at = editor.view.posAtCoords({ left: cx, top: y });
+    if (!at) return null;
+    const p = at.pos > -1 ? at.pos : at.inside;
+    if (p < 0) return null;
+    const $p = editor.state.doc.resolve(p);
+    if (!$p.depth) return null;
+    const start = $p.before(1);
+    const dom = editor.view.nodeDOM(start);
+    if (!(dom instanceof HTMLElement)) return null;
+    let index = 0;
+    editor.state.doc.forEach((_n, off, i) => {
+      if (off === start) index = i;
+    });
+    const r = dom.getBoundingClientRect();
+    return { top: dom.offsetTop, height: dom.offsetHeight, start, index, 上半: y < r.top + r.height / 2 };
+  };
+
+  const applyType = (id: BlockTypeId) => {
+    if (!menu) return;
     const { state } = editor;
-    const start = state.doc.resolve(pos).before(1);
-    // 与输入规则、测试共用 applyBlockType。那个 `/` 是菜单的触发符，选中类型后就是
-    // 垃圾字符必须吃掉；它在 `pos` **之后**（插件拿到的是字符插入前的光标位），
-    // 删错方向就等于删块边界——第一版就在文件里留下了一个斜杠。
-    let tr = applyBlockType(state, start, id) ?? state.tr;
-    if (state.doc.textBetween(pos, pos + 1) === "/") tr = tr.delete(pos, pos + 1);
-    editor.view.dispatch(tr.scrollIntoView());
-    setSlash(null);
+    // 与输入规则、顶部工具栏共用 applyBlockType。`/` 是菜单的触发符，选中类型后就是
+    // 垃圾字符必须吃掉；它在记录位置的**后面**，删错方向就等于删块边界。
+    let tr = applyBlockType(state, menu.start, id) ?? state.tr;
+    const p = menu.dropSlash;
+    if (p !== undefined && state.doc.textBetween(p, p + 1) === "/") tr = tr.delete(p, p + 1);
+    if (tr.docChanged) editor.view.dispatch(tr.scrollIntoView());
+    setMenu(null);
+  };
+
+  /**
+   * 手柄按下：挪动超过 5px 算拖拽，否则算点击开类型菜单。
+   *
+   * 用 pointer 事件而不是 HTML5 拖放：一是拖放要在 contenteditable 里和 ProseMirror
+   * 自己的 drop 处理抢事件，二是真机验证只能用 CDP 发普通鼠标事件，`dragstart` 那套
+   * 它根本触发不了——验证不了的交互不该上生产。
+   */
+  const onHandleDown = (e: React.PointerEvent, from: { index: number; start: number }) => {
+    e.preventDefault();
+    const originY = e.clientY;
+    let moved = false;
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.abs(ev.clientY - originY) < 5) return;
+      moved = true;
+      const b = blockAt(ev.clientX, ev.clientY);
+      const next = b ? { top: b.top + (b.上半 ? 0 : b.height), index: b.上半 ? b.index : b.index + 1 } : null;
+      dropRef.current = next;
+      setDrop(next);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const target = dropRef.current;
+      dropRef.current = null;
+      setDrop(null);
+      if (!moved) {
+        const dom = editor.view.nodeDOM(from.start);
+        if (dom instanceof HTMLElement) setMenu({ top: dom.offsetTop + dom.offsetHeight + 4, left: 0, start: from.start });
+        return;
+      }
+      if (!target) return;
+      const tr = moveBlock(editor.state, from.index, target.index);
+      if (tr) editor.view.dispatch(tr);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   };
 
   const applyLink = () => {
@@ -259,16 +350,29 @@ export function BlockEditor({
           ) : null}
         </div>
       ) : null}
-      {slash ? (
+      {hover && !drop ? (
+        <div
+          className="handle"
+          style={{ top: hover.top }}
+          title="拖拽排序 · 点击改类型"
+          role="button"
+          tabIndex={-1}
+          onPointerDown={(e) => onHandleDown(e, { index: hover.index, start: hover.start })}
+        >
+          ⋮
+        </div>
+      ) : null}
+      {drop ? <div className="drop-line" style={{ top: drop.top }} aria-hidden="true" /> : null}
+      {menu ? (
         <div
           className="slash"
-          style={{ top: slash.top, left: slash.left }}
+          style={{ top: menu.top, left: menu.left }}
           onMouseDown={(e) => e.preventDefault()}
           role="menu"
           aria-label="块类型"
         >
           {BLOCK_TYPES.map((b) => (
-            <button key={b.id} type="button" role="menuitem" onClick={() => pickType(b.id)}>
+            <button key={b.id} type="button" role="menuitem" onClick={() => applyType(b.id)}>
               {b.标签}
             </button>
           ))}

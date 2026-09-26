@@ -278,6 +278,54 @@ export function applyBlockType(
   });
 }
 
+const LIST_KINDS = new Set(["bullet", "numbered", "todo"]);
+
+/** 与 `docToMarkdown` 里同一条判据：同一列表、同一层级的连续项之间不留空行 */
+function continuesList(prev: PmNode | null, kind: string, depth: number): boolean {
+  if (!prev) return false;
+  const pk = String(prev.attrs.mdKind ?? "paragraph");
+  return pk === kind && Number(prev.attrs.mdDepth ?? 0) === depth && LIST_KINDS.has(kind);
+}
+
+/**
+ * 把第 `from` 个顶层块挪到第 `to` 个位置（都是**块序号**，不是字符位置——位置在删插
+ * 之间会漂，序号不会）。返回 null 表示原地不动。
+ *
+ * 拖拽排序敢做，靠两件事：锚点写在 `raw` 里跟着自己那块走（链接认块 ID 不认顺序），
+ * 而未改动的块仍然逐字节回写。但**块间空白必须重算**：gap 编码的正是"谁跟在谁后面"，
+ * 一个段落挪到列表项后面却带着 `gap=""`，Markdown 会把它读成那个列表项的续行——
+ * 内容一个字节没丢，语义丢了。
+ *
+ * 只重算**前驱真的变了**的那几块。全量重算会把"作者故意留的两三个空行"抹成一行的
+ * 间隔改掉，那是另一种改用户内容。
+ */
+export function moveBlock(state: EditorState, from: number, to: number): Transaction | null {
+  const kids: PmNode[] = [];
+  state.doc.forEach((n) => kids.push(n));
+  if (from === to || from + 1 === to || from < 0 || to < 0 || from >= kids.length || to > kids.length)
+    return null;
+  const list = [...kids];
+  const moved = list.splice(from, 1)[0];
+  if (!moved) return null;
+  const insertAt = from < to ? to - 1 : to;
+  list.splice(insertAt, 0, moved);
+
+  const 原前驱 = new Map<PmNode, PmNode | null>();
+  kids.forEach((n, i) => 原前驱.set(n, i === 0 ? null : (kids[i - 1] ?? null)));
+
+  let changed = false;
+  const out = list.map((n, i) => {
+    const prev = i === 0 ? null : (list[i - 1] ?? null);
+    if (原前驱.get(n) === prev) return n; // 前面还是原来那块：它的空白不归我们管
+    const want = prev === null ? "" : continuesList(prev, String(n.attrs.mdKind ?? "paragraph"), Number(n.attrs.mdDepth ?? 0)) ? "" : "\n";
+    if (String(n.attrs.mdGap ?? "") === want) return n;
+    changed = true;
+    return n.type.create({ ...n.attrs, mdGap: want }, n.content, n.marks);
+  });
+  const tr = state.tr.replaceWith(0, state.doc.content.size, Fragment.fromArray(out));
+  return changed ? tr.scrollIntoView() : tr;
+}
+
 /**
  * 整篇拼回 Markdown。
  *

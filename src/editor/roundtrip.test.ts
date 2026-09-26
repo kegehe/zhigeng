@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
-import { applyBlockType, docToMarkdown, reassemble, type BlockTypeId, type EditDoc } from "./blocks";
+import {
+  applyBlockType,
+  docToMarkdown,
+  moveBlock,
+  reassemble,
+  type BlockTypeId,
+  type EditDoc,
+} from "./blocks";
 
 /**
  * 字节级往返：编辑器的产出必须等于源文件。
@@ -161,62 +168,63 @@ describe("块编辑器字节级往返", () => {
   });
 });
 
+/** 一份手工搭的块树：段落 + 一个紧密列表 + 带锚点的段落，够测类型切换与重排 */
+const 样本 = () => {
+  const b = (
+    kind: string,
+    raw: string,
+    gapBefore: string,
+    content: string,
+    extra: Partial<{ id: string | null; level: number | null; checked: boolean | null }> = {},
+  ) => ({
+    kind,
+    id: null,
+    raw,
+    gapBefore,
+    content,
+    level: null,
+    checked: null,
+    fields: [],
+    children: [],
+    ...extra,
+  });
+  const blocks: EditDoc["blocks"] = [
+    b("paragraph", "正文一段。\n", "", "正文一段。"),
+    b("heading", "## 一个二级标题 ^b-h2\n", "\n", "一个二级标题", { id: "b-h2", level: 2 }),
+    b("quote", "> 引用的话\n", "\n", "引用的话"),
+  ];
+  const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+  return { doc, src: reassemble(doc) };
+};
+
+/** 按谓词找一个顶层块的位置（顶层块的 offset 就是绝对位置） */
+function 位置(editor: ReturnType<typeof createTestEditor>, 找: (n: { textContent: string }) => boolean) {
+  let pos = -1;
+  editor.state.doc.forEach((node, offset) => {
+    if (pos < 0 && 找(node)) pos = offset;
+  });
+  expect(pos).toBeGreaterThanOrEqual(0);
+  return pos;
+}
+
+/** 同一个谓词改成块序号（`moveBlock` 按序号说话） */
+function 序号(editor: ReturnType<typeof createTestEditor>, 找: (n: { textContent: string }) => boolean) {
+  let hit = -1;
+  let i = 0;
+  editor.state.doc.forEach((node) => {
+    if (hit < 0 && 找(node)) hit = i;
+    i++;
+  });
+  expect(hit).toBeGreaterThanOrEqual(0);
+  return hit;
+}
+
 /**
- * 块类型切换：`#` 输入规则、`/` 斜杠菜单、气泡里的类型菜单**共用 `applyBlockType`**，
+ * 块类型切换：`#` 输入规则、`/` 斜杠菜单、顶部常驻工具栏**共用 `applyBlockType`**，
  * 所以这里绿一次，三处入口都绿一次。分叉过一次教训：显示用一套、落盘用另一套，
  * 用户看到的就是"改了没生效"或者"改一个字洗掉一片格式"。
  */
 describe("块类型切换的产出仍是字节级正确的 Markdown", () => {
-  const 样本 = () => {
-    const blocks: EditDoc["blocks"] = [
-      {
-        kind: "paragraph",
-        id: null,
-        raw: "正文一段。\n",
-        gapBefore: "",
-        content: "正文一段。",
-        level: null,
-        checked: null,
-        fields: [],
-        children: [],
-      },
-      {
-        kind: "heading",
-        id: "b-h2",
-        raw: "## 一个二级标题 ^b-h2\n",
-        gapBefore: "\n",
-        content: "一个二级标题",
-        level: 2,
-        checked: null,
-        fields: [],
-        children: [],
-      },
-      {
-        kind: "quote",
-        id: null,
-        raw: "> 引用的话\n",
-        gapBefore: "\n",
-        content: "引用的话",
-        level: null,
-        checked: null,
-        fields: [],
-        children: [],
-      },
-    ];
-    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
-    return { doc, src: reassemble(doc) };
-  };
-
-  /** 按谓词找一个顶层块的位置（顶层块的 offset 就是绝对位置） */
-  const 位置 = (editor: ReturnType<typeof createTestEditor>, 找: (n: { attrs: Record<string, unknown>; textContent: string }) => boolean) => {
-    let pos = -1;
-    editor.state.doc.forEach((node, offset) => {
-      if (pos < 0 && 找(node as never)) pos = offset;
-    });
-    expect(pos).toBeGreaterThanOrEqual(0);
-    return pos;
-  };
-
   it("段落 → 标题 3：加前缀，其余块一个字节不动", () => {
     const { doc, src } = 样本();
     const editor = createTestEditor(doc);
@@ -230,7 +238,7 @@ describe("块类型切换的产出仍是字节级正确的 Markdown", () => {
   });
 
   it("标题 → 正文：前缀摘掉，块锚点仍然在原位", () => {
-    const { doc, src } = 样本();
+    const { doc } = 样本();
     const editor = createTestEditor(doc);
     const pos = 位置(editor, (n) => n.textContent === "一个二级标题");
     editor.view.dispatch(applyBlockType(editor.state, pos, "paragraph")!);
@@ -282,6 +290,78 @@ describe("块类型切换的产出仍是字节级正确的 Markdown", () => {
     // 块内末尾插一个字：这是"改内容"，不是"换块"，gap 必须原样保留
     editor.view.dispatch(editor.state.tr.insertText("啊", pos + node.nodeSize - 1));
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src.replace("二级标题", "二级标题啊"));
+    editor.destroy();
+  });
+});
+
+/**
+ * 拖拽重排。这里测的不是"能不能拖动"，而是**换位之后文件还是不是一篇合法的
+ * Markdown**：块间空白编码的就是"谁跟在谁后面"，段落挪到列表项后面却不补空行，
+ * Markdown 会把它读成那个列表项的续行——内容一个字节没丢，语义丢了。
+ */
+describe("拖拽重排：空白按 Markdown 的规矩重算，锚点跟着自己的块走", () => {
+  const 重排样本 = () => {
+    const blocks: EditDoc["blocks"] = [
+      { kind: "paragraph", id: "b-p1", raw: "第一段 ^b-p1\n", gapBefore: "", content: "第一段", level: null, checked: null, fields: [], children: [] },
+      { kind: "bullet", id: null, raw: "- 项甲\n", gapBefore: "\n", content: "项甲", level: null, checked: null, fields: [], children: [] },
+      { kind: "bullet", id: null, raw: "- 项乙\n", gapBefore: "", content: "项乙", level: null, checked: null, fields: [], children: [] },
+      { kind: "paragraph", id: "b-p4", raw: "第四段 ^b-p4\n", gapBefore: "\n", content: "第四段", level: null, checked: null, fields: [], children: [] },
+    ];
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    return { doc, src: reassemble(doc) };
+  };
+
+  it("把开头的段落拖到列表后面：它前面必须补出一个空行", () => {
+    const { doc } = 重排样本();
+    const editor = createTestEditor(doc);
+    const from = 序号(editor, (n) => n.textContent === "第一段");
+    editor.view.dispatch(moveBlock(editor.state, from, 4)!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "- 项甲\n- 项乙\n\n第四段 ^b-p4\n\n第一段 ^b-p1\n",
+    );
+    editor.destroy();
+  });
+
+  it("拖到文档最前面的那块，不该把空行带到文件开头", () => {
+    const { doc } = 重排样本();
+    const editor = createTestEditor(doc);
+    const from = 序号(editor, (n) => n.textContent === "第四段");
+    editor.view.dispatch(moveBlock(editor.state, from, 0)!);
+    const out = docToMarkdown(editor.state.doc, doc);
+    expect(out.startsWith("第四段 ^b-p4\n")).toBe(true);
+    expect(out).toBe("第四段 ^b-p4\n\n第一段 ^b-p1\n\n- 项甲\n- 项乙\n");
+    editor.destroy();
+  });
+
+  it("交换两个带锚点的块：锚点跟着自己那块走，链接指向不会漂", () => {
+    const { doc } = 重排样本();
+    const editor = createTestEditor(doc);
+    const from = 序号(editor, (n) => n.textContent === "第一段");
+    editor.view.dispatch(moveBlock(editor.state, from, 4)!);
+    const out = docToMarkdown(editor.state.doc, doc);
+    // `^b-p1` 仍然贴在"第一段"那一行、`^b-p4` 仍然贴在"第四段"那一行
+    expect(out).toContain("第一段 ^b-p1\n");
+    expect(out).toContain("第四段 ^b-p4\n");
+    expect(out.indexOf("第四段")).toBeLessThan(out.indexOf("第一段"));
+    editor.destroy();
+  });
+
+  it("原地不动不给事务：拖回自己原来的位置不该产生一次落盘", () => {
+    const { doc } = 重排样本();
+    const editor = createTestEditor(doc);
+    const from = 序号(editor, (n) => n.textContent === "项甲");
+    expect(moveBlock(editor.state, from, from)).toBeNull();
+    expect(moveBlock(editor.state, from, from + 1)).toBeNull();
+    editor.destroy();
+  });
+
+  it("重排不改任何块的正文：逐行集合与原来完全相等", () => {
+    const { doc, src } = 重排样本();
+    const editor = createTestEditor(doc);
+    const from = 序号(editor, (n) => n.textContent === "第一段");
+    editor.view.dispatch(moveBlock(editor.state, from, 4)!);
+    const 内容行 = (s: string) => s.split("\n").filter((l) => l.trim()).sort();
+    expect(内容行(docToMarkdown(editor.state.doc, doc))).toEqual(内容行(src));
     editor.destroy();
   });
 });
