@@ -1,8 +1,26 @@
 import { EditorContent, useEditor } from "@tiptap/react";
 import { TextSelection } from "@tiptap/pm/state";
-import { useEffect, useMemo, useRef, type RefObject } from "react";
-import { docToMarkdown, docToJson, stampSignatures, type EditDoc } from "./blocks";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  applyBlockType,
+  BLOCK_TYPES,
+  docToMarkdown,
+  docToJson,
+  stampSignatures,
+  type BlockTypeId,
+  type EditDoc,
+} from "./blocks";
 import { mdExtensions } from "./schema";
+
+/** 浮层位置：相对外层容器算，滚动时重算，不让它跟着漂 */
+type Float = { top: number; left: number; pos?: number };
+
+const MARKS: { name: string; 标签: string; 样例: string }[] = [
+  { name: "bold", 标签: "加粗", 样例: "B" },
+  { name: "italic", 标签: "斜体", 样例: "I" },
+  { name: "strike", 标签: "删除线", 样例: "S" },
+  { name: "code", 标签: "行内代码", 样例: "{}" },
+];
 
 /**
  * 所见即所得的正文：**浏览与编辑是同一个实例**，只是 `editable` 不同。
@@ -45,6 +63,11 @@ export function BlockEditor({
   const stamping = useRef(true);
   editRef.current = onEdit;
   startRef.current = onEditStart;
+  const wrap = useRef<HTMLDivElement>(null);
+  const [sel, setSel] = useState<Float | null>(null);
+  const [slash, setSlash] = useState<Float | null>(null);
+  const [linking, setLinking] = useState(false);
+  const [href, setHref] = useState("");
 
   const editor = useEditor({
     extensions: mdExtensions,
@@ -92,6 +115,55 @@ export function BlockEditor({
     return () => dom.removeEventListener("mousedown", onMouseDown);
   }, [editor]);
 
+  /**
+   * 选中文字 → 气泡工具条；插件抛的 `md-slash` DOM 事件 → 块菜单。
+   *
+   * 两个浮层**都不写文档**：气泡只读选区，斜杠只读 DOM 事件。走"发事务"那条路会经
+   * `onUpdate` → 标脏 → 停手 800ms 把"只是选了个词 / 打了个斜杠"的一篇写盘。
+   */
+  useEffect(() => {
+    if (!editor) return;
+    const anchorRect = () => {
+      const s = window.getSelection();
+      if (!s || !s.rangeCount) return null;
+      const r = s.getRangeAt(0).getBoundingClientRect();
+      return r.width || r.height ? r : null;
+    };
+    const syncSel = () => {
+      const { from, empty } = editor.state.selection;
+      const host = wrap.current?.getBoundingClientRect();
+      const rect = empty || !editor.isEditable ? null : anchorRect();
+      if (!host || !rect) {
+        setSel(null);
+        return;
+      }
+      setSel({ top: rect.top - host.top - 34, left: rect.left - host.left + rect.width / 2, pos: from });
+    };
+    const onSlash = (ev: Event) => {
+      const { pos } = (ev as CustomEvent<{ pos: number }>).detail;
+      const host = wrap.current?.getBoundingClientRect();
+      if (!host) return;
+      const c = editor.view.coordsAtPos(pos);
+      setSlash({ top: c.bottom - host.top + 6, left: c.left - host.left, pos });
+    };
+    // 继续打字就把菜单关掉：块里不再是光秃秃一个 `/` 时，留着它只会挡路
+    const closeSlash = () => {
+      const { $from } = editor.state.selection;
+      if ($from.parentOffset !== 1 || $from.parent.textContent !== "/") setSlash(null);
+    };
+    editor.on("selectionUpdate", syncSel);
+    editor.on("update", closeSlash);
+    const hostEl = wrap.current;
+    hostEl?.addEventListener("md-slash", onSlash);
+    window.addEventListener("scroll", syncSel, true);
+    return () => {
+      editor.off("selectionUpdate", syncSel);
+      editor.off("update", closeSlash);
+      hostEl?.removeEventListener("md-slash", onSlash);
+      window.removeEventListener("scroll", syncSel, true);
+    };
+  }, [editor]);
+
   useEffect(() => {
     if (!editor) return;
     // 只给开发构建留的探针口子：ADR-004 的 3000 块复测要能直接量到实例
@@ -102,5 +174,104 @@ export function BlockEditor({
     };
   }, [editor, doc, editApi]);
 
-  return <EditorContent editor={editor} />;
+  if (!editor) return null;
+
+  const pickType = (id: BlockTypeId) => {
+    const pos = slash?.pos;
+    if (!pos) return;
+    const { state } = editor;
+    const start = state.doc.resolve(pos).before(1);
+    // 与输入规则、测试共用 applyBlockType。那个 `/` 是菜单的触发符，选中类型后就是
+    // 垃圾字符必须吃掉；它在 `pos` **之后**（插件拿到的是字符插入前的光标位），
+    // 删错方向就等于删块边界——第一版就在文件里留下了一个斜杠。
+    let tr = applyBlockType(state, start, id) ?? state.tr;
+    if (state.doc.textBetween(pos, pos + 1) === "/") tr = tr.delete(pos, pos + 1);
+    editor.view.dispatch(tr.scrollIntoView());
+    setSlash(null);
+  };
+
+  const applyLink = () => {
+    const url = href.trim();
+    setLinking(false);
+    setHref("");
+    if (!url) return;
+    editor.chain().focus().extendMarkRange("link").setMark("link", { href: url }).run();
+    setSel(null);
+  };
+
+  return (
+    <div className="editor-wrap" ref={wrap}>
+      <EditorContent editor={editor} />
+      {sel ? (
+        <div
+          className="bubble"
+          style={{ top: sel.top, left: sel.left }}
+          // 浮层不能抢走正文焦点：焦点一走选区就空，工具条自己就消失了
+          onMouseDown={(e) => e.preventDefault()}
+          role="toolbar"
+          aria-label="选区格式"
+        >
+          {MARKS.map((m) => (
+            <button
+              key={m.name}
+              type="button"
+              className={editor.isActive(m.name) ? "on" : ""}
+              title={m.标签}
+              onClick={() => editor.chain().focus().toggleMark(m.name).run()}
+            >
+              {m.样例}
+            </button>
+          ))}
+          <button
+            type="button"
+            className={editor.isActive("link") ? "on" : ""}
+            title="链接"
+            onClick={() => {
+              if (editor.isActive("link")) {
+                editor.chain().focus().unsetMark("link").run();
+                setSel(null);
+                return;
+              }
+              setLinking(true);
+            }}
+          >
+            链
+          </button>
+          {linking ? (
+            <span className="link-input">
+              <input
+                autoFocus
+                value={href}
+                placeholder="https://…"
+                spellCheck={false}
+                onChange={(e) => setHref(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") applyLink();
+                  else if (e.key === "Escape") setLinking(false);
+                }}
+              />
+              <button type="button" onClick={applyLink}>
+                好
+              </button>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {slash ? (
+        <div
+          className="slash"
+          style={{ top: slash.top, left: slash.left }}
+          onMouseDown={(e) => e.preventDefault()}
+          role="menu"
+          aria-label="块类型"
+        >
+          {BLOCK_TYPES.map((b) => (
+            <button key={b.id} type="button" role="menuitem" onClick={() => pickType(b.id)}>
+              {b.标签}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }

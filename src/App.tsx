@@ -22,7 +22,14 @@ import type {
 } from "./ipc/types";
 
 type Theme = "system" | "light" | "dark";
-/** 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。 */
+/**
+ * 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。
+ *
+ * `"view"` **不是"浏览态"**，是"主区没打开任何可编辑面"的空态（没选笔记，或面板刚关掉）。
+ * 打开一篇笔记直接就是 `"inline"`：正文本来就是同一个编辑器实例，只翻 `editable`，
+ * 所以"打开即可编辑"不多花一次解析、也不多一次挂载。"看一篇会不会写坏文件"这件事
+ * 交给 `dirty` 判据守（没改过就不落盘），不再靠一个模式开关。
+ */
 type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup" | "import";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
@@ -133,10 +140,11 @@ export function App() {
     void refresh();
   }, [refresh]);
 
-  // 索引是异步补的。速记落盘后主窗必须自己长回来，否则新笔记要重启才看得见。
+  // 索引是异步补的。速记捕获落盘后主窗必须自己长回来，否则新笔记要重启才看得见。
   // 事件负载是"变了哪些路径"：正在看的那一篇如果被外部（Obsidian、同步盘）改了，
-  // 浏览态要整个重装载——停在旧内容上是验收 ⑤ 没通过的样子。**编辑态不动**：
-  // 那时框里是用户还没落盘的东西，覆盖它比显示旧内容更糟。
+  // 手里没有未落盘的东西就整个重装载——停在旧内容上是验收 ⑤ 没通过的样子。
+  // **判据是 `unsaved`，不是"有没有在编辑态"**：现在打开就是可编辑的，"在编辑态"不再
+  // 意味着"有东西会丢"；真正会丢的只有没存下来的改动。
   useEffect(() => {
     if (!inTauri()) return;
     let alive = true;
@@ -145,8 +153,18 @@ export function App() {
       if (!alive) return;
       void refresh();
       const rels = e.payload ?? [];
-      if (mode === "view" && selected && rels.includes(selected.rel)) {
-        void loadNote(selected.rel).catch((err) => setError(describeError(err).message));
+      if (!unsaved && selected && rels.includes(selected.rel)) {
+        // **先比内容，再决定要不要重装载**。自己按下保存也会绕一圈回到这里，而重装载是
+        // 整棵编辑器重挂载：光标、撤销栈、正开着的菜单全丢。真机就是这么暴露的——
+        // 打 `/` 唤出块菜单，1.5 秒后菜单自己没了，因为那次保存的事件回来了。
+        void api
+          .readRaw(selected.rel)
+          .then((src) => {
+            if (!alive) return;
+            if (src.content === savedDraft) return; // 就是我们刚存下去的那份
+            void loadNote(selected.rel).catch((err) => setError(describeError(err).message));
+          })
+          .catch((err) => setError(describeError(err).message));
       }
     }).then((f) => {
       if (alive) un = f;
@@ -156,9 +174,9 @@ export function App() {
       alive = false;
       un?.();
     };
-    // 少了 mode / selected 就是白订阅一次：闭包永远停在挂载时那份 selected = null，
+    // 少了 selected / unsaved 就是白订阅一次：闭包永远停在挂载时那份 selected = null，
     // 外部改动的事件到了、列表也刷了，只有正文不动。速记窗那个"连按守卫"踩过同一类坑。
-  }, [refresh, mode, selected]);
+  }, [refresh, selected, unsaved, savedDraft]);
 
   useEffect(() => {
     if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
@@ -236,6 +254,13 @@ export function App() {
     };
   }, [inlineRev, draft, dirty, editing, persist]);
 
+  // "已自动保存"是一次性反馈，不是常驻状态：1.5s 后回 clean，右下角那条提示自己走
+  useEffect(() => {
+    if (saveState !== "saved") return;
+    const t = window.setTimeout(() => setSaveState("clean"), 1500);
+    return () => window.clearTimeout(t);
+  }, [saveState]);
+
   /**
    * 打开一篇要备齐两样：正文要的块树，与落盘要的 `baseHash`。
    *
@@ -266,7 +291,8 @@ export function App() {
       setFlash("这篇还没存下来——先处理冲突提示");
       return;
     }
-    setMode("view");
+    // 打开即编辑：不再有"先看着，要改再按编辑"这一步
+    setMode("inline");
     setFlash(null);
     try {
       await loadNote(rel, title);
@@ -274,6 +300,9 @@ export function App() {
       setError(describeError(e).message);
     }
   };
+
+  /** 关掉面板回正文：开着笔记就回到可编辑，没开才是空态 */
+  const backToNote = () => setMode(selected ? "inline" : "view");
 
   /** 管理动作之后：列表 + 当前篇都要跟着变（改名会换 rel，所以传进来） */
   const afterChange = async (rel?: string | null) => {
@@ -316,14 +345,6 @@ export function App() {
     }
   };
 
-  /** 离开编辑态：先确保存下来了，存不下就不离开（不静默丢用户写的东西） */
-  const leaveEdit = async () => {
-    if (!(await persist())) return;
-    const rel = selected?.rel;
-    setMode("view");
-    if (rel) await afterChange(rel);
-  };
-
   /** 行内 ↔ 源码：同一个草稿、同一条自动保存链路，只是换个写法。存不下就不切。 */
   const switchSurface = async () => {
     if (!(await persist())) return;
@@ -351,12 +372,12 @@ export function App() {
     if (!selected) return;
     const next = nameDraft.trim();
     if (!next) {
-      setMode("view");
+      backToNote();
       return;
     }
     try {
       const newRel = await api.noteRename(selected.rel, next);
-      setMode("view");
+      backToNote();
       await afterChange(newRel);
     } catch (e) {
       const { kind, message } = describeError(e);
@@ -448,7 +469,7 @@ export function App() {
       setImportPlan(null);
       await refresh();
       setFlash("导入 " + r.notes.length + " 篇，已重新索引");
-      setMode("view");
+      backToNote();
     } catch (e) {
       setError(describeError(e).message);
     } finally {
@@ -511,7 +532,7 @@ export function App() {
       await loadNote(rel);
       await refresh();
       setFlash(`已从 ${id} 恢复。被覆盖的那份留在 .note/conflicts/ 里`);
-      setMode("view");
+      backToNote();
     } catch (e) {
       setError(describeError(e).message);
     } finally {
@@ -519,14 +540,17 @@ export function App() {
     }
   };
 
-  /** 正文区（行内与源码共用）的两个键。浏览态按 Esc 什么都不做：那时没有编辑态要离开 */
+  /**
+   * 正文区的两个键。Esc **不再"退出编辑"**——现在没有编辑态可退出（打开就是可编辑的），
+   * 把它做成"从源码框回到所见即所得"才是这个键在这里的含义。
+   */
   const bodyKeys = <T extends HTMLElement>(e: ReactKeyboardEvent<T>) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       void persist();
-    } else if (e.key === "Escape" && editing) {
+    } else if (e.key === "Escape" && mode === "source") {
       e.preventDefault();
-      void leaveEdit();
+      void switchSurface();
     }
   };
 
@@ -656,20 +680,20 @@ export function App() {
             <div className="border-t border-line p-2">
               <button
                 className={btn + (mode === "trash" ? " bg-active" : "")}
-                onClick={() => void (mode === "trash" ? setMode("view") : openTrash())}
+                onClick={() => void (mode === "trash" ? backToNote() : openTrash())}
               >
                 回收站
               </button>
               <button
                 className={btn + (mode === "import" ? " bg-active" : "")}
-                onClick={() => void (mode === "import" ? setMode("view") : openImport())}
+                onClick={() => void (mode === "import" ? backToNote() : openImport())}
               >
                 导入
               </button>
               {/* 没备份是产品最坏的状态（docs/03：唯一副本 = 没有副本），入口上要看得见 */}
               <button
                 className={btn + (mode === "backup" ? " bg-active" : "")}
-                onClick={() => void (mode === "backup" ? setMode("view") : openBackup())}
+                onClick={() => void (mode === "backup" ? backToNote() : openBackup())}
               >
                 备份
                 {info && (info.backupUnconfigured || info.backupDisabled) ? (
@@ -891,37 +915,8 @@ export function App() {
               <div className="prose-note measure px-6 py-8">
                 {selected ? (
                   <>
-                    <div className="mb-4 flex items-center gap-2 text-xs">
-                      {editing ? (
-                        <>
-                          <button className={btnPrimary} onClick={() => void leaveEdit()}>
-                            完成 (Esc)
-                          </button>
-                          <span
-                            className={
-                              saveState === "conflict"
-                                ? "text-danger"
-                                : unsaved
-                                  ? "text-fg-2"
-                                  : "text-fg-disabled"
-                            }
-                          >
-                            {saveState === "conflict"
-                              ? "这篇在别处被改过，你的修改还没落盘"
-                              : saveState === "saving" || unsaved
-                                ? "未保存的修改"
-                                : "已自动保存"}
-                          </span>
-                          <span className="text-fg-disabled">
-                            {mode === "inline"
-                              ? "所见即所得 · 没改动的块按原文落盘"
-                              : "整篇 Markdown 源码"}
-                          </span>
-                          <button className={btn} onClick={() => void switchSurface()}>
-                            {mode === "inline" ? "改源码" : "行内编辑"}
-                          </button>
-                        </>
-                      ) : mode === "rename" ? (
+                    <div className="mb-3 flex items-center gap-2 text-xs">
+                      {mode === "rename" ? (
                         <>
                           <input
                             autoFocus
@@ -930,38 +925,49 @@ export function App() {
                             onChange={(e) => setNameDraft(e.target.value)}
                             onKeyDown={(e) => {
                               if (e.key === "Enter") void commitRename();
-                              else if (e.key === "Escape") setMode("view");
+                              else if (e.key === "Escape") backToNote();
                             }}
                           />
                           <button className={btnPrimary} onClick={() => void commitRename()}>
                             改名
                           </button>
+                          <button className={btn} onClick={backToNote}>
+                            取消
+                          </button>
                         </>
                       ) : (
                         <>
-                          <button className={btnPrimary} onClick={() => void startEdit()}>
-                            编辑
-                          </button>
-                          <button
-                            className={btn}
-                            onClick={() => {
-                              setNameDraft(stemOf(selected.rel));
-                              setMode("rename");
-                            }}
-                          >
-                            改名
-                          </button>
-                          <button className={btn} onClick={() => void toggleArchive()}>
-                            {selected.rel.startsWith("archive/") ? "取消归档" : "归档"}
-                          </button>
-                          <button className={btn + " text-danger"} onClick={() => void trashNote()}>
-                            删除
-                          </button>
+                          <span className="min-w-0 shrink truncate font-mono text-fg-disabled">
+                            {selected.rel}
+                          </span>
+                          {/* 没有"编辑/完成"了：打开就是可编辑的。管理动作压在右上角，
+                              平时半透明，指针靠近或拿到键盘焦点才实——它们不是正文的一部分，
+                              但也不该在用户写字时占住注意力。 */}
+                          <span className="ml-auto flex shrink-0 items-center gap-1 opacity-55 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
+                            <button className={btn} onClick={() => void switchSurface()}>
+                              {mode === "source" ? "所见即所得" : "源码"}
+                            </button>
+                            <button
+                              className={btn}
+                              onClick={() => {
+                                setNameDraft(stemOf(selected.rel));
+                                setMode("rename");
+                              }}
+                            >
+                              改名
+                            </button>
+                            <button className={btn} onClick={() => void toggleArchive()}>
+                              {selected.rel.startsWith("archive/") ? "取消归档" : "归档"}
+                            </button>
+                            <button
+                              className={btn + " text-danger"}
+                              onClick={() => void trashNote()}
+                            >
+                              删除
+                            </button>
+                          </span>
                         </>
                       )}
-                      <span className="ml-auto shrink-0 font-mono text-xs text-fg-disabled">
-                        {selected.rel}
-                      </span>
                     </div>
                     {saveState === "conflict" ? (
                       <div className="mb-4 rounded-md border border-danger bg-danger-soft px-3 py-2 text-sm">
@@ -1012,6 +1018,18 @@ export function App() {
                         <div className="skeleton h-3 w-5/6" />
                       </div>
                     )}
+                    {/* 保存状态挪到右下角，1.5 秒自己消失。它以前是顶栏上的一行常驻文字，
+                        和"完成"按钮一起把"我在编辑"念个不停——现在打开就是可编辑的，
+                        没改动就不写盘，状态只需要在**真的存了东西**时说一声。
+                        冲突不走这里：那是要用户做决定的，用上面那条横幅。 */}
+                    {saveState === "saving" || saveState === "saved" ? (
+                      <div
+                        className="pointer-events-none fixed right-5 bottom-5 z-(--z-toast) rounded-full border border-line bg-raised px-3 py-1.5 text-xs text-fg-2 shadow-2"
+                        aria-live="polite"
+                      >
+                        {saveState === "saving" ? "保存中…" : "已自动保存"}
+                      </div>
+                    ) : null}
                   </>
                 ) : (
                   <div className="flex flex-col items-start gap-2 text-fg-2">

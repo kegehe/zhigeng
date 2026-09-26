@@ -155,17 +155,34 @@
      判定，不会显示一套写另一套。缩进走 `--md-indent`（节点上算好的层数）：直接写
      padding-left 的内联样式会盖掉 `.prose-note pre` 的 padding，代码块会贴边。 */
   .block-editor .ProseMirror {
+    position: relative; /* 焦点竖线的定位基准：块的 offsetTop 就是相对这里算的 */
     min-height: 60vh;
     cursor: text;
   }
-  /* 编辑区拿到焦点时给一条安静的描边，而不是全局那圈 accent 环——整篇文章套亮蓝圈太抢眼。
-     注意：**鼠标点进来也会有这圈**，Chrome 对"可编辑的 contenteditable"在指针聚焦时同样判
-     `:focus-visible`（去掉 preventDefault 与程序化 focus() 都一样，真机量过）。要去掉只能
-     `outline: none`，而 [06] §4 禁止那么干，所以先留着；观感要不要另想办法，是样式决定。 */
+  /* 焦点指示画在**当前块**的左页边，不给整篇文章套圈。
+     两个理由：① Chrome 对可编辑的 contenteditable 连鼠标聚焦都判 `:focus-visible`
+     （真机量过，去掉 preventDefault / 程序化 focus() 都没用），所以任何 `:focus-visible`
+     描边都会在用户点一下字时圈住整篇；② "焦点在哪"本来就该问块、不该问容器。
+     位置与高度由 `FocusIndicator` 插件写进 `--focus-top/--focus-h`（只写 DOM，不发事务，
+     否则挪一下光标就被标脏、800ms 后凭空写盘）。[06] §4 允许换形式，但必须真有一条
+     焦点指示——护栏查的就是"同文件里有没有 :focus 驱动的正向声明"。 */
   .block-editor .ProseMirror:focus-visible {
-    outline: 2px solid var(--border-strong);
-    outline-offset: var(--space-2);
-    border-radius: var(--radius-md);
+    outline: none;
+  }
+  .block-editor .ProseMirror::before {
+    content: "";
+    position: absolute;
+    left: -14px;
+    top: var(--focus-top, 0px);
+    height: var(--focus-h, 0px);
+    width: 2px;
+    border-radius: 1px;
+    background: var(--border-strong);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .block-editor .ProseMirror:focus-visible::before {
+    opacity: 1;
   }
   .block-editor [data-md-item] {
     position: relative;
@@ -190,6 +207,67 @@
   }
   .block-editor [data-md-raw]:last-child {
     margin-bottom: var(--gap-para);
+  }
+  /* 气泡工具条与 `/` 块菜单：绝对定位在 .editor-wrap 里，坐标由选区算（BlockEditor.tsx）。
+     浮层上的按钮靠全局 `:focus-visible` 环给焦点指示，这里不另描边。 */
+  .editor-wrap {
+    position: relative;
+  }
+  .block-editor .bubble,
+  .block-editor .slash {
+    position: absolute;
+    z-index: var(--z-popover);
+    display: flex;
+    gap: var(--space-1);
+    padding: var(--space-1);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow-2);
+  }
+  .block-editor .bubble {
+    transform: translateX(-50%);
+    align-items: center;
+  }
+  .block-editor .slash {
+    flex-direction: column;
+    min-width: 9rem;
+  }
+  .block-editor .bubble button,
+  .block-editor .slash button {
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--text-sm);
+    text-align: start;
+    cursor: pointer;
+  }
+  .block-editor .bubble button:hover,
+  .block-editor .slash button:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  /* 已经套上的标记要看着是"开着的"，否则用户会连点两下把它关掉 */
+  .block-editor .bubble button.on {
+    background: var(--bg-active);
+    color: var(--text-primary);
+  }
+  .block-editor .link-input {
+    display: flex;
+    gap: var(--space-1);
+    align-items: center;
+  }
+  .block-editor .link-input input {
+    width: 14rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: var(--space-1) var(--space-2);
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
   }
 
   /* Windows 材质（Mica/Acrylic）在降级档下关闭；也用于旧机器掉帧时的兜底 */

@@ -96,10 +96,35 @@ const rules = [
   [/\boklch\(/, "oklch 字面量"],
   [/transition:\s*all/, "transition: all 会连带过渡布局属性，直接掉帧"],
   [/z-\[\d/, "裸 z-index 数字，请用 --z-* token"],
-  [/outline\s*:\s*none|outline-none/, "去掉了焦点环，键盘用户会失去定位"],
   [/https?:\/\/(?!127\.0\.0\.1|localhost)[^\s'"`)]*\.(?:woff2?|js|css)\b/, "联网取字体/脚本"],
   [/animate-\[[^\]]*(?:width|height|top|left|margin|padding)/, "动画布局属性"],
 ];
+/**
+ * 焦点指示单独判，不混在逐行清单里。
+ *
+ * 老写法是一刀禁止 outline: none——那条把"不许没有焦点指示"和"必须用一圈描边"混成了
+ * 一件事，结果正文编辑器要么套着整篇的圈，要么偷偷绕过护栏。现在判的是本意，但**判据绑在
+ * 同一个选择器上**：去掉某个元素的描边，唯一理由必须是同一个选择器（可以带 ::before /
+ * ::after 后缀）给出了另一种看得见的指示。
+ *
+ * 为什么不是"同文件里有任意 :focus 正向声明就放行"：第一版就是那么写的，自检发现全局那条
+ * :focus-visible 环能替任何局部豁免过关——那是假闸门。
+ */
+const NO_RING = /outline\s*:\s*none|outline-none/;
+const POSITIVE =
+  /(?:outline:\s*(?!none)[^;}]+|box-shadow:\s*(?!none)|border(?:-[a-z]+)?:\s*(?!none)|background(?:-color)?:\s*(?!none)|opacity:\s*1(?![\d.]))/;
+/** 把 CSS 切成 {selector, decls}。只服务这一条判据，不是完整解析器 */
+function cssRules(text) {
+  const out = [];
+  for (const m of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    out.push({
+      selector: m[1].replace(/\s+/g, " ").trim(),
+      decls: m[2],
+      line: text.slice(0, m.index).split("\n").length,
+    });
+  }
+  return out;
+}
 /** 剥掉注释但保留行号（注释里提到被禁写法是正常说明） */
 function stripComments(text) {
   return text
@@ -117,6 +142,25 @@ for (const f of files) {
       if (re.test(line)) fail.push(`${norm}:${i + 1} ${why} → ${line.trim().slice(0, 72)}`);
     }
   });
+  // 每条"去掉描边"的声明，必须在**同一个选择器**（可带 ::before/::after 后缀）上找到
+  // 另一种可见指示，否则判红。
+  if (NO_RING.test(text)) {
+    const all = cssRules(text);
+    for (const r of all) {
+      if (!NO_RING.test(r.decls)) continue;
+      const ok = all.some(
+        (o) =>
+          o !== r &&
+          o.selector.split(",").some((s) => s.trim().startsWith(r.selector)) &&
+          POSITIVE.test(o.decls),
+      );
+      if (!ok) {
+        fail.push(
+          `${norm}:${r.line} 选择器「${r.selector}」去掉了描边，但同一个选择器上没有替代焦点指示（[06] §4）`,
+        );
+      }
+    }
+  }
   if (norm.endsWith(".css") && norm !== "src/ui/tokens.css") {
     const t = stripComments(readFileSync(f, "utf8"));
     if (/--[\w-]+\s*:\s*(#|oklch|rgb|hsl)/i.test(t)) {

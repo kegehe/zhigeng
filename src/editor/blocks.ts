@@ -197,6 +197,88 @@ function serializeNode(node: PmNode): string {
 }
 
 /**
+ * 工具栏 / 斜杠菜单能给出的块类型。
+ *
+ * **只列序列化器真能产出的那些**：引用、代码块、表格在 md-kernel 里是不透明块，
+ * `serializeNode` 没有"给段落加 `> ` 前缀"这条路——把它们放进菜单，点了就是把源文本
+ * 洗成段落的字节（或者反过来），正是第一轮块编辑器被判死刑的形态。要做就得先在内核
+ * 与序列化器里把类型转换建成一等公民，那是另一档活。
+ */
+export type BlockTypeId =
+  | "paragraph"
+  | "heading1"
+  | "heading2"
+  | "heading3"
+  | "bullet"
+  | "numbered"
+  | "todo";
+
+export const BLOCK_TYPES: { id: BlockTypeId; 标签: string }[] = [
+  { id: "paragraph", 标签: "正文" },
+  { id: "heading1", 标签: "标题 1" },
+  { id: "heading2", 标签: "标题 2" },
+  { id: "heading3", 标签: "标题 3" },
+  { id: "bullet", 标签: "无序列表" },
+  { id: "numbered", 标签: "有序列表" },
+  { id: "todo", 标签: "待办" },
+];
+
+/**
+ * 把块改成目标类型需要的节点类型与属性补丁。**返回 null 表示不用改或不能改**——
+ * 包括不透明块，以及"目标就是当前类型"（不这么判的话一次无意义的 setNodeMarkup 会
+ * 改掉 `mdSig`，把整块重新序列化，用户只是点了同一个菜单项却多出一次落盘）。
+ */
+export function blockTypePatch(
+  node: PmNode,
+  id: BlockTypeId,
+): { typeName: string; attrs: Record<string, unknown> } | null {
+  if (node.type.name === "mdOpaque") return null;
+  const 清场 = { mdKind: "paragraph", mdLevel: null, mdChecked: null };
+  switch (id) {
+    case "paragraph":
+      if (node.type.name === "mdParagraph" && String(node.attrs.mdKind ?? "paragraph") === "paragraph")
+        return null;
+      return { typeName: "mdParagraph", attrs: 清场 };
+    case "heading1":
+    case "heading2":
+    case "heading3": {
+      const level = Number(id.slice(-1));
+      if (node.type.name === "mdHeading" && Number(node.attrs.mdLevel ?? 0) === level) return null;
+      return { typeName: "mdHeading", attrs: { ...清场, mdKind: "heading", mdLevel: level } };
+    }
+    case "bullet":
+    case "numbered":
+    case "todo": {
+      if (node.type.name === "mdItem" && String(node.attrs.mdKind) === id) return null;
+      const attrs: Record<string, unknown> = { ...清场, mdKind: id };
+      if (id === "todo") attrs.mdChecked = false;
+      return { typeName: "mdItem", attrs };
+    }
+  }
+}
+
+/**
+ * 把光标所在的块改成目标类型，返回那笔事务（不改就不返回事务）。
+ *
+ * **输入规则、斜杠菜单、测试都走这里**：三处各写一份 `setNodeMarkup` 的话，测试绿的
+ * 那次不代表按钮是对的——上一轮"显示用一份、序列化用另一份"的分叉就是这么造出来的。
+ */
+export function applyBlockType(
+  state: EditorState,
+  start: number,
+  id: BlockTypeId,
+): Transaction | null {
+  const node = state.doc.nodeAt(start);
+  if (!node) return null;
+  const patch = blockTypePatch(node, id);
+  if (!patch) return null;
+  return state.tr.setNodeMarkup(start, state.schema.nodes[patch.typeName], {
+    ...node.attrs,
+    ...patch.attrs,
+  });
+}
+
+/**
  * 整篇拼回 Markdown。
  *
  * 两个坑都在这儿，都是上一轮真机踩出来的：
@@ -229,7 +311,11 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
       kind === prev.kind &&
       depth === prev.depth &&
       (kind === "bullet" || kind === "numbered" || kind === "todo");
-    const gap = unchanged ? String(a.mdGap ?? "") : continuesList ? "" : "\n";
+    // **只要这块来自文件，它的空白就还是它自己的**：改内容不改排版。这里原先写的是
+    // "没改才沿用 gap"，于是把文件第一块改一个字，gap 从 "" 变成 "\n"——保存一次
+    // 就在文件开头凭空多出一个空行（新测试把它钉住了）。只有真正新建的块（没有源
+    // 切片可回）才需要现算：延续同一个列表用 ""，其余用 "\n"。
+    const gap = raw.length > 0 ? String(a.mdGap ?? "") : continuesList ? "" : "\n";
     const eol = index === doc.childCount - 1 && !srcEndsNewline ? "" : "\n";
     out += gap + (unchanged ? raw : serializeNode(node) + eol);
     prev = { kind, depth };

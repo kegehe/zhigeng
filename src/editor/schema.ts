@@ -1,7 +1,7 @@
 import { Extension, Mark, Node, type Attributes } from "@tiptap/core";
 import { Plugin, type Transaction } from "@tiptap/pm/state";
 import { history } from "@tiptap/pm/history";
-import { numberedMarker } from "./blocks";
+import { applyBlockType, numberedMarker, type BlockTypeId } from "./blocks";
 
 /**
  * 与 md-kernel 块模型一一对应的节点集，加上五个行内标记。
@@ -231,6 +231,130 @@ export const History = Extension.create({
   },
 });
 
+/**
+ * 焦点指示落在**当前块**，不是整篇文章。
+ *
+ * 为什么不用一圈描边：Chrome 对可编辑的 contenteditable 在**鼠标**聚焦时也判
+ * `:focus-visible`（真机量过，去掉 preventDefault 与程序化 focus() 都没用），所以任何
+ * `:focus-visible` 描边都会在用户点一下字的时候套住整篇。而"焦点在哪"本来就该问块、
+ * 不该问容器——所以改成左页边一条跟随当前块的竖线（[06] §4 要的是"有焦点指示"，
+ * 不是"必须是一圈"）。
+ *
+ * **两条硬约束**：
+ * 1. 只写 DOM，绝不 dispatch 事务。事务会走 `onUpdate` → 标脏 → 停手 800ms 把"只是
+ *    挪了挪光标"的一篇写盘，那是凭空造出改动。
+ * 2. 顶层块序号没变就一次 DOM 读写都不做。`offsetTop` 是布局读取，放在每次 state 更新
+ *    上等于在打字路径里插一次强制重排，G6 的预算就是这么被顶穿的。
+ */
+export const FocusIndicator = Extension.create({
+  name: "focusIndicator",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        view: (view) => {
+          let last = "";
+          // 只报"竖线该画在多高"。写在 `.ProseMirror` **自己**身上：`view.dom.parentElement`
+          // 是 TipTap 的容器 div，不是我们那个 `.block-editor`，写上去样式读不到。
+          const paint = (top: number, h: number) => {
+            view.dom.style.setProperty("--focus-top", `${top}px`);
+            view.dom.style.setProperty("--focus-h", `${h}px`);
+          };
+          const sync = () => {
+            const sel = view.state.selection;
+            // 只有落在可行内编辑的文本块上才画；不聚焦（Tab 走开、点了侧栏）就收成零高
+            if (!view.hasFocus() || !sel.$from.parent.isTextblock) {
+              if (last !== "off") {
+                last = "off";
+                paint(0, 0);
+              }
+              return;
+            }
+            const depth0 = sel.$from.depth === 0 ? 0 : sel.$from.before(1);
+            const key = `${depth0}`;
+            if (key === last) return;
+            last = key;
+            const dom = view.nodeDOM(depth0);
+            // 第一个块的 offsetTop 合法地等于 0，所以只能按"有没有高度"判
+            if (!(dom instanceof HTMLElement) || !dom.offsetHeight) {
+              paint(0, 0);
+              return;
+            }
+            paint(dom.offsetTop, dom.offsetHeight);
+          };
+          sync();
+          return {
+            update: sync,
+            destroy: () => paint(0, 0),
+          };
+        },
+      }),
+    ];
+  },
+});
+
+/**
+ * Notion 式的输入原语：前缀转块 + `/` 唤出块菜单。
+ *
+ * 三条不显然的实现口径：
+ * 1. **前缀转换在"敲下空格"那一刻完成，且把空格吃掉**。`#` 后面那个空格是语法记号，
+ *    不是内容；不吞它，落盘就成了 `##  标题`（多一个空格，md-kernel 会原样当正文）。
+ * 2. **只认行首前缀**，而且只认 `serializeNode` 产得出的类型（见 `BLOCK_TYPES` 那段）。
+ *    在句子中间打 `#` 就是打个 `#`。
+ * 3. `/` 菜单**不发内容事务**：它只往 DOM 上抛一个 `md-slash` 事件。发事务会走
+ *    `onUpdate` → 标脏 → 800ms 后把"只是打了个斜杠"的一篇写盘。
+ */
+export const BlockTools = Extension.create({
+  name: "blockTools",
+  addProseMirrorPlugins() {
+    const prefixOf = (text: string): BlockTypeId | null => {
+      if (/^#{1,3}$/.test(text)) return ("heading" + text.length) as BlockTypeId;
+      if (/^[-*+]$/.test(text)) return "bullet";
+      if (/^\d{1,2}[.)]$/.test(text)) return "numbered";
+      if (/^\[[ xX]\]$/.test(text)) return "todo";
+      return null;
+    };
+    return [
+      new Plugin({
+        props: {
+          handleTextInput: (view, from, to, text) => {
+            if (text === " ") {
+              const $pos = view.state.doc.resolve(from);
+              if ($pos.depth === 0) return false;
+              const start = $pos.before(1);
+              const node = view.state.doc.nodeAt(start);
+              if (!node) return false;
+              const 前缀 = node.textBetween(0, from - start - 1, undefined, "￼");
+              const target = prefixOf(前缀);
+              if (!target) return false;
+              // 与斜杠菜单、测试走同一个函数：三处各写一份 setNodeMarkup 的话，
+              // 测试绿不代表按钮是对的
+              const tr = applyBlockType(view.state, start, target);
+              if (!tr) return false;
+              view.dispatch(tr.delete(from - 前缀.length, from).scrollIntoView());
+              return true;
+            }
+            if (text === "/") {
+              const $pos = view.state.doc.resolve(from);
+              if ($pos.depth === 0) return false;
+              const node = view.state.doc.nodeAt($pos.before(1));
+              if (!node || node.type.name === "mdOpaque") return false;
+              // 只在空块的行首唤出菜单；句中打斜杠就是打斜杠
+              if (node.textContent.trim() !== "" || $pos.parentOffset !== 0) return false;
+              // **不发事务**：发事务就走 `onUpdate` → 标脏 → 停手 800ms 把"只是打了个
+              // 斜杠"的一篇写盘。TipTap v3 也没有对外的 transactions 事件，所以这里直接
+              // 用一个 DOM 事件把位置交给界面层。
+              view.dom.dispatchEvent(
+                new CustomEvent("md-slash", { detail: { pos: from }, bubbles: true }),
+              );
+            }
+            return false;
+          },
+        },
+      }),
+    ];
+  },
+});
+
 export const mdExtensions = [
   MdDoc,
   MdText,
@@ -244,5 +368,7 @@ export const mdExtensions = [
   MdStrike,
   MdLink,
   BlockIdGuard,
+  BlockTools,
+  FocusIndicator,
   History,
 ];

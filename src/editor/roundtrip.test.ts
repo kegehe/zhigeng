@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
-import { docToMarkdown, reassemble, type EditDoc } from "./blocks";
+import { applyBlockType, docToMarkdown, reassemble, type BlockTypeId, type EditDoc } from "./blocks";
 
 /**
  * 字节级往返：编辑器的产出必须等于源文件。
@@ -157,6 +157,131 @@ describe("块编辑器字节级往返", () => {
     const md = docToMarkdown(editor.state.doc, doc);
     expect(md).not.toBe(original);
     expect(md).toContain("- [x] 把打扰预算定成可配项 due:: 2026-09-30 ^b-q5r8u2x9oa");
+    editor.destroy();
+  });
+});
+
+/**
+ * 块类型切换：`#` 输入规则、`/` 斜杠菜单、气泡里的类型菜单**共用 `applyBlockType`**，
+ * 所以这里绿一次，三处入口都绿一次。分叉过一次教训：显示用一套、落盘用另一套，
+ * 用户看到的就是"改了没生效"或者"改一个字洗掉一片格式"。
+ */
+describe("块类型切换的产出仍是字节级正确的 Markdown", () => {
+  const 样本 = () => {
+    const blocks: EditDoc["blocks"] = [
+      {
+        kind: "paragraph",
+        id: null,
+        raw: "正文一段。\n",
+        gapBefore: "",
+        content: "正文一段。",
+        level: null,
+        checked: null,
+        fields: [],
+        children: [],
+      },
+      {
+        kind: "heading",
+        id: "b-h2",
+        raw: "## 一个二级标题 ^b-h2\n",
+        gapBefore: "\n",
+        content: "一个二级标题",
+        level: 2,
+        checked: null,
+        fields: [],
+        children: [],
+      },
+      {
+        kind: "quote",
+        id: null,
+        raw: "> 引用的话\n",
+        gapBefore: "\n",
+        content: "引用的话",
+        level: null,
+        checked: null,
+        fields: [],
+        children: [],
+      },
+    ];
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    return { doc, src: reassemble(doc) };
+  };
+
+  /** 按谓词找一个顶层块的位置（顶层块的 offset 就是绝对位置） */
+  const 位置 = (editor: ReturnType<typeof createTestEditor>, 找: (n: { attrs: Record<string, unknown>; textContent: string }) => boolean) => {
+    let pos = -1;
+    editor.state.doc.forEach((node, offset) => {
+      if (pos < 0 && 找(node as never)) pos = offset;
+    });
+    expect(pos).toBeGreaterThanOrEqual(0);
+    return pos;
+  };
+
+  it("段落 → 标题 3：加前缀，其余块一个字节不动", () => {
+    const { doc, src } = 样本();
+    const editor = createTestEditor(doc);
+    const pos = 位置(editor, (n) => n.textContent === "正文一段。");
+    editor.view.dispatch(applyBlockType(editor.state, pos, "heading3")!);
+    const out = docToMarkdown(editor.state.doc, doc);
+    expect(out.startsWith("### 正文一段。\n")).toBe(true);
+    // 第一块的 gap 不能被重算成 "\n"——那会在文件开头凭空多一个空行
+    expect(out).toBe(src.replace("正文一段。", "### 正文一段。"));
+    editor.destroy();
+  });
+
+  it("标题 → 正文：前缀摘掉，块锚点仍然在原位", () => {
+    const { doc, src } = 样本();
+    const editor = createTestEditor(doc);
+    const pos = 位置(editor, (n) => n.textContent === "一个二级标题");
+    editor.view.dispatch(applyBlockType(editor.state, pos, "paragraph")!);
+    const out = docToMarkdown(editor.state.doc, doc);
+    expect(out).toContain("一个二级标题 ^b-h2\n");
+    expect(out).not.toContain("## 一个二级标题");
+    editor.destroy();
+  });
+
+  it("段落 → 无序 → 待办 → 正文，绕一圈回来必须等于源文件", () => {
+    const { doc, src } = 样本();
+    const editor = createTestEditor(doc);
+    const pos = 位置(editor, (n) => n.textContent === "正文一段。");
+    for (const id of ["bullet", "todo", "paragraph"] as BlockTypeId[]) {
+      const tr = applyBlockType(editor.state, pos, id);
+      if (tr) editor.view.dispatch(tr);
+    }
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("目标就是当前类型时不给事务：点了同一项不该产生一次落盘", () => {
+    const { doc } = 样本();
+    const editor = createTestEditor(doc);
+    const pos = 位置(editor, (n) => n.textContent === "正文一段。");
+    expect(applyBlockType(editor.state, pos, "paragraph")).toBeNull();
+    const h = 位置(editor, (n) => n.textContent === "一个二级标题");
+    expect(applyBlockType(editor.state, h, "heading2")).toBeNull();
+    editor.destroy();
+  });
+
+  it("不透明块拒绝切换：引用 / 表格 / 代码不会被洗成段落", () => {
+    const { doc, src } = 样本();
+    const editor = createTestEditor(doc);
+    // 不透明块的节点内容就是它自己的源文本（`> 引用的话`），不是剥了前缀的正文
+    const pos = 位置(editor, (n) => n.textContent.includes("引用的话"));
+    for (const id of ["heading2", "bullet", "paragraph"] as BlockTypeId[]) {
+      expect(applyBlockType(editor.state, pos, id)).toBeNull();
+    }
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("改中间一块的文字，不该动它前后的空行", () => {
+    const { doc, src } = 样本();
+    const editor = createTestEditor(doc);
+    const pos = 位置(editor, (n) => n.textContent === "一个二级标题");
+    const node = editor.state.doc.nodeAt(pos)!;
+    // 块内末尾插一个字：这是"改内容"，不是"换块"，gap 必须原样保留
+    editor.view.dispatch(editor.state.tr.insertText("啊", pos + node.nodeSize - 1));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src.replace("二级标题", "二级标题啊"));
     editor.destroy();
   });
 });
