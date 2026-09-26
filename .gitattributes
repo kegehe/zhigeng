@@ -20,3 +20,4 @@
 *.dll binary
 *.msi binary
 *.zip binary
+scripts/hooks/* text eol=lf

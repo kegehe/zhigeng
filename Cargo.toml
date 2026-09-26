@@ -39,7 +39,6 @@ tracing-appender = "0.2"
 toml = "0.9"
 walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
-criterion = "0.7"
 proptest = "1"
 tempfile = "3"
 

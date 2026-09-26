@@ -26,7 +26,7 @@
 | 标签与属性进了索引（`tags` / `props`） | front-matter 的 `tags:` / `props:` 按类型分列落库，改一次不残留；视图界面还没做，缺的只是读接口 |
 | 导入外部 Markdown（Obsidian 库、一个目录）：预览 → 落盘 → 逐篇索引 | `note import <Vault> <源目录>`（默认只预览，加 `--apply` 才写）；界面侧栏「导入」。内容不改字节、子目录保留、同名不同内容一律避让不覆盖。1000 篇规模用例在 `cargo test` 里钉住 |
 | 每日快照备份到第二个目录：增量、保留 30 份、按篇恢复 | `note backup <Vault> --dir <另一个盘>`，再加 `--list` / `--history` / `--restore`；界面里是侧栏的「备份」面板与首启第二步。真机走通：改坏一篇 → 恢复 → 内容逐字节回来，被覆盖的那份留在 `.note/conflicts/` |
-| 性能基线与预算检查 | `note bench` / `note ipc-bench` / `note write-bench` / `node scripts/guard.mjs` |
+| 性能基线与预算检查 | `node scripts/check.mjs --bench`（把 `note ipc-bench` / `note write-bench` 接进同一条命令，超线即非零退出）· `note bench` · `scripts/guard.mjs` |
 | 长文档（验收 ⑥，2999 块 / 490KB，release 真机）：滚动 0 掉帧、打字事件处理 p95 0.2ms、打开编辑器 297ms | CDP 发可信按键 + Event Timing，方法写在 [ADR-004] §真机测量结果；"输入到呈现 P95 < 16ms" 这条写法在 60Hz 上不可达，口径已按实测改成"≤ 一帧"（120Hz 16ms / 60Hz 33ms） |
 
 正文是**自动保存**的：停手 800ms 或失焦就落盘（Ctrl+S 仍在）。保存带 `expect_hash`——这篇在你编辑期间被别处改过时，界面会给你"用磁盘版本 / 仍然存我这份"，不静默覆盖。
@@ -51,8 +51,8 @@ Notion 的 zip 导入（MD/Obsidian 已可做）、导出、任何 AI 调用（M
 
 ```bash
 pnpm install
-cargo test --workspace          # 105 项，应全绿
-node scripts/guard.mjs          # 护栏：依赖方向 / 预算键 / 样式禁止清单
+node scripts/check.mjs          # 一条命令跑完所有门禁（105 项 Rust 测试 + clippy + tsc + vitest + 护栏）
+node scripts/check.mjs --bench  # 再加性能门禁：ipc-bench / write-bench，超 8ms 即非零退出
 pnpm build                      # 前端类型检查 + 打包
 ```
 
@@ -168,7 +168,7 @@ src/            React 19 + TS + Tailwind v4；ui/tokens.css 是全仓库唯一�
 docs/           规格即真相：00 导航 · 01 范围 · 02 数据模型 · 03 架构 · 04 AI · 05 路线图 · 06 样式 · adr/
 testdata/       往返 golden 语料
 probes/         一次性验证原型（Spike C，允许丢弃）
-scripts/        guard.mjs：护栏脚本（手跑；仓库里还没有 CI 配置）
+scripts/        check.mjs：一条命令跑完所有门禁 · guard.mjs：护栏三项 · hooks/pre-push：可选的 push 前拦截
 ```
 
 依赖方向单向：`src-tauri` / `note-cli` / `note-mcp` → `note-core` → `md-kernel`。
@@ -179,7 +179,7 @@ scripts/        guard.mjs：护栏脚本（手跑；仓库里还没有 CI 配置
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| **M0** | 地基：块模型、索引与重建器、CLI、壳 | 完成，但欠四笔：安装器从没跑过（`bundle.active: false`）、`note-mcp` crate 不存在、**CI 配置不存在**（`guard.mjs` 是要手跑的脚本）、Spike B（Obsidian 真机互操作）与崩溃强杀一致性测试未做 |
+| **M0** | 地基：块模型、索引与重建器、CLI、壳 | 完成，但欠四笔：安装器从没跑过（`bundle.active: false`）、`note-mcp` crate 不存在、**没有 CI**（没有远端，所以 workflow 文件是安慰剂；现在是一条命令 `node scripts/check.mjs` 加一个可选的 `scripts/hooks/pre-push`）、Spike B（Obsidian 真机互操作）与崩溃强杀一致性测试未做 |
 | **M1** | 能记能查（**全程无需 API Key**） | 进行中：捕获、编辑器（浏览即编辑）、搜索、回收站、**每日快照备份**、**导入外部 Markdown**、**外部改动自动刷新**、**标签与属性入库**已好；目录树、反链视图、标签/属性的**界面**（数据已经在库里）、命令面板、导出待做 |
 | **M2** | 记忆层：混合检索 + 强制引用问答 + 评测集 | 未开始 |
 | **M3** | 组织层：建议箱、自动整理、动态视图、图谱 | 未开始 |
@@ -198,7 +198,7 @@ scripts/        guard.mjs：护栏脚本（手跑；仓库里还没有 CI 配置
 
 - **文档是规格不是笔记**：中文文件名带序号；SQL、目录、字段名即最终规格；同一事实只在一处定义（块类型→02，建议枚举→04，阈值→03，范围→01，里程碑→05）。
 - **推翻既定决定要写 ADR**：`docs/adr/` 下 `ADR-NNN-中文标题.md`，说明背景、选项、结论、代价。已有 4 条，其中 ADR-004 是**被实测数据推翻后重写的**。
-- 提交前跑：`cargo fmt --all` · `cargo test --workspace` · `cargo clippy --workspace --all-targets`（应 0 条）· `pnpm test` · `node scripts/guard.mjs`。
+- 提交前跑一条命令：`node scripts/check.mjs`（fmt / clippy `-D warnings` / Rust 测试 / tsc / vitest / 护栏，缓存热时约 20 秒）。想让它自动挡 push：`git config core.hooksPath scripts/hooks`。**仓库没有远端，所以没有 CI**——门禁不会自己跑，这条命令与可选的 hook 是现在的替代品。
 - 测试名用中文短语（读失败信息更快），已配 `#![allow(non_snake_case)]`。
 
 ## 许可

@@ -1,0 +1,7 @@
+#!/bin/sh
+# push 前把门禁跑一遍。仓库自己不带 CI（没有远端），所以这是唯一会自动挡一下的地方。
+# 启用（一次即可）：git config core.hooksPath scripts/hooks
+node scripts/check.mjs || {
+  echo "推送被挡下：门禁未过。跳过是允许的（git push --no-verify），代价是这条门禁从此形同虚设。"
+  exit 1
+}

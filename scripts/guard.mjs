@@ -1,4 +1,5 @@
-// CI 护栏：三件事必须在每次提交前成立。成本极低，但不做就会慢慢烂掉。
+// 护栏：三件事必须在每次提交前成立（`node scripts/check.mjs` 把这一项接进去了）。
+// 成本极低，但不做就会慢慢烂掉。
 // 1) 依赖方向：note-core / md-kernel / note-cli 不许链接 Tauri，md-kernel 不许链接 SQLite
 // 2) perf-budget.json 的键必须齐，且与 docs/03 §性能预算 对得上
 // 3) 样式禁止清单（docs/06 §4）：字面量颜色、裸 z-index、transition:all、去掉焦点环、联网取字体
