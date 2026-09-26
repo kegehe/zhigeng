@@ -11,6 +11,7 @@ import {
   type EditDoc,
 } from "./blocks";
 import { mdExtensions } from "./schema";
+import { Toolbar } from "./Toolbar";
 
 /** 浮层位置：相对外层容器算，滚动时重算，不让它跟着漂 */
 type Float = { top: number; left: number; pos?: number };
@@ -201,6 +202,7 @@ export function BlockEditor({
 
   return (
     <div className="editor-wrap" ref={wrap}>
+      <Toolbar editor={editor} />
       <EditorContent editor={editor} />
       {sel ? (
         <div

@@ -234,7 +234,8 @@
     min-width: 9rem;
   }
   .block-editor .bubble button,
-  .block-editor .slash button {
+  .block-editor .slash button,
+  .block-editor .toolbar button {
     border: none;
     border-radius: var(--radius-sm);
     padding: var(--space-1) var(--space-2);
@@ -246,14 +247,50 @@
     cursor: pointer;
   }
   .block-editor .bubble button:hover,
-  .block-editor .slash button:hover {
+  .block-editor .slash button:hover,
+  .block-editor .toolbar button:hover:not(:disabled) {
     background: var(--bg-hover);
     color: var(--text-primary);
   }
   /* 已经套上的标记要看着是"开着的"，否则用户会连点两下把它关掉 */
-  .block-editor .bubble button.on {
+  .block-editor .bubble button.on,
+  .block-editor .toolbar button.on {
     background: var(--bg-active);
     color: var(--text-primary);
+  }
+  /* 常驻工具栏（语雀式）：不用先选中文本也知道有什么可用。sticky 跟着正文这一列走，
+     真机验过滚动之后仍在屏内（不验就不知道滚动容器是不是它的祖先）。 */
+  .block-editor .toolbar {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-sticky);
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-raised);
+  }
+  .block-editor .toolbar select {
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 2px var(--space-2);
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--text-sm);
+  }
+  .block-editor .toolbar button:disabled {
+    color: var(--text-disabled);
+    cursor: default;
+  }
+  .block-editor .toolbar .sep {
+    width: 1px;
+    align-self: stretch;
+    margin: 0 var(--space-1);
+    background: var(--border-subtle);
   }
   .block-editor .link-input {
     display: flex;
