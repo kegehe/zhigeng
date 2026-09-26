@@ -11,11 +11,19 @@ import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri } from "./ipc/commands";
-import type { AppInfo, EditDoc, ListNotes, SnapshotRow, TrashRow } from "./ipc/types";
+import type {
+  AppInfo,
+  EditDoc,
+  ImportEntry,
+  ImportReport,
+  ListNotes,
+  SnapshotRow,
+  TrashRow,
+} from "./ipc/types";
 
 type Theme = "system" | "light" | "dark";
 /** 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。 */
-type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup";
+type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup" | "import";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
 
@@ -78,6 +86,10 @@ export function App() {
   const [history, setHistory] = useState<SnapshotRow[]>([]);
   const [backupDraft, setBackupDraft] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
+  const [importSrc, setImportSrc] = useState("");
+  const [importPlan, setImportPlan] = useState<ImportEntry[] | null>(null);
+  const [importResult, setImportResult] = useState<ImportReport | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
@@ -397,6 +409,43 @@ export function App() {
     }
   };
 
+  const openImport = async () => {
+    if (editing && !(await persist())) return;
+    setMode("import");
+    setImportPlan(null);
+    setImportResult(null);
+  };
+
+  const previewImport = async () => {
+    setImportBusy(true);
+    setError(null);
+    try {
+      setImportPlan(await api.importPreview(importSrc.trim()));
+      setImportResult(null);
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const applyImport = async () => {
+    setImportBusy(true);
+    setError(null);
+    try {
+      const r = await api.importApply(importSrc.trim());
+      setImportResult(r);
+      setImportPlan(null);
+      await refresh();
+      setFlash("导入 " + r.notes.length + " 篇，已重新索引");
+      setMode("view");
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
   /** 备份面板：状态 + 最近几份 + 当前这篇的历史，一次拉齐 */
   const openBackup = async () => {
     if (editing && !(await persist())) return;
@@ -601,6 +650,12 @@ export function App() {
               >
                 回收站
               </button>
+              <button
+                className={btn + (mode === "import" ? " bg-active" : "")}
+                onClick={() => void (mode === "import" ? setMode("view") : openImport())}
+              >
+                导入
+              </button>
               {/* 没备份是产品最坏的状态（docs/03：唯一副本 = 没有副本），入口上要看得见 */}
               <button
                 className={btn + (mode === "backup" ? " bg-active" : "")}
@@ -615,7 +670,90 @@ export function App() {
           </aside>
 
           <main className="min-w-0 flex-1 overflow-y-auto">
-            {mode === "backup" ? (
+            {mode === "import" ? (
+              <div className="px-6 py-8">
+                <h2 className="text-xl text-fg">导入外部笔记</h2>
+                <p className="mt-2 text-sm text-fg-2">
+                  把一个目录里的 <span className="font-mono text-mono">.md</span>{" "}
+                  搬进这个库（Obsidian 库、别的文件夹都行）。内容一个字节都不改，子目录结构保留在{" "}
+                  <span className="font-mono text-mono">notes/</span>{" "}
+                  下面；库里已有同名但内容不同的一篇时自动避让，
+                  <span className="text-fg">绝不覆盖</span>你已有的笔记。
+                </p>
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <input
+                    className="min-w-64 flex-1 rounded-md border border-line bg-base px-3 py-1.5 font-mono text-mono text-fg"
+                    value={importSrc}
+                    spellCheck={false}
+                    placeholder="D:\\我的 Obsidian 库"
+                    onChange={(e) => setImportSrc(e.target.value)}
+                  />
+                  <button
+                    className={btn}
+                    disabled={importBusy || !importSrc.trim()}
+                    onClick={() => void previewImport()}
+                  >
+                    先看计划
+                  </button>
+                  <button
+                    className={btnPrimary}
+                    disabled={importBusy || !importSrc.trim()}
+                    onClick={() => void applyImport()}
+                  >
+                    导入
+                  </button>
+                </div>
+
+                {importPlan ? (
+                  <div className="mt-6">
+                    <p className="text-sm text-fg-2">
+                      {importPlan.filter((e) => !e.alreadyThere).length} 个要新写 / 共 {importPlan.length}{" "}
+                      个文件，库里已有的会跳过。
+                      {importPlan.filter((e) => !e.alreadyThere && e.destRel !== "notes/" + e.srcRel)
+                        .length > 0
+                        ? " 带「改名」的那几篇，笔记里指向它们的 [[链接]] 需要你自己核对。"
+                        : ""}
+                    </p>
+                    <div className="mt-2 flex flex-col gap-1">
+                      {importPlan.slice(0, 40).map((e) => (
+                        <div
+                          key={e.srcRel}
+                          className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1.5 text-xs"
+                        >
+                          <span className="w-14 shrink-0 text-fg-disabled">
+                            {e.alreadyThere ? "已存在" : e.markdown ? "笔记" : "附件"}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate font-mono">{e.srcRel}</span>
+                          <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
+                            → {e.destRel}
+                          </span>
+                        </div>
+                      ))}
+                      {importPlan.length > 40 ? (
+                        <div className="text-xs text-fg-disabled">… 只列前 40 项</div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                {importResult ? (
+                  <div className="mt-6 rounded-md border border-line bg-raised px-4 py-3 text-sm">
+                    导入 {importResult.notes.length} 篇、附件 {importResult.assets.length} 个，跳过{" "}
+                    {importResult.skipped.length} 个，共 {Math.round(importResult.bytes / 1024)} KB。
+                    {importResult.renamed.length > 0 ? (
+                      <ul className="mt-2 list-disc pl-5 text-xs text-fg-2">
+                        {importResult.renamed.map(([from, to]) => (
+                          <li key={from}>
+                            <span className="font-mono">{from}</span> →{" "}
+                            <span className="font-mono">{to}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : mode === "backup" ? (
               <div className="px-6 py-8">
                 {/* flash 原本只在正文那一支渲染：结果"立即备份"的反馈在它自己的面板里看不见 */}
                 {flash ? <p className="mb-4 text-sm text-fg-2">{flash}</p> : null}

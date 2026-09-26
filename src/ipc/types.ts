@@ -31,6 +31,22 @@ export type SnapshotRow = {
   totalFiles: number;
 };
 
+/** 导入预览里的一行：源文件 → 库内路径 */
+export type ImportEntry = {
+  srcRel: string;
+  destRel: string;
+  alreadyThere: boolean;
+  markdown: boolean;
+};
+
+export type ImportReport = {
+  notes: string[];
+  assets: string[];
+  renamed: [string, string][];
+  skipped: string[];
+  bytes: number;
+};
+
 export type CapturedOut = {
   rel: string;
   id: string;

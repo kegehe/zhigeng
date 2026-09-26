@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -170,7 +170,7 @@ pub fn vault_dir(vault: &Vault, backup_dir: &str) -> Result<PathBuf> {
     } else {
         root.join(target)
     };
-    let target_abs = anchored(target.as_path());
+    let target_abs = crate::vault::anchored(target.as_path());
     if target_abs == root || target_abs.starts_with(root) {
         return Err(Error::Invalid(format!(
             "备份目录不能放在 Vault 里面（会在库里给自己做备份）：{}",
@@ -180,49 +180,7 @@ pub fn vault_dir(vault: &Vault, backup_dir: &str) -> Result<PathBuf> {
     Ok(target_abs.join(slug(root)))
 }
 
-/// 把用户填的备份路径归一到与 `Vault::root()` **可比较**的形式：目标目录常常还不存在
-/// （用户刚敲了个新名字），所以取最近的已存在祖先去 canonicalize，再拼回剩下的段。
-///
-/// 必须跟着 `Vault::open` 剥掉 Windows 的 `\\?\` 前缀：库根是不带前缀的，这边带上的话
-/// `starts_with` 永远不成立，"不能在库里"这条判据就形同虚设（第一版就栽在这里，
-/// 测试里那个"库内目录"居然通过了校验）。
-fn anchored(target: &Path) -> PathBuf {
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut cur = target.to_path_buf();
-    loop {
-        if let Ok(c) = cur.canonicalize() {
-            let mut out = crate::vault::strip_verbatim_prefix(c);
-            for name in tail.iter().rev() {
-                out.push(name);
-            }
-            return out;
-        }
-        match cur.file_name().map(|n| n.to_os_string()) {
-            Some(name) => tail.push(name),
-            None => break,
-        }
-        match cur.parent().map(|p| p.to_path_buf()) {
-            Some(p) if !p.as_os_str().is_empty() => cur = p,
-            _ => break,
-        }
-    }
-    normalizable(target)
-}
-
-/// 不碰文件系统地把 `.`/`..` 消掉，用于目录还不存在时的包含关系判断。
-fn normalizable(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
+// anchored / normalizable 两个路径归一 helper 在 vault.rs：快照与导入共用同一份
 
 fn manifest_path(dir: &Path) -> PathBuf {
     dir.join("manifest.jsonl")

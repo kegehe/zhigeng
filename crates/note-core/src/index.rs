@@ -17,7 +17,7 @@ use crate::schema::SCHEMA;
 use crate::vault::{NoteFile, NoteKind, NoteStatus, Vault};
 use crate::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 pub const MD_FORMAT_VERSION: i64 = 1;
 
 /// 切片预算（字符数近似 token：中文一字≈一 token，英文约 4 字符≈1 token）。
@@ -130,8 +130,47 @@ impl Index {
                 });
             }
             Some(v) => {
+                if v < SCHEMA_VERSION {
+                    self.migrate_from(v)?;
+                }
                 self.conn.pragma_update(None, "user_version", v)?;
             }
+        }
+        Ok(())
+    }
+
+    /// 低版本库就地升级。索引是**纯派生物**（G1），所以迁移的原则是"重算"而不是
+    /// "改写"——而且尽量不碰文件系统。
+    ///
+    /// v1 → v2：`link_targets` 的旧主键是 `(from_block, target, kind)`，漏了 `to_block`。
+    /// 于是同一段里指向同一篇的 `[[乙]]`、`[[乙#某标题]]`、`[[乙#^b-xxx]]` 塌成一行，
+    /// **块级锚点被静默丢掉**（`INSERT OR IGNORE`，第一条赢），AI 引用溯源退化成
+    /// "指向整篇"。每一篇的 markdown 就在 `blocks.markdown` 里，所以重灌暂存表 +
+    /// 重解析链接图即可，不用重扫全库。
+    fn migrate_from(&self, from: i64) -> Result<()> {
+        if from < 2 {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS link_targets;")?;
+            // SCHEMA 全是 IF NOT EXISTS，重跑一遍就把新形状建回来
+            self.conn.execute_batch(SCHEMA)?;
+            let rows: Vec<(String, String)> = {
+                let mut s = self.conn.prepare("SELECT id, markdown FROM blocks")?;
+                let r = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                r.filter_map(|x| x.ok()).collect()
+            };
+            for (block_id, md) in &rows {
+                for (target, anchor) in extract_links(md) {
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO link_targets(from_block, target, to_block, kind) VALUES(?1,?2,?3,?4)",
+                        params![block_id, target, anchor.as_deref().unwrap_or(""), link_kind(&target)],
+                    )?;
+                }
+            }
+            let n = rebuild_links(&self.conn)?;
+            tracing::info!(
+                "索引 schema v{from} → v{SCHEMA_VERSION}：重灌 {} 篇的链接，解析出 {n} 条",
+                rows.len()
+            );
         }
         Ok(())
     }
@@ -177,7 +216,7 @@ impl Index {
     /// front-matter 的 id）就把入链迁移到新行，再清旧行。
     pub fn index_file(&self, f: &NoteFile, src: &str) -> Result<RebuildStats> {
         let doc = md_kernel::parse(src);
-        let note_id = note_id_of(&doc, &f.rel);
+        let note_id = note_id_for(&self.conn, &doc, &f.rel);
         let mut stats = RebuildStats::default();
 
         let stale: Option<String> = self
@@ -321,7 +360,14 @@ impl Index {
                  WHERE b.note_id=?1",
             )?;
             let r = s.query_map([&note_id], |x: &Row| {
-                Ok((x.get(0)?, x.get(1)?, x.get(2)?, x.get(3)?))
+                // 空串 = 没有锚点（这一列 NOT NULL，因为 PRIMARY KEY 视 NULL 互不相等）
+                let anchor: String = x.get(2)?;
+                Ok((
+                    x.get(0)?,
+                    x.get(1)?,
+                    (!anchor.is_empty()).then_some(anchor),
+                    x.get(3)?,
+                ))
             })?;
             r.filter_map(|x| x.ok()).collect()
         };
@@ -699,7 +745,7 @@ fn insert_note(
         for (target, anchor) in extract_links(&pb.block.content) {
             conn.execute(
                 "INSERT OR IGNORE INTO link_targets(from_block, target, to_block, kind) VALUES(?1,?2,?3,?4)",
-                params![pb.id, target, anchor, link_kind(&target)],
+                params![pb.id, target, anchor.as_deref().unwrap_or(""), link_kind(&target)],
             )?;
         }
     }
@@ -721,6 +767,27 @@ pub fn note_id_of(doc: &Doc, rel: &str) -> String {
         })
         .filter(|v: &String| !v.is_empty() && v.starts_with("n-"))
         .unwrap_or_else(|| format!("n-path-{}", stable_slug(rel)))
+}
+
+/// 这篇实际用哪个主键：front-matter 的 id **被另一篇占了就退回按路径的 id**。
+///
+/// `notes.id` 是主键，硬插会把对方那一行顶掉——索引里静默少一篇，比直接报错更坏
+/// （导入真实 Vault 时这很常见：Obsidian 模板另存、Notion 导出重复页都带着同一个 id）。
+/// 谁先谁后由扫描顺序决定（按路径排序），所以可重现：删库重建得到同样的归属。
+fn note_id_for(conn: &Connection, doc: &Doc, rel: &str) -> String {
+    let declared = note_id_of(doc, rel);
+    if declared.starts_with("n-path-") {
+        return declared; // 本来就是按路径推的，撞不上别人
+    }
+    let owner: Option<String> = conn
+        .query_row("SELECT path FROM notes WHERE id=?1", [&declared], |r| {
+            r.get(0)
+        })
+        .ok();
+    match owner {
+        Some(p) if p != rel => format!("n-path-{}", stable_slug(rel)),
+        _ => declared,
+    }
 }
 
 fn self_link_count(conn: &Connection, note_id: &str) -> Result<usize> {
@@ -851,7 +918,13 @@ pub fn rebuild_links(conn: &Connection) -> Result<usize> {
     let mut t = conn.prepare("SELECT from_block, target, to_block, kind FROM link_targets")?;
     let targets: Vec<(String, String, Option<String>, String)> = t
         .query_map([], |r: &Row| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            let anchor: String = r.get(2)?;
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                (!anchor.is_empty()).then_some(anchor),
+                r.get(3)?,
+            ))
         })?
         .filter_map(|x| x.ok())
         .collect();

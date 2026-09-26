@@ -22,6 +22,7 @@
 | **块编辑器的无损门槛**：5 个真实语法样本过编辑器后逐字节等于源文件（什么都不改 / 改一处再改回 / 连算两次不变样 / 勾选待办要落盘 / 空笔记不多出换行） | `pnpm test`（`src/editor/roundtrip.test.ts`，24 项）——**这项不绿，行内编辑器不许接到界面上**。已接上，且**浏览与编辑是同一个实例**（只读视图不再另养一份渲染器）：真机在含表格/代码/嵌套列表/引用/`^b-` 锚点/`due::`/`$E=mc^2$` 的笔记里打一次字，文件只多出那一个字符，其余逐字节不动；DOM 标记跨"浏览↔编辑"存活，全程实例数为 1 |
 | 桌面端：首启选库、列表/搜索/浏览、速记窗 + `Alt+Shift+N`、托盘、明暗主题 | 真机跑通；同步 IPC p95 4.3–4.6ms（G6 预算 8ms） |
 | 编辑与自动保存：停手 800ms 落盘、冲突不覆盖、改名/归档/删除/恢复 | 真机验证；`cargo test -p note-core --test service` |
+| 导入外部 Markdown（Obsidian 库、一个目录）：预览 → 落盘 → 逐篇索引 | `note import <Vault> <源目录>`（默认只预览，加 `--apply` 才写）；界面侧栏「导入」。内容不改字节、子目录保留、同名不同内容一律避让不覆盖。1000 篇规模用例在 `cargo test` 里钉住 |
 | 每日快照备份到第二个目录：增量、保留 30 份、按篇恢复 | `note backup <Vault> --dir <另一个盘>`，再加 `--list` / `--history` / `--restore`；界面里是侧栏的「备份」面板与首启第二步。真机走通：改坏一篇 → 恢复 → 内容逐字节回来，被覆盖的那份留在 `.note/conflicts/` |
 | 性能基线与预算检查 | `note bench` / `note ipc-bench` / `note write-bench` / `node scripts/guard.mjs` |
 | 长文档（验收 ⑥，2999 块 / 490KB，release 真机）：滚动 0 掉帧、打字事件处理 p95 0.2ms、打开编辑器 297ms | CDP 发可信按键 + Event Timing，方法写在 [ADR-004] §真机测量结果；"输入到呈现 P95 < 16ms" 这条写法在 60Hz 上不可达，口径已按实测改成"≤ 一帧"（120Hz 16ms / 60Hz 33ms） |
@@ -30,7 +31,7 @@
 
 **没做的**：目录树 UI、反链与标签/属性视图（`links` 表有数据但没有读接口；`tags`/`props` 两张表建了、**解析器一条 INSERT 都没写过**）、
 命令面板、文件监听（`notify` 声明了没引用——外部改动只在保存时被 `expect_hash` 拦住，界面不会自己刷新）、
-导入 Obsidian/Notion/MD 与导出、任何 AI 调用（M2 起）、macOS/Linux、云同步。
+Notion 的 zip 导入（MD/Obsidian 已可做）、导出、任何 AI 调用（M2 起）、macOS/Linux、云同步。
 **做了但还没验**：NSIS 安装包（`bundle.active` 仍为 `false`）、纯 Win10 上的 Mica 降级、崩溃强杀下的落盘一致性。
 **已关闭的性能硬伤**：后台补索引曾与读命令抢同一把 `Hub` 锁——保存一篇 2702 块的笔记后，下一个读命令 dev 实测要等 **3.26 秒**。现在补索引走**第二条连接**并把单篇的三步包进**一个事务**，同一动作降到 **96ms**（稳态 19ms，预算 80ms；剩下的 16ms 是 WAL 正在写 5MB 时读方的代价，解法是分批提交，不是回到一把锁）。见 [03] §后端调用纪律。
 
@@ -72,6 +73,10 @@ cargo build -p note-cli
 ./target/debug/note.exe backup D:\Notes --list
 ./target/debug/note.exe backup D:\Notes --history notes/甲.md
 ./target/debug/note.exe backup D:\Notes --restore notes/甲.md --from 20260926-005225-795
+
+# 导入外部 Markdown：默认只出预览，加 --apply 才写盘
+./target/debug/note.exe import D:\Notes "D:\我的 Obsidian 库"
+./target/debug/note.exe import D:\Notes "D:\我的 Obsidian 库" --apply
 
 # 性能
 ./target/debug/note.exe bench      --notes 5000   # 扫描/重建/检索吞吐

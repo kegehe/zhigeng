@@ -5,6 +5,7 @@
 
 pub mod capture;
 pub mod hash;
+pub mod import;
 pub mod index;
 pub mod schema;
 pub mod service;

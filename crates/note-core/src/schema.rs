@@ -111,10 +111,14 @@ CREATE INDEX IF NOT EXISTS links_to_block_idx ON links(to_block);
 CREATE TABLE IF NOT EXISTS link_targets (
   from_block TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
   target     TEXT NOT NULL,
-  -- [[笔记#^b-xxx]] 的块级锚点。丢了它，AI 引用溯源就退化成"指向整篇笔记"
-  to_block   TEXT,
+  -- [[笔记#^b-xxx]] 的块级锚点。丢了它，AI 引用溯源就退化成"指向整篇笔记"。
+  -- 空串表示"没有锚点"而不是 NULL：SQLite 的 PRIMARY KEY 视 NULL 互不相等，
+  -- 用 NULL 的话同一段里两条无锚点的链接会重复登记。
+  to_block   TEXT NOT NULL DEFAULT '',
   kind       TEXT NOT NULL,
-  PRIMARY KEY (from_block, target, kind)
+  -- 主键必须带上 to_block：只按 (from_block,target,kind) 的话，同一段里指向同一篇的
+  -- `[[乙]]`、`[[乙#某标题]]`、`[[乙#^b-xxx]]` 会塌成一行，块级锚点被静默丢掉。
+  PRIMARY KEY (from_block, target, kind, to_block)
 );
 -- 恢复/新建一篇笔记时，要找出"之前指向它而当时解析失败"的链接。没有这个索引就是全表扫。
 CREATE INDEX IF NOT EXISTS link_targets_target_idx ON link_targets(target);

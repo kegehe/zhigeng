@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use note_core::capture::Captured;
+use note_core::import::{Entry as ImportEntry, Report as ImportReport};
 use note_core::index::Index;
 use note_core::service::{
     reindex_captured, reindex_moved, reindex_note, snapshot_vault, unindex, AppInfo, EditDoc,
@@ -154,6 +155,54 @@ fn snapshot_daily(app: AppHandle) {
         Ok(None) => log::debug!("今天已经快照过，或没配备份目录"),
         Err(e) => log::warn!("每日快照失败：{e}"),
     });
+}
+
+/// 取后台任务的句柄：`Vault` 克隆 + 索引那条独立连接。
+/// **只在取句柄的一瞬锁主锁**——拿着主锁做长任务就是上一版"保存后读命令等 3.26 秒"的病。
+fn bg_handles(
+    state: &State<'_, Shared>,
+) -> Option<(
+    note_core::vault::Vault,
+    std::sync::Arc<std::sync::Mutex<Index>>,
+)> {
+    let guard = state.0.lock().ok()?;
+    let hub = guard.as_ref()?;
+    Some((hub.vault().clone(), hub.indexer()))
+}
+
+/// 导入预览：只算计划不写盘。源目录由用户填（与选库同一套做法，不引原生对话框）。
+#[tauri::command]
+async fn import_preview(app: AppHandle, src: String) -> Result<Vec<ImportEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (vault, bg) = bg_handles(&app.state::<Shared>()).ok_or("尚未选择 Vault")?;
+        let _index = bg.lock().map_err(|e| e.to_string())?;
+        note_core::import::plan(&vault, Path::new(&src), note_core::import::DEFAULT_INTO)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 真正导入 + 逐篇索引，做完广播 `note://indexed` 让列表自己刷新。
+#[tauri::command]
+async fn import_apply(app: AppHandle, src: String) -> Result<ImportReport, String> {
+    let handle = app.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let (vault, bg) = bg_handles(&app.state::<Shared>()).ok_or("尚未选择 Vault")?;
+        let index = bg.lock().map_err(|e| e.to_string())?;
+        note_core::import::import_and_index(
+            &vault,
+            &index,
+            Path::new(&src),
+            note_core::import::DEFAULT_INTO,
+            false,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let _ = handle.emit("note://indexed", true);
+    Ok(report)
 }
 
 /// 唤起速记窗。已存在就复用——不重复建窗口，也不打断用户已经输入的内容。
@@ -461,7 +510,9 @@ pub fn run() {
             backup_run,
             backup_recent,
             backup_history,
-            backup_restore
+            backup_restore,
+            import_preview,
+            import_apply
         ])
         .setup(|app| {
             let handle = app.handle().clone();

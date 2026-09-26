@@ -3,6 +3,8 @@ import type {
   AppInfo,
   CapturedOut,
   EditDoc,
+  ImportEntry,
+  ImportReport,
   ListNotes,
   NoteSource,
   SnapshotRow,
@@ -64,4 +66,7 @@ export const api = {
   backupHistory: (rel: string) => invoke<SnapshotRow[]>("backup_history", { rel }),
   /** 恢复只等落盘，索引照旧在后台补；被覆盖的那份会先进 .note/conflicts/ */
   backupRestore: (rel: string, id: string) => invoke<string>("backup_restore", { rel, id }),
+  /** 导入：预览只算计划，apply 才写盘并逐篇索引（走第二条连接，不挡读） */
+  importPreview: (src: string) => invoke<ImportEntry[]>("import_preview", { src }),
+  importApply: (src: string) => invoke<ImportReport>("import_apply", { src }),
 };

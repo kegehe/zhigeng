@@ -247,3 +247,123 @@ fn 切片带标题面包屑且行内字段入库() {
         .unwrap();
     assert_eq!(due, 1, "due:: 字段没进 props_json");
 }
+
+#[test]
+fn 两篇带同一个front_matter_id的文件不该让整库索引崩掉() {
+    // 导入真实 Vault 最容易踩的一条：Obsidian 模板另存、Notion 导出重复页，都会带着
+    // 同一个 `id:` 进来。`notes.id` 是主键，撞了就是一整次重建失败——一个坏文件拖垮全库。
+    let dir = tempfile::tempdir().unwrap();
+    let vault = note_core::vault::Vault::open(dir.path()).unwrap();
+    let idx = note_core::index::Index::open(&vault).unwrap();
+    for (rel, body) in [
+        ("notes/甲.md", "---\nid: n-dup1\n---\n\n甲的内容\n"),
+        ("notes/乙.md", "---\nid: n-dup1\n---\n\n乙的内容\n"),
+    ] {
+        vault.write_atomic(rel, body.as_bytes()).unwrap();
+    }
+    let stats = idx.rebuild_all(&vault).unwrap();
+    assert_eq!(stats.notes, 2, "两篇都该进库：{stats:?}");
+    assert_eq!(idx.count_notes().unwrap(), 2);
+    // 后到的那个退回按路径的 id，而不是把前一篇顶掉
+    let rows = idx.list_notes(10).unwrap();
+    let paths: Vec<&str> = rows.iter().map(|n| n.rel.as_str()).collect();
+    assert!(
+        paths.contains(&"notes/甲.md") && paths.contains(&"notes/乙.md"),
+        "{paths:?}"
+    );
+    assert_eq!(
+        idx.search_keyword("乙的内容", 5).unwrap().len(),
+        1,
+        "被撞掉的那一篇会搜不到"
+    );
+    assert_eq!(idx.drift(&vault).unwrap(), 0);
+}
+
+#[test]
+fn 旧库的链接暂存表在打开时重灌锚点不再丢() {
+    // 钉的是 v1 → v2 这条迁移本身。v1 的主键漏了 to_block，同一段里指向同一篇的
+    // 三条链接会塌成一条；库里已有的数据必须在下次打开时按 blocks.markdown 重算出来。
+    let dir = tempfile::tempdir().unwrap();
+    let vault = note_core::vault::Vault::open(dir.path()).unwrap();
+    {
+        let idx = note_core::index::Index::open(&vault).unwrap();
+        vault
+            .write_atomic(
+                "notes/甲.md",
+                "都在这儿：[[乙]]、[[乙#某标题]]、[[乙#^b-k3x9m2v7qa]]\n".as_bytes(),
+            )
+            .unwrap();
+        vault
+            .write_atomic(
+                "notes/乙.md",
+                "## 某标题\n\n被指的那块。 ^b-k3x9m2v7qa\n".as_bytes(),
+            )
+            .unwrap();
+        idx.rebuild_all(&vault).unwrap();
+        assert_eq!(
+            idx.conn()
+                .query_row("SELECT COUNT(*) FROM link_targets", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3,
+            "新库就该有三条暂存链接（各自带锚点）"
+        );
+        // 手工退回 v1 的形状与版本号
+        idx.conn()
+            .execute_batch("DROP TABLE link_targets;")
+            .unwrap();
+        idx.conn()
+            .execute_batch(
+                "CREATE TABLE link_targets (
+               from_block TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+               target TEXT NOT NULL, to_block TEXT, kind TEXT NOT NULL,
+               PRIMARY KEY (from_block, target, kind));",
+            )
+            .unwrap();
+        // 按 v1 的行为灌一遍：第一条赢，后两条被 OR IGNORE 吃掉
+        for (t, a) in [
+            ("乙", None),
+            ("乙", Some("某标题")),
+            ("乙", Some("b-k3x9m2v7qa")),
+        ] {
+            idx.conn()
+                .execute(
+                    "INSERT OR IGNORE INTO link_targets(from_block,target,to_block,kind)
+                 SELECT id, ?1, ?2, 'ref' FROM blocks WHERE markdown LIKE '%[[乙#^b-%'",
+                    rusqlite::params![t, a],
+                )
+                .unwrap();
+        }
+        idx.conn()
+            .execute("UPDATE meta SET value='1' WHERE key='schema_version'", [])
+            .unwrap();
+        assert_eq!(
+            idx.conn()
+                .query_row("SELECT COUNT(*) FROM link_targets", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "v1 的形状就该塌成一条，否则这个测试没在测东西"
+        );
+    }
+    let idx = note_core::index::Index::open(&vault).unwrap();
+    assert_eq!(
+        idx.conn()
+            .query_row("SELECT COUNT(*) FROM link_targets", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        3,
+        "打开时没重灌链接"
+    );
+    assert_eq!(
+        idx.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE to_block IS NOT NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1,
+        "块级引用没解析出来"
+    );
+}

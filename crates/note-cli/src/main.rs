@@ -26,6 +26,19 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// 导入外部 Markdown（Obsidian 库、一个目录）。默认只预览，加 --apply 才写盘
+    Import {
+        /// 目标 Vault
+        path: PathBuf,
+        /// 源目录
+        src: PathBuf,
+        /// 库内的目标前缀
+        #[arg(long, default_value = "notes")]
+        into: String,
+        /// 真的写盘
+        #[arg(long)]
+        apply: bool,
+    },
     /// 备份：配置第二个目录、跑一次增量快照、看某篇的历史、从快照恢复
     Backup {
         /// Vault 根目录
@@ -119,6 +132,12 @@ fn main() -> Result<()> {
             file,
             check_canonical,
         } => cmd_parse(file, check_canonical),
+        Cmd::Import {
+            path,
+            src,
+            into,
+            apply,
+        } => cmd_import(&path, &src, &into, apply),
         Cmd::Backup {
             path,
             dir,
@@ -152,6 +171,66 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// 导入。默认 dry-run：先看计划再动手，因为"把一万个文件塞进用户的库"不该一步到位。
+fn cmd_import(path: &Path, src: &Path, into: &str, apply: bool) -> Result<()> {
+    use note_core::import;
+    let vault = Vault::open(path)?;
+    let 计划 = import::plan(&vault, src, into)?;
+    let 新写 = 计划.iter().filter(|e| !e.already_there).count();
+    let 改名 = 计划
+        .iter()
+        .filter(|e| e.dest_rel != format!("{into}/{}", e.src_rel))
+        .count();
+    if !apply {
+        for e in 计划.iter().take(20) {
+            println!(
+                "{}  {}  {}",
+                if e.already_there {
+                    "已存在"
+                } else if e.markdown {
+                    "笔记"
+                } else {
+                    "附件"
+                },
+                e.src_rel,
+                e.dest_rel
+            );
+        }
+        if 计划.len() > 20 {
+            println!("… 共 {} 项", 计划.len());
+        }
+        println!(
+            "预览：{新写} 个要新写（其中 {改名} 个改了名字），库里已有的跳过。加 --apply 落盘"
+        );
+        return Ok(());
+    }
+    let idx = note_core::index::Index::open(&vault)?;
+    let t = std::time::Instant::now();
+    let r = import::import_and_index(&vault, &idx, src, into, false)?;
+    println!(
+        "导入完成：笔记 {} 篇、附件 {} 个、跳过 {} 个，{}（{:.2}s）",
+        r.notes.len(),
+        r.assets.len(),
+        r.skipped.len(),
+        if 改名 > 0 {
+            format!("{改名} 个改了名字")
+        } else {
+            "没有改名".into()
+        },
+        t.elapsed().as_secs_f64()
+    );
+    for (from, to) in &r.renamed {
+        println!("  改名 {from} → {to}");
+    }
+    let 漂移 = idx.drift(&vault)?;
+    let 孤儿 = idx.orphan_counts()?;
+    println!("自检：漂移 {漂移}，孤儿 {孤儿:?}");
+    if 漂移 != 0 || !孤儿.is_clean() {
+        bail!("导入后索引与文件不一致，先别用");
+    }
+    Ok(())
 }
 
 /// 备份的命令行入口。产品里这些动作各有界面，但按 docs/03 的纪律每一条都要能脱离壳
