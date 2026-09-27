@@ -1,6 +1,7 @@
 import type { JSONContent } from "@tiptap/core";
 import { Fragment, type Node as PmNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
+import { TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
 import { inlineToJson, serializeInline } from "./inline";
 
@@ -190,7 +191,9 @@ function serializeNode(node: PmNode): string {
     }
     case "mdOpaque":
       // 源文本块：内容就是用户的源文本，改了就原样落盘（自带换行由调用方补）
-      return node.text ?? "";
+      // **不能写 `node.text`**：那是 `TextNode` 才有的字段，块节点上它是 undefined，
+      // `?? ""` 会把整块吃成空字符串——用户编辑一次代码块 / 表格 / 引用，那块就没了。
+      return node.textContent;
     default:
       return serializeInline(node) + fieldSuffix(a.mdFields) + anchorSuffix(a.mdId);
   }
@@ -324,6 +327,74 @@ export function moveBlock(state: EditorState, from: number, to: number): Transac
   });
   const tr = state.tr.replaceWith(0, state.doc.content.size, Fragment.fromArray(out));
   return changed ? tr.scrollIntoView() : tr;
+}
+
+/**
+ * 把光标所在的整块上移 / 下移一格，返回带着**已放回选区**的事务。
+ *
+ * 键盘（`Alt+↑/↓`）与工具栏的上下移按钮共用这一个函数。放回选区不是锦上添花：
+ * `moveBlock` 是整树替换，映射后光标可能落到别的块上，于是"连按两次"第二次移的
+ * 就不是同一块——第一次对、第二次错的 bug 靠想是想不到的。
+ *
+ * 到边界返回 null（调用方据此什么都不做，也**不发空事务**：空事务会吞键、还会白标
+ * 一次脏，800ms 后凭空写盘）。
+ */
+export function moveCurrentBlock(state: EditorState, delta: number): Transaction | null {
+  const { $from } = state.selection;
+  if (!$from.depth || delta === 0) return null;
+  const start = $from.before(1);
+  let index = -1;
+  let i = 0;
+  state.doc.forEach((_n, off) => {
+    if (off === start) index = i;
+    i++;
+  });
+  if (index < 0) return null;
+  // `to` 的口径是"最终落在原序号 to 的位置"：下移一格要跨过紧跟的那一块
+  const tr = moveBlock(state, index, delta < 0 ? index - 1 : index + 2);
+  if (!tr) return null;
+  const newIndex = delta < 0 ? index - 1 : index + 1;
+  let newStart = 0;
+  let k = 0;
+  tr.doc.forEach((n, off) => {
+    if (k === newIndex) newStart = off;
+    k++;
+  });
+  const moved = tr.doc.nodeAt(newStart);
+  if (!moved) return null;
+  const back = Math.min($from.parentOffset, moved.content.size);
+  return tr.setSelection(TextSelection.near(tr.doc.resolve(newStart + 1 + back)));
+}
+
+/**
+ * 在光标所在块**之后**插一条分隔线。
+ *
+ * 走 `mdOpaque`（分隔线不在可行内编辑的白名单里，节点正文就是它自己的源文本 `---`），
+ * 并且**必须带一个空行的 gap**：紧贴上一段落的 `---` 会被 Markdown 读成那段的 setext
+ * 二级标题下划线，插个分隔线结果把上一段变成了标题。
+ */
+export function insertDividerAfter(state: EditorState): Transaction | null {
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  const opaque = state.schema.nodes.mdOpaque;
+  const start = $from.before(1);
+  const node = state.doc.nodeAt(start);
+  if (!opaque || !node) return null;
+  const divider = opaque.create(
+    {
+      mdKind: "divider",
+      mdRaw: "",
+      mdGap: "\n",
+      mdId: null,
+      mdDepth: 0,
+      mdLevel: null,
+      mdChecked: null,
+      mdFields: [],
+      mdSig: "",
+    },
+    state.schema.text("---"),
+  );
+  return state.tr.insert(start + node.nodeSize, divider).scrollIntoView();
 }
 
 /**

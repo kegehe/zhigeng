@@ -12,7 +12,7 @@ import {
   type EditDoc,
 } from "./blocks";
 import { mdExtensions } from "./schema";
-import { Toolbar } from "./Toolbar";
+import { LinkEditor, Toolbar } from "./Toolbar";
 
 /** 浮层位置：相对外层容器算，滚动时重算，不让它跟着漂 */
 type Float = { top: number; left: number; pos?: number };
@@ -75,7 +75,6 @@ export function BlockEditor({
   const [drop, setDrop] = useState<{ top: number; index: number } | null>(null);
   const dropRef = useRef<{ top: number; index: number } | null>(null);
   const [linking, setLinking] = useState(false);
-  const [href, setHref] = useState("");
 
   const editor = useEditor({
     extensions: mdExtensions,
@@ -282,14 +281,7 @@ export function BlockEditor({
     window.addEventListener("pointerup", up);
   };
 
-  const applyLink = () => {
-    const url = href.trim();
-    setLinking(false);
-    setHref("");
-    if (!url) return;
-    editor.chain().focus().extendMarkRange("link").setMark("link", { href: url }).run();
-    setSel(null);
-  };
+
 
   return (
     <div className="editor-wrap" ref={wrap}>
@@ -331,22 +323,9 @@ export function BlockEditor({
             链
           </button>
           {linking ? (
-            <span className="link-input">
-              <input
-                autoFocus
-                value={href}
-                placeholder="https://…"
-                spellCheck={false}
-                onChange={(e) => setHref(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") applyLink();
-                  else if (e.key === "Escape") setLinking(false);
-                }}
-              />
-              <button type="button" onClick={applyLink}>
-                好
-              </button>
-            </span>
+            // 输入框用工具栏那份实现：两处各写一份，早晚一处改了 `extendMarkRange`
+            // 另一处没改，链接就会吃掉或漏掉半个词
+            <LinkEditor editor={editor} onDone={() => setLinking(false)} />
           ) : null}
         </div>
       ) : null}

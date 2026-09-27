@@ -1,7 +1,7 @@
 import { Extension, Mark, Node, type Attributes, type Editor } from "@tiptap/core";
-import { Plugin, TextSelection, type Transaction } from "@tiptap/pm/state";
+import { Plugin, type Transaction } from "@tiptap/pm/state";
 import { history } from "@tiptap/pm/history";
-import { applyBlockType, moveBlock, numberedMarker, type BlockTypeId } from "./blocks";
+import { applyBlockType, moveCurrentBlock, numberedMarker, type BlockTypeId } from "./blocks";
 
 /**
  * 与 md-kernel 块模型一一对应的节点集，加上五个行内标记。
@@ -258,31 +258,10 @@ export const BlockKeys = Extension.create({
       return true;
     };
     const move = (delta: number) => ({ editor }: { editor: Editor }) => {
-      const { state } = editor;
-      const { $from } = state.selection;
-      if (!$from.depth || delta === 0) return false;
-      const start = $from.before(1);
-      let index = -1;
-      let i = 0;
-      state.doc.forEach((_n, off) => {
-        if (off === start) index = i;
-        i++;
-      });
-      if (index < 0) return false;
-      // to 的口径是"最终落在原序号 to 的位置"：下移一格要跨过紧跟的那一块
-      const to = delta < 0 ? index - 1 : index + 2;
-      const tr = moveBlock(state, index, to);
+      // 与工具栏的 ↑/↓ 按钮共用 `moveCurrentBlock`（含"光标跟着块走"那一步）
+      const tr = moveCurrentBlock(editor.state, delta);
       if (!tr) return false;
-      const newIndex = delta < 0 ? index - 1 : index + 1;
-      // 移动后那一块的新起点 + 原来在块内的偏移 = 光标该回到的位置
-      let newStart = 0;
-      let k = 0;
-      tr.doc.forEach((n, off) => {
-        if (k === newIndex) newStart = off;
-        k++;
-      });
-      const back = Math.min($from.parentOffset, tr.doc.nodeAt(newStart)!.content.size);
-      editor.view.dispatch(tr.setSelection(TextSelection.near(tr.doc.resolve(newStart + 1 + back))).scrollIntoView());
+      editor.view.dispatch(tr.scrollIntoView());
       return true;
     };
     return {

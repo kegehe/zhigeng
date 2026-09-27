@@ -4,7 +4,9 @@ import { createTestEditor } from "./testEditor";
 import {
   applyBlockType,
   docToMarkdown,
+  insertDividerAfter,
   moveBlock,
+  moveCurrentBlock,
   reassemble,
   type BlockTypeId,
   type EditDoc,
@@ -355,8 +357,7 @@ describe("拖拽重排：空白按 Markdown 的规矩重算，锚点跟着自己
     editor.destroy();
   });
 
-  it("重排不改任何块的正文：逐行集合与原来完全相等", () => {
-    const { doc, src } = 重排样本();
+  it("重排不改任何块的正文：逐行集合与原来完全相等", () => {    const { doc, src } = 重排样本();
     const editor = createTestEditor(doc);
     const from = 序号(editor, (n) => n.textContent === "第一段");
     editor.view.dispatch(moveBlock(editor.state, from, 4)!);
@@ -471,6 +472,92 @@ describe("块操作的键盘快捷键", () => {
     按键(editor, "8", { ctrl: true, shift: true });
     expect(按键(editor, "0", { ctrl: true, alt: true })).toBe(true);
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+});
+
+/**
+ * 工具栏独有的两件事：上下移按钮、插入分隔线。它们与快捷键共用同一个函数，
+ * 所以这里测的是那个函数的性质（选区跟不跟着走、空白补没补对），不是按钮样式。
+ */
+describe("工具栏的移动与分隔线", () => {
+  const 三块 = () => {
+    const b = (raw: string, gapBefore: string, content: string) => ({
+      kind: "paragraph",
+      id: null,
+      raw,
+      gapBefore,
+      content,
+      level: null,
+      checked: null,
+      fields: [],
+      children: [],
+    });
+    const blocks: EditDoc["blocks"] = [b("甲\n", "", "甲"), b("乙\n", "\n", "乙"), b("丙\n", "\n", "丙")];
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    return { doc, src: reassemble(doc) };
+  };
+
+  it("moveCurrentBlock 下移一格，并把选区放回那一块（按钮与快捷键都靠它）", () => {
+    const { doc } = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2); // 光标在"甲"里
+    const tr = moveCurrentBlock(editor.state, 1);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("乙\n\n甲\n\n丙\n");
+    // 选区必须还在"甲"那一块：否则连点两次按钮移的就不是同一块
+    expect(editor.state.selection.$from.parent.textContent).toBe("甲");
+    editor.destroy();
+  });
+
+  it("已经在最上面时不给事务：按钮点了不该吞事件也不该白标一次脏", () => {
+    const { doc, src } = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    expect(moveCurrentBlock(editor.state, -1)).toBeNull();
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("插入分隔线必须自带一个空行，否则会把上一段变成 setext 标题", () => {    const { doc } = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2); // 光标在"甲"
+    const tr = insertDividerAfter(editor.state);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const out = docToMarkdown(editor.state.doc, doc);
+    // "甲\n---\n" 会被 CommonMark 读成"甲"是二级标题；"甲\n\n---\n" 才是分隔线
+    expect(out).toBe("甲\n\n---\n\n乙\n\n丙\n");
+    editor.destroy();
+  });
+});
+
+/**
+ * 不透明块（引用 / 代码 / 表格 / 公式）的可编辑性。
+ *
+ * 这条测试是补出来的窟窿：`serializeNode` 一度写的是 `node.text ?? ""`，而 ProseMirror
+ * 的**块节点没有 `.text` 字段**（那是 `TextNode` 才有的），于是 `?? ""` 永远兜到空串——
+ * 用户编辑一次代码块，那一整块就存成空。文档里"改动后按用户输入的文本原样落盘"那句
+ * 当时是假的，而它看起来无害，因为**只有改过的那一块**会空，其余字节全对。
+ */
+describe("编辑不透明块不许把整块写成空", () => {
+  it("在引用块末尾加一个字：那块内容仍在，未动的代码块逐字节不变", () => {
+    const blocks: EditDoc["blocks"] = [
+      { kind: "quote", id: null, raw: "> 引用的话\n", gapBefore: "", content: "引用的话", level: null, checked: null, fields: [], children: [] },
+      { kind: "code", id: null, raw: "```\nlet a = 1\n```\n", gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+    ];
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    const editor = createTestEditor(doc);
+    let pos = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (pos < 0 && n.type.name === "mdOpaque") pos = off + n.nodeSize - 1;
+    });
+    expect(pos).toBeGreaterThan(0);
+    editor.view.dispatch(editor.state.tr.insertText("啊", pos));
+    const out = docToMarkdown(editor.state.doc, doc);
+    expect(out).toContain("引用的话啊");
+    expect(out).toContain("```\nlet a = 1\n```");
     editor.destroy();
   });
 });

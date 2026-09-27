@@ -265,6 +265,7 @@
     top: 0;
     z-index: var(--z-sticky);
     display: flex;
+    flex-wrap: wrap; /* 控件多了以后窄窗要能换行，不能挤出去 */
     align-items: center;
     gap: var(--space-1);
     margin-bottom: var(--space-3);
