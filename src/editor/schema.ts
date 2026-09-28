@@ -143,6 +143,22 @@ export const MdItem = Node.create({
 const 渲染实例 = new WeakMap<HTMLElement, OpaqueView>();
 
 /**
+ * 显示形（那块 `contenteditable=false` 的岛）上的鼠标事件该谁处理。
+ *
+ * 只有"左键、没按修饰键"的 mousedown 需要我们自己发选区，其余一律交回 PM 与浏览器。
+ * 提成一个纯函数是因为这条判断决定的是"shift-点击能不能扩选区、右键菜单还出不出来"，
+ * 而它写在 NodeView 里没法从外面喂事件——判据得能被测试。
+ */
+export type 岛上鼠标 = "退源码" | "扩选" | "交回";
+
+export function 分派岛上鼠标(ev: Event): 岛上鼠标 {
+  if (ev.type !== "mousedown") return "交回";
+  const 击 = ev as MouseEvent;
+  if (击.button !== 0 || 击.altKey || 击.ctrlKey || 击.metaKey) return "交回";
+  return 击.shiftKey ? "扩选" : "退源码";
+}
+
+/**
  * 不透明块的两副面孔：**平时是显示形（表格画成网格、引用画成引用），光标进来就退回源文本**。
  *
  * 为什么不"渲染 + 结构化编辑"一起做：`serializeNode` 产不出 `> ` 与 ` ``` ` 前缀，
@@ -237,11 +253,15 @@ class OpaqueView implements NodeView {
   }
 
   /**
-   * 显示形上的鼠标：自己把光标放进这一块。
+   * 显示形上的鼠标：只有"左键、没按修饰键"那一下归我们。
    *
    * 真机抓到的：**Chromium 不会把插入符放进 `contenteditable=false` 的岛里**，点了就是
    * 选那块 DOM、什么也不发生。所以"点一下退回源文本"不能指望浏览器与 PM 的默认行为，
    * 必须自己发选区。PM 的 `stopEvent` 返回 true 之后这件事就完全归我们管。
+   *
+   * 但"归我们管"只对那一击成立：从前对宿主子树里的**每一个**事件都返回 true，于是
+   * `mouseup`/`contextmenu`/`dblclick`/`dragstart` 全被当成已处理，shift-点击也照样落到
+   * 发选区那条路上——结果是想扩选区的人拿到的是"选区清空、光标跳到块首"。
    *
    * Callout 标题是另一种控件：只改折叠态，连选区都不该动（那条是显示态，不是内容）。
    */
@@ -258,8 +278,28 @@ class OpaqueView implements NodeView {
       }
       return true;
     }
-    if (ev.type === "mousedown") this.进源码();
+    const 派 = 分派岛上鼠标(ev);
+    if (派 === "交回") return false;
+    if (派 === "扩选") this.扩到点击处(ev as MouseEvent);
+    else this.进源码();
     return true;
+  }
+
+  /**
+   * shift-点击：把选区从原位扩到这一点，**不许塌成块首**。
+   *
+   * 落点只能按整块算（岛里的字符位置 PM 也读不准），所以这里扩到的是"这一块"，紧跟着
+   * `OpaqueFace` 就把块翻回源文本形——第二次 shift-点击就能落到具体字符上。
+   */
+  private 扩到点击处(击: MouseEvent): void {
+    const 点 = this.view.posAtCoords({ left: 击.clientX, top: 击.clientY });
+    if (!点) return;
+    const 落 = TextSelection.near(
+      this.view.state.doc.resolve(点.inside > 0 ? 点.inside + 1 : 点.pos),
+    );
+    const 选 = new TextSelection(this.view.state.selection.$anchor, 落.$head);
+    if (选.eq(this.view.state.selection)) return;
+    this.view.dispatch(this.view.state.tr.setSelection(选).scrollIntoView());
   }
 
   /** 光标落到块首：显示形随即翻成源文本形（`OpaqueFace` 认选区） */

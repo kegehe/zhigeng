@@ -54,6 +54,13 @@ describe("产回 GFM", () => {
     expect(parseTable(出 + "\n")!.rows[1]).toEqual(["x|y", "2"]);
   });
 
+  it("格子里的换行折成空格：产出永远是 N 行，一张表不会被写成两张", () => {
+    const 出 = serializeTable(表([["甲\n\n乙", "丙\r\n丁"], ["1\t2", "2"]]));
+    expect(出.split("\n")).toHaveLength(3);
+    expect(出).toBe("| 甲 乙 | 丙 丁 |\n| --- | --- |\n| 1\t2 | 2 |");
+    expect(parseTable(出 + "\n")!.rows[0]).toEqual(["甲 乙", "丙 丁"]);
+  });
+
   it("对齐按 aligns 产出，三种都算", () => {
     const t = parseTable("| A | B | C | D |\n|---|:--|--:|:-:|\n| 1 | 2 | 3 | 4 |\n")!;
     expect(serializeTable(t).split("\n")[1]).toBe("| --- | :--- | ---: | :---: |");

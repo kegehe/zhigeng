@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/core";
 import { TextSelection } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
+import { 分派岛上鼠标 } from "./schema";
 import { parseTable } from "./table";
 import {
   addColumn,
@@ -906,6 +907,42 @@ describe("显示形切换不许碰到字节", () => {
     editor.destroy();
   });
 
+  it("岛上的事件只有『左键无修饰键的 mousedown』归我们", () => {
+    // 从前 stopEvent 对宿主子树里的每个事件都 return true，等于把右键菜单、双击选词、
+    // shift-点击扩选区一起吞掉——PM 收不到，浏览器也不再把默认行为当"已被处理"。
+    const 派 = (init: MouseEventInit & { type?: string }) =>
+      分派岛上鼠标(new MouseEvent(init.type ?? "mousedown", init));
+    expect(派({ button: 0 })).toBe("退源码");
+    expect(派({ button: 0, shiftKey: true })).toBe("扩选");
+    expect(派({ button: 2 })).toBe("交回");
+    expect(派({ button: 1 })).toBe("交回");
+    expect(派({ button: 0, ctrlKey: true })).toBe("交回");
+    expect(派({ button: 0, metaKey: true })).toBe("交回");
+    expect(派({ button: 0, altKey: true })).toBe("交回");
+    expect(派({ button: 0, type: "mouseup" })).toBe("交回");
+    expect(派({ button: 0, type: "dblclick" })).toBe("交回");
+    expect(派({ button: 0, type: "contextmenu" })).toBe("交回");
+  });
+
+  it("右键菜单与 mouseup 落在显示形上：选区、面孔、字节都不许动", () => {
+    // jsdom 里没有 `elementFromPoint`，交回 PM 的 `mousedown` 会在 PM 内部抛——那是环境的
+    // 限制不是产品的问题（WebView2 有这个方法）。所以这里只喂不走坐标计算的事件类型，
+    // "右键那一下该交回"由上面那条判据断言，效果在真机上验。
+    const { doc, src } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
+    const 宿主 = 面孔(editor, 码.pos)!.querySelector(".md-view")!;
+    const 选区前 = editor.state.selection.from;
+    for (const 类 of ["contextmenu", "mouseup", "click"]) {
+      宿主.dispatchEvent(new MouseEvent(类, { bubbles: true, button: 2 }));
+      宿主.dispatchEvent(new MouseEvent(类, { bubbles: true, button: 0 }));
+    }
+    expect(editor.state.selection.from).toBe(选区前);
+    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBeUndefined();
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
   it("点 Callout 标题只改折叠态，不动选区也不动文档", () => {
     const { doc, src } = load("04-引用与标注");
     const editor = createTestEditor(doc);
@@ -1051,6 +1088,20 @@ describe("表格网格化的字节判据", () => {
     // 产出的那份重新解析仍是两列——转义没做对的话这里会多出第三列
     const 重读 = parseTable(出.slice(出.indexOf("| 列")))!;
     expect(重读.rows[1]).toEqual(["|1", "2"]);
+  });
+
+  it("格子里混进换行要折成空格：产出的行数与列数都不许变", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 2);
+    editor.view.dispatch(editor.state.tr.insertText("甲\n乙", editor.state.selection.from));
+    const 出 = docToMarkdown(editor.state.doc, d);
+    // 换行漏进盘子这张表就从 3 行变 4 行，列数对不上——下一次打开它根本不是表了
+    expect(出).toBe("前一段\n\n| 列 A | 列 B |\n| --- | --- |\n| 甲 乙1 | 2 |\n");
+    expect(出.slice(出.indexOf("| 列"), 出.lastIndexOf("\n")).split("\n")).toHaveLength(3);
+    const 重读 = parseTable(出.slice(出.indexOf("| 列")))!;
+    expect(重读.rows.map((r) => r.length)).toEqual([2, 2]);
+    editor.destroy();
   });
 
   it("末格按 Tab 加一行；Enter 在末行同样加一行", () => {
