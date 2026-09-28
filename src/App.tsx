@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri } from "./ipc/commands";
+import { buildTree, dirsOf, flatten } from "./ui/tree";
 import type {
   AppInfo,
   EditDoc,
@@ -73,6 +74,8 @@ export function App() {
   const [notes, setNotes] = useState<ListNotes | null>(null);
   const [selected, setSelected] = useState<Opened | null>(null);
   const [query, setQuery] = useState("");
+  /** 侧栏目录树折叠了哪些目录。记路径不记显示名（显示名会随顶层标签变） */
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [hits, setHits] = useState<Awaited<ReturnType<typeof api.searchKeyword>>>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -217,6 +220,29 @@ export function App() {
   }, [searching, hits, list]);
 
   /**
+   * 目录树。搜索态**仍然是平铺命中**——命中带的是相关度，按目录分组会把"最像的那篇"
+   * 埋进某个折叠目录里，那是把搜索变差。
+   */
+  const tree = useMemo(() => buildTree(list), [list]);
+  const sidebarRows = useMemo(() => flatten(tree, collapsed), [tree, collapsed]);
+  const toggleDir = (path: string) =>
+    setCollapsed((c) => {
+      const next = new Set(c);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  /** 打开一篇就把它那条路径露出来：从搜索里点进折叠目录里的笔记，不该看见"找不到" */
+  const revealPath = (rel: string) =>
+    setCollapsed((c) => {
+      const chain = dirsOf(rel);
+      if (!chain.some((p) => c.has(p))) return c;
+      const next = new Set(c);
+      for (const p of chain) next.delete(p);
+      return next;
+    });
+
+  /**
    * 把当前草稿写盘。自动保存、Ctrl+S、失焦、切笔记前都走这一个入口。
    * 带 `baseHash` 去存，磁盘上已经不是那份就报冲突——**冲突时不覆盖**，
    * 让用户选留哪份（docs/02 §写入与外部修改：绝不静默覆盖）。
@@ -293,6 +319,7 @@ export function App() {
     }
     // 打开即编辑：不再有"先看着，要改再按编辑"这一步
     setMode("inline");
+    revealPath(rel);
     setFlash(null);
     try {
       await loadNote(rel, title);
@@ -648,34 +675,78 @@ export function App() {
               </div>
             ) : null}
             <nav className="min-h-0 flex-1 overflow-y-auto pb-4">
-              {rows.length === 0 ? (
+              {(searching ? rows : sidebarRows).length === 0 ? (
                 <div className="px-4 py-6 text-center text-sm text-fg-disabled">
                   {searching ? "没有匹配的笔记" : notes ? "这个 Vault 还没有笔记" : "加载中"}
                 </div>
               ) : null}
-              {rows.map((n) => {
-                const active = selected?.rel === n.rel;
-                return (
-                  <button
-                    key={n.rel}
-                    onClick={() => void openNote(n.rel, n.title)}
-                    className={
-                      "block w-full px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) " +
-                      (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
+              {searching
+                ? rows.map((n) => {
+                    const active = selected?.rel === n.rel;
+                    return (
+                      <button
+                        key={n.rel}
+                        onClick={() => void openNote(n.rel, n.title)}
+                        className={
+                          "block w-full px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) " +
+                          (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
+                        }
+                      >
+                        <span className="flex items-baseline gap-2">
+                          <span className="min-w-0 flex-1 truncate">{n.title}</span>
+                          <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                            {relativeTime(n.ms)}
+                          </span>
+                        </span>
+                        <span className="block truncate font-mono text-xs text-fg-disabled">
+                          {n.sub}
+                        </span>
+                      </button>
+                    );
+                  })
+                : sidebarRows.map((b) => {
+                    // 缩进走 token 而不是写死像素：[06] 定的是一级 16px，那个 16px 就是 --space-4
+                    const pad = { paddingInlineStart: `calc(0.75rem + ${b.depth} * var(--space-4))` };
+                    if (b.kind === "dir") {
+                      const folded = collapsed.has(b.path);
+                      return (
+                        <button
+                          key={"d:" + b.path}
+                          onClick={() => toggleDir(b.path)}
+                          aria-expanded={!folded}
+                          style={pad}
+                          className="flex w-full items-baseline gap-1.5 px-3 py-1.5 text-left text-sm text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover"
+                        >
+                          <span className="w-3 shrink-0 font-mono text-xs text-fg-disabled">
+                            {folded ? "▸" : "▾"}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">{b.name}</span>
+                          <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                            {b.notes}
+                          </span>
+                        </button>
+                      );
                     }
-                  >
-                    <span className="flex items-baseline gap-2">
-                      <span className="min-w-0 flex-1 truncate">{n.title}</span>
-                      <span className="shrink-0 font-mono text-xs text-fg-disabled">
-                        {relativeTime(n.ms)}
-                      </span>
-                    </span>
-                    <span className="block truncate font-mono text-xs text-fg-disabled">
-                      {n.sub}
-                    </span>
-                  </button>
-                );
-              })}
+                    const active = selected?.rel === b.rel;
+                    return (
+                      <button
+                        key={"n:" + b.rel}
+                        onClick={() => void openNote(b.rel, b.title)}
+                        style={pad}
+                        className={
+                          "flex w-full items-baseline gap-1.5 px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) " +
+                          (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
+                        }
+                      >
+                        {/* 与目录行的箭头占同一格，标题才对得齐 */}
+                        <span className="w-3 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">{b.title}</span>
+                        <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                          {relativeTime(b.ms)}
+                        </span>
+                      </button>
+                    );
+                  })}
             </nav>
             <div className="border-t border-line p-2">
               <button
