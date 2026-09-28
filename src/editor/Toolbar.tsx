@@ -1,7 +1,17 @@
 import { undo, redo, undoDepth, redoDepth } from "@tiptap/pm/history";
 import type { Editor } from "@tiptap/react";
 import { useEffect, useState } from "react";
-import { applyBlockType, INSERTABLE, insertSourceBlock, moveCurrentBlock, BLOCK_TYPES, type BlockTypeId } from "./blocks";
+import {
+  addColumn,
+  addRow,
+  applyBlockType,
+  INSERTABLE,
+  insertSourceBlock,
+  moveCurrentBlock,
+  BLOCK_TYPES,
+  tableAt,
+  type BlockTypeId,
+} from "./blocks";
 
 /** 结构块的按钮字形。工具栏与 `/` 菜单共用，两处不一致会让人怀疑是两种东西 */
 export const 图标: Record<string, string> = { divider: "—", quote: "❝", table: "▦" };
@@ -42,6 +52,14 @@ export function Toolbar({ editor }: { editor: Editor }) {
         ? (String(node?.attrs.mdKind) as BlockTypeId)
         : "paragraph";
   const 可选块 = typeName === "mdParagraph" || typeName === "mdHeading" || typeName === "mdItem";
+  // 光标在某张表里：这时工具栏该给的是"加行 / 加列"，不是块类型下拉
+  const 表起点 = tableAt(editor.state);
+
+  const 改表 = (做: (state: typeof editor.state, 起点: number) => ReturnType<typeof addRow>) => {
+    if (表起点 === null) return;
+    const tr = 做(editor.state, 表起点);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+  };
 
   const setType = (id: BlockTypeId) => {
     if (!$from.depth) return;
@@ -81,7 +99,11 @@ export function Toolbar({ editor }: { editor: Editor }) {
       role="toolbar"
       aria-label="格式与块操作"
     >
-      {可选块 || opaque ? (
+      {表起点 !== null ? (
+        <select aria-label="块类型" value="table" disabled>
+          <option value="table">表格（格子里直接打字）</option>
+        </select>
+      ) : 可选块 || opaque ? (
         <select
           aria-label="块类型"
           value={opaque ? "opaque" : 当前类型}
@@ -142,6 +164,12 @@ export function Toolbar({ editor }: { editor: Editor }) {
           !$from.depth,
         ),
       )}
+      {表起点 !== null ? (
+        <>
+          {btn("row", "在下面加一行（末格按 Tab 也可以）", "+行", () => 改表(addRow))}
+          {btn("col", "在右边加一列", "+列", () => 改表(addColumn))}
+        </>
+      ) : null}
       {btn("up", "上移这一块 Alt+↑", "↑", () => move(-1), false, !$from.depth)}
       {btn("down", "下移这一块 Alt+↓", "↓", () => move(1), false, !$from.depth)}
       <span className="sep" aria-hidden="true" />

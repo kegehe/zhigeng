@@ -3,11 +3,16 @@ import type { Editor } from "@tiptap/core";
 import { TextSelection } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
+import { parseTable } from "./table";
 import {
+  addColumn,
   applyBlockType,
+  cellAt,
   docToMarkdown,
+  enterCell,
   insertSourceBlock,
   INSERTABLE,
+  moveCell,
   replaceBlockWithSource,
   moveBlock,
   moveCurrentBlock,
@@ -822,20 +827,22 @@ describe("显示形切换不许碰到字节", () => {
     });
   }
 
+  // 表格现在被网格节点接管了（见下面的表格用例），所以这一组"两副面孔"的测试改用代码块：
+  // 代码块仍然是不透明块，两副面孔的机制在它身上和引用/公式完全一样
   it("光标进来退回源文本，交出口变回显示形", () => {
     const { doc } = load("03-代码表格与公式");
     const editor = createTestEditor(doc);
-    const 表 = 不透明块(editor).find((b) => b.kind === "table")!;
-    expect(表).toBeTruthy();
+    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
+    expect(码).toBeTruthy();
 
-    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBeUndefined();
-    expect(面孔(editor, 表.pos)!.querySelector("table")).not.toBeNull();
-    expect(面孔(editor, 表.pos)!.querySelector(".md-src")).not.toBeNull();
+    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBeUndefined();
+    expect(面孔(editor, 码.pos)!.querySelector(".codeblock")).not.toBeNull();
+    expect(面孔(editor, 码.pos)!.querySelector(".md-src")).not.toBeNull();
 
-    放进(editor, 表.pos);
-    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBe("source");
+    放进(editor, 码.pos);
+    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBe("source");
     放到文末(editor);
-    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBeUndefined();
+    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBeUndefined();
     editor.destroy();
   });
 
@@ -844,27 +851,27 @@ describe("显示形切换不许碰到字节", () => {
     // 让最后一块顶着 ``` 围栏示人只会让人以为渲染坏了（真机就是这个样子）
     const { doc } = load("03-代码表格与公式");
     const editor = createTestEditor(doc);
-    const 表 = 不透明块(editor).find((b) => b.kind === "table")!;
-    放进(editor, 表.pos);
-    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBe("source");
+    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
+    放进(editor, 码.pos);
+    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBe("source");
     editor.view.dom.blur(); // 真 blur：PM 的 hasFocus() 问的是 activeElement，合成事件改不了它
-    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBeUndefined();
+    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBeUndefined();
     editor.destroy();
   });
 
-  it("改了表格的源文本，交出口之后显示形跟着变", () => {
+  it("改了代码块的源文本，交出口之后显示形跟着变", () => {
     // 重画发生在"交出焦点"那一刻，不在击键路径上。这条钉住两件事：
     // 该重画的时候真的重画了，且它读的是节点正文而不是载入时那份旧字节
     const { doc } = load("03-代码表格与公式");
     const editor = createTestEditor(doc);
-    const 表 = 不透明块(editor).find((b) => b.kind === "table")!;
-    放进(editor, 表.pos);
-    const 块 = editor.state.doc.nodeAt(表.pos)!;
-    editor.view.dispatch(
-      editor.state.tr.insertText("改", 表.pos + 块.nodeSize - 1),
-    );
+    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
+    放进(editor, 码.pos);
+    const 块 = editor.state.doc.nodeAt(码.pos)!;
+    // 插在开栏那一行之后：动围栏会让这块不再是合法代码块，那就测不到"重画"了
+    const 正文起 = 码.pos + 1 + 块.textContent.indexOf("\n") + 1;
+    editor.view.dispatch(editor.state.tr.insertText("改", 正文起));
     放到文末(editor);
-    expect(面孔(editor, 表.pos)!.querySelector("table")!.textContent).toContain("改");
+    expect(面孔(editor, 码.pos)!.querySelector(".codeblock code")!.textContent).toContain("改");
     editor.destroy();
   });
 
@@ -887,15 +894,15 @@ describe("显示形切换不许碰到字节", () => {
     // 所以这一下必须由 NodeView 自己发选区——不接管的话"点一下改源码"整条路是死的。
     const { doc } = load("03-代码表格与公式");
     const editor = createTestEditor(doc);
-    const 表 = 不透明块(editor).find((b) => b.kind === "table")!;
-    const 壳 = 面孔(editor, 表.pos)!;
+    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
+    const 壳 = 面孔(editor, 码.pos)!;
     expect(壳.dataset["mdMode"]).toBeUndefined();
     壳
       .querySelector(".md-view")!
       .dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
     expect(editor.state.selection.$from.parent.type.name).toBe("mdOpaque");
-    expect(editor.state.selection.from).toBe(表.pos + 1);
-    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBe("source");
+    expect(editor.state.selection.from).toBe(码.pos + 1);
+    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBe("source");
     editor.destroy();
   });
 
@@ -928,6 +935,224 @@ describe("显示形切换不许碰到字节", () => {
       expect(壳.querySelector(".md-src")!.textContent!.trim(), b.kind).toBeTruthy();
     }
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+});
+
+/**
+ * 表格网格化的字节判据。
+ *
+ * 表格是唯一"渲染出来还直接在原地改"的块，所以它也是这一档里唯一会**重写整块字节**的
+ * 编辑路径：动一个格子，`serializeNode` 就要把整张表按规范形重拼一遍。这条路能不能上，
+ * 全看下面这些断言——尤其是"没动的块一个字节都不许变"和"看不准的形状根本不接管"。
+ */
+const 段 = (raw: string, gapBefore: string, content: string) => ({
+  kind: "paragraph",
+  id: null,
+  raw,
+  gapBefore,
+  content,
+  level: null,
+  checked: null,
+  fields: [],
+  children: [],
+});
+
+function 表doc(表源: string): EditDoc {
+  return {
+    frontMatter: "",
+    trailingGap: "",
+    blocks: [
+      段("前一段\n", "", "前一段"),
+      {
+        kind: "table",
+        id: null,
+        raw: 表源,
+        gapBefore: "\n",
+        content: "",
+        level: null,
+        checked: null,
+        fields: [],
+        children: [],
+      },
+    ],
+  };
+}
+
+/** 表格块的绝对起点 */
+function 表起点(editor: Editor): number {
+  let p = -1;
+  editor.state.doc.forEach((n, off) => {
+    if (n.type.name === "mdTable") p = off;
+  });
+  return p;
+}
+
+/** 表里第 n 个格子（文档序，0 起）的绝对起点 */
+function 格起点(editor: Editor, n: number): number {
+  const 表 = editor.state.doc.nodeAt(表起点(editor))!;
+  let i = 0;
+  let 找 = -1;
+  表.forEach((r, ro) =>
+    r.forEach((_c, co) => {
+      if (i++ === n) 找 = 表起点(editor) + 1 + ro + 1 + co;
+    }),
+  );
+  return 找;
+}
+
+/** 把光标放进第 n 个格子（有焦点，与真机一致） */
+function 进格(editor: Editor, n: number): void {
+  editor.view.focus();
+  const 起 = 格起点(editor, n);
+  editor.view.dispatch(
+    editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(起 + 1))),
+  );
+}
+
+const 规范表 = "| 列 A | 列 B |\n| --- | --- |\n| 1 | 2 |\n";
+
+describe("表格网格化的字节判据", () => {
+  it("接管了：03 与 06 的表变成 mdTable 节点，而产出仍逐字节等于源文件", () => {
+    for (const 名 of ["03-代码表格与公式", "06-插入骨架"]) {
+      const { src, doc } = load(名);
+      const editor = createTestEditor(doc);
+      expect(editor.state.doc.children.some((n) => n.type.name === "mdTable"), 名).toBe(true);
+      expect(docToMarkdown(editor.state.doc, doc), 名).toBe(src);
+      editor.destroy();
+    }
+  });
+
+  it("没动过：逐字节等于源文件（含工具栏那张骨架的空格子）", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    expect(docToMarkdown(editor.state.doc, d)).toBe("前一段\n\n" + 规范表);
+    editor.destroy();
+  });
+
+  it("改一个格子：只有那一格变，前后段与表头一字不动", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 2); // 数据行第一格
+    editor.view.dispatch(editor.state.tr.insertText("改", editor.state.selection.from));
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| 列 A | 列 B |\n| --- | --- |\n| 改1 | 2 |\n",
+    );
+    editor.destroy();
+  });
+
+  it("格子里打竖线要转义，产出的表不能因为一个 | 就裂成三列", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 2);
+    editor.view.dispatch(editor.state.tr.insertText("|", editor.state.selection.from));
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| 列 A | 列 B |\n| --- | --- |\n| \\|1 | 2 |\n");
+    // 产出的那份重新解析仍是两列——转义没做对的话这里会多出第三列
+    const 重读 = parseTable(出.slice(出.indexOf("| 列")))!;
+    expect(重读.rows[1]).toEqual(["|1", "2"]);
+  });
+
+  it("末格按 Tab 加一行；Enter 在末行同样加一行", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 3); // 最后一格
+    expect(moveCell(editor.state, 1)).not.toBeNull();
+    editor.view.dispatch(moveCell(editor.state, 1)!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| 列 A | 列 B |\n| --- | --- |\n| 1 | 2 |\n|  |  |\n",
+    );
+    // Enter 在末行也是加一行，而不是拆块（GFM 格子里装不下换行）
+    const 二 = createTestEditor(d);
+    进格(二, 3);
+    const tr = enterCell(二.state);
+    expect(tr).not.toBeNull();
+    二.view.dispatch(tr!);
+    expect(docToMarkdown(二.state.doc, d)).toBe(
+      "前一段\n\n| 列 A | 列 B |\n| --- | --- |\n| 1 | 2 |\n|  |  |\n",
+    );
+    editor.destroy();
+    二.destroy();
+  });
+
+  it("第一格 Shift+Tab 不动（不许跳出表格把光标甩到上一块）", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 0);
+    expect(moveCell(editor.state, -1)).toBeNull();
+    expect(docToMarkdown(editor.state.doc, d)).toBe("前一段\n\n" + 规范表);
+    editor.destroy();
+  });
+
+  it("加一列：每行多一格且分隔行跟着长，重新解析列数对得上", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 0);
+    const tr = addColumn(editor.state, 表起点(editor));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| 列 A | 列 B |  |\n| --- | --- | --- |\n| 1 | 2 |  |\n");
+    editor.destroy();
+  });
+
+  it("加完一列光标还在原来那一格（否则工具栏那两个按钮自己消失了）", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 3); // 数据行第二格（2×2 的表里第 4 个格子，索引到 3 为止）
+    const tr = addColumn(editor.state, 表起点(editor));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(cellAt(editor.state)?.行).toBe(1);
+    expect(cellAt(editor.state)?.列).toBe(1);
+    editor.destroy();
+  });
+
+  it("对齐是数据：改一个格子之后 :--- 与 ---: 还在", () => {
+    const d = 表doc("| A | B | C |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n");
+    const editor = createTestEditor(d);
+    进格(editor, 5); // 最后一格（右对齐那列）
+    editor.view.dispatch(editor.state.tr.insertText("x", editor.state.selection.from));
+    // 产出 = 前一段 + 空行 + 表头 + 分隔行 ⇒ 分隔行在第 4 行
+    expect(docToMarkdown(editor.state.doc, d).split("\n")[3]).toBe("| :--- | :---: | ---: |");
+    expect(docToMarkdown(editor.state.doc, d)).toContain("| x3 |");
+    editor.destroy();
+  });
+
+  it("看不准的形状一律不接管：列数不齐 / 带块锚 / 有缩进都还是源文本块", () => {
+    const 不接管 = [
+      "| 甲 | 乙 |\n| --- |\n| 1 | 2 | 3 |\n",
+      "| A | B |\n|---|---|\n| 1 | 2 |\n^b-f3g6j9l2mn\n",
+      "| A | B |\n|---|---|\n| 1 | 2 | ^b-k3x9m2v7qa\n",
+      "  | A | B |\n  |---|---|\n",
+    ];
+    for (const 源 of 不接管) {
+      const d = 表doc(源);
+      const editor = createTestEditor(d);
+      expect(editor.state.doc.children.some((n) => n.type.name === "mdTable"), 源).toBe(false);
+      // 不接管 ⇒ 原样回写，一个字节都不许多
+      expect(docToMarkdown(editor.state.doc, d), 源).toBe("前一段\n\n" + 源);
+      editor.destroy();
+    }
+  });
+
+  it("接管过的表编辑之后不会凭空造出块锚：产出里没有 ^b-", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 2);
+    editor.view.dispatch(editor.state.tr.insertText("字", editor.state.selection.from));
+    expect(docToMarkdown(editor.state.doc, d)).not.toContain("^b-");
+    editor.destroy();
+  });
+
+  it("表格不给块类型切换：选了也不发事务（产不出把表变成段落的字节）", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 0);
+    const 前 = docToMarkdown(editor.state.doc, d);
+    const tr = applyBlockType(editor.state, 表起点(editor), "paragraph");
+    expect(tr).toBeNull();
+    expect(docToMarkdown(editor.state.doc, d)).toBe(前);
     editor.destroy();
   });
 });

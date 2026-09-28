@@ -1,4 +1,6 @@
 import { parseInline } from "./inline";
+// 表格的解析口径只有一份：显示形与网格编辑共用 table.ts 的那两个函数
+import { alignOf as 对齐, splitRow } from "./table";
 
 /**
  * 不透明块的**显示形**（docs/03 §块渲染）。
@@ -176,40 +178,6 @@ function blocksFromLines(d: Document, lines: string[]): HTMLElement[] {
   收段落();
   return out;
 }
-
-/** 表格的一行 → 单元格。`\|` 是转义竖线，不能当分隔符 */
-function splitRow(line: string): string[] {
-  let s = line.trim();
-  if (s.startsWith("|")) s = s.slice(1);
-  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
-  const cells: string[] = [];
-  let cur = "";
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i]!;
-    if (c === "\\" && s[i + 1] === "|") {
-      cur += "|";
-      i++;
-      continue;
-    }
-    if (c === "|") {
-      cells.push(cur.trim());
-      cur = "";
-      continue;
-    }
-    cur += c;
-  }
-  cells.push(cur.trim());
-  return cells;
-}
-
-const 对齐 = (spec: string): string =>
-  spec.startsWith(":") && spec.endsWith(":")
-    ? "center"
-    : spec.endsWith(":")
-      ? "right"
-      : spec.startsWith(":")
-        ? "left"
-        : "";
 
 function tableDom(d: Document, lines: string[]): HTMLElement | null {
   const rows = lines.filter((l) => l.trim());

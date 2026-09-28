@@ -3,7 +3,14 @@ import type { Node as PmNode } from "@tiptap/pm/model";
 import { Plugin, TextSelection, type Transaction, type EditorState } from "@tiptap/pm/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@tiptap/pm/view";
 import { history, redo, undo } from "@tiptap/pm/history";
-import { applyBlockType, moveCurrentBlock, numberedMarker, type BlockTypeId } from "./blocks";
+import {
+  applyBlockType,
+  enterCell,
+  moveCell,
+  moveCurrentBlock,
+  numberedMarker,
+  type BlockTypeId,
+} from "./blocks";
 import { mightRender, renderOpaque } from "./render";
 
 /**
@@ -298,6 +305,73 @@ export const MdOpaque = Node.create({
   addNodeView() {
     return ({ node, view, getPos, HTMLAttributes }) =>
       new OpaqueView(node, HTMLAttributes, view, getPos);
+  },
+});
+
+/**
+ * 表格的单元格。内容就是行内节点（那五个 mark 都能用），**不带 md\* 账本**：
+ * 账本只在顶层块上，`sigOf` 算的是整棵子树的 JSON，嵌套层再带一份只会分叉。
+ */
+export const MdTableCell = Node.create({
+  name: "mdTableCell",
+  content: "inline*",
+  isolating: true,
+  addAttributes() {
+    return { header: { default: false }, align: { default: "" } };
+  },
+  parseHTML() {
+    return [{ tag: "td[data-md-cell]" }, { tag: "th[data-md-cell]" }];
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    const 属性: Record<string, string> = { "data-md-cell": "" };
+    const 对 = String(node.attrs.align ?? "");
+    if (对) 属性["data-align"] = 对;
+    return [node.attrs.header ? "th" : "td", { ...domAttrs(HTMLAttributes), ...属性 }, 0];
+  },
+});
+
+export const MdTableRow = Node.create({
+  name: "mdTableRow",
+  content: "mdTableCell+",
+  isolating: true,
+  parseHTML() {
+    return [{ tag: "tr[data-md-row]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["tr", { ...domAttrs(HTMLAttributes), "data-md-row": "" }, 0];
+  },
+});
+
+/**
+ * 表格：**唯一一种"渲染出来还直接在原地改"的不透明块**。
+ *
+ * 为什么只有它破了"显示形只读、编辑退回源文本"那条规矩（见 §块渲染）：代码块平时是代码、
+ * 点进去改源码很自然；表格要填格子就必须待在格子里，于是用户永远只看到 Markdown。
+ * 代价是 `serializeNode` 从此必须产得出 GFM 表格——`table.ts` 那份接管判据就是为此存在的：
+ * 看不准的形状一律不接管，仍然走源文本。
+ */
+export const MdTable = Node.create({
+  name: "mdTable",
+  group: "block",
+  content: "mdTableRow+",
+  isolating: true,
+  defining: true,
+  addAttributes() {
+    return { ...mdAttributes, mdAligns: { default: [] as string[] } };
+  },
+  parseHTML() {
+    return [{ tag: "table[data-md-table]" }];
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    return [
+      "table",
+      {
+        ...domAttrs(HTMLAttributes),
+        "data-md-table": String(node.attrs.mdKind ?? "table"),
+        style: `--md-indent:${Number(node.attrs.mdDepth ?? 0)}`,
+      },
+      ["tbody", 0],
+    ];
   },
 });
 
@@ -684,6 +758,31 @@ export const BlockTools = Extension.create({
   },
 });
 
+/**
+ * 表格里的键。`Tab` / `Shift+Tab` 走格，`Enter` 到下一行同一列（末行则加一行）。
+ *
+ * 这三条必须**在键位层面**接管：`Tab` 默认会跳出编辑器（焦点跑到工具栏上），
+ * `Enter` 默认会拆块——拆出来的两半表格 `serializeNode` 根本不认。
+ */
+export const TableKeys = Extension.create({
+  name: "tableKeys",
+  addKeyboardShortcuts() {
+    const 走 =
+      (做: (state: EditorState) => Transaction | null) =>
+      ({ editor }: { editor: Editor }) => {
+        const tr = 做(editor.state);
+        if (!tr) return false;
+        editor.view.dispatch(tr.scrollIntoView());
+        return true;
+      };
+    return {
+      Tab: 走((s) => moveCell(s, 1)),
+      "Shift-Tab": 走((s) => moveCell(s, -1)),
+      Enter: 走(enterCell),
+    };
+  },
+});
+
 export const mdExtensions = [
   MdDoc,
   MdText,
@@ -691,6 +790,9 @@ export const mdExtensions = [
   MdHeading,
   MdItem,
   MdOpaque,
+  MdTable,
+  MdTableRow,
+  MdTableCell,
   MdBold,
   MdItalic,
   MdCode,
@@ -699,6 +801,7 @@ export const mdExtensions = [
   BlockIdGuard,
   BlockTools,
   BlockKeys,
+  TableKeys,
   FocusIndicator,
   OpaqueFace,
   History,

@@ -392,6 +392,42 @@
     border-radius: var(--radius-sm);
     padding-inline: var(--space-1);
   }
+  /* ── 表格：唯一"渲染出来还直接在原地改"的块 ────────────────────────────
+     格子就是 contenteditable 里的普通文本块，所以焦点指示落在**当前格**上：
+     去掉浏览器描边是为了换成"底色 + 内嵌一圈主色"，两者在同一选择器上（[06] §4）。 */
+  .block-editor table[data-md-table] {
+    inline-size: 100%;
+    margin: 0 0 var(--gap-para);
+    border-collapse: collapse;
+  }
+  .block-editor [data-md-cell] {
+    min-inline-size: 4rem;
+    border: 1px solid var(--border-subtle);
+    padding: var(--space-2) var(--space-3);
+    vertical-align: top;
+    text-align: start;
+    line-height: var(--leading-body);
+  }
+  .block-editor [data-md-cell][data-align="center"] {
+    text-align: center;
+  }
+  .block-editor [data-md-cell][data-align="right"] {
+    text-align: end;
+  }
+  .block-editor th[data-md-cell] {
+    background: var(--bg-sunken);
+    font-weight: 600;
+  }
+  .block-editor [data-md-cell]:focus {
+    outline: none;
+  }
+  /* 替代指示写在另一条规则上（护栏要求"同一选择器开头 + 另一条"，不能自己担保自己）：
+     格子拿到焦点时给一层主色底 + 内嵌一圈，看得见"我在哪一格"，也不套整篇的圈 */
+  .block-editor [data-md-cell]:focus,
+  .block-editor [data-md-cell]:focus-visible {
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
   /* 命令面板。只动 transform / opacity（[06] §动效），reduced-motion 由 tokens.css 全局归零。
      遮罩不做淡入：它一出现就该是"挡住了"，动画会让第一次按键落在半透明层上。 */
   .palette-panel {

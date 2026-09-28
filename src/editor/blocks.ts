@@ -1,9 +1,10 @@
 import type { JSONContent } from "@tiptap/core";
-import { Fragment, type Node as PmNode } from "@tiptap/pm/model";
+import { Fragment, Node as PmNodeModel, type Node as PmNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
 import { inlineToJson, serializeInline } from "./inline";
+import { parseTable, serializeTable, type Align } from "./table";
 
 export type { EditBlock, EditDoc };
 
@@ -30,7 +31,12 @@ const EDITABLE = new Set(["paragraph", "heading", "bullet", "numbered", "todo"])
 
 function nodeType(b: EditBlock): string {
   // 父项的 raw 含子项那几行的字节（缩进也在里面），所以带子项的块不能拆成行内节点
-  if (!EDITABLE.has(b.kind) || b.children.length) return "mdOpaque";
+  if (!EDITABLE.has(b.kind) || b.children.length) {
+    // 表格是唯一被"接管"的不透明块：判据保守（见 table.ts），够格才建网格，
+    // 否则维持源文本编辑——列数不齐的表我们拼不回去，就不该装作能
+    if (b.kind === "table" && parseTable(b.raw)) return "mdTable";
+    return "mdOpaque";
+  }
   switch (b.kind) {
     case "heading":
       return "mdHeading";
@@ -61,6 +67,28 @@ function attrsOf(b: EditBlock): Record<string, unknown> {
 export type JsonNode = { type: string; attrs?: Record<string, unknown>; content?: JSONContent[] };
 
 /**
+ * 表格结构 → `mdTable` 的 JSON。载入与"工具栏插一张表"共用这一份，
+ * 两处各写一遍的话，插进来的表和读进来的表早晚长得不一样。
+ */
+export function tableJson(
+  t: { rows: string[][]; aligns: Align[] },
+  attrs: Record<string, unknown>,
+): JsonNode {
+  return {
+    type: "mdTable",
+    attrs: { ...attrs, mdAligns: t.aligns },
+    content: t.rows.map((cells, r) => ({
+      type: "mdTableRow",
+      content: cells.map((c, i) => ({
+        type: "mdTableCell",
+        attrs: { header: r === 0, align: t.aligns[i] ?? "" },
+        content: inlineToJson(c),
+      })),
+    })),
+  };
+}
+
+/**
  * 只走顶层，与 Rust 侧 `render_exact` 同口径。
  *
  * md-kernel 把嵌套子项的字节算在**父项的 `raw` 里**（子项自己的 `raw` 不带缩进），
@@ -76,6 +104,7 @@ export function docToJson(doc: EditDoc): JsonNode {
       const text = b.raw.replace(/\n+$/, "");
       return { type, attrs, content: text ? [{ type: "text", text }] : [] };
     }
+    if (type === "mdTable") return tableJson(parseTable(b.raw)!, attrs);
     const node: JsonNode = { type, attrs };
     // exactOptionalPropertyTypes：不能写 `content: undefined`
     if (b.content) node.content = inlineToJson(b.content);
@@ -194,6 +223,17 @@ function serializeNode(node: PmNode): string {
       // **不能写 `node.text`**：那是 `TextNode` 才有的字段，块节点上它是 undefined，
       // `?? ""` 会把整块吃成空字符串——用户编辑一次代码块 / 表格 / 引用，那块就没了。
       return node.textContent;
+    case "mdTable": {
+      // 结构 → GFM。列数与对齐由这张表自己带着（mdAligns），所以"加一列"必须同时
+      // 改 aligns，否则产出的分隔行比表头短，重新解析就裂了
+      const 行们: string[][] = [];
+      node.forEach((行) => {
+        const 格: string[] = [];
+        行.forEach((c) => 格.push(serializeInline(c)));
+        行们.push(格);
+      });
+      return serializeTable({ rows: 行们, aligns: (a.mdAligns as Align[]) ?? [] });
+    }
     default:
       return serializeInline(node) + fieldSuffix(a.mdFields) + anchorSuffix(a.mdId);
   }
@@ -253,7 +293,9 @@ export function blockTypePatch(
   node: PmNode,
   id: BlockTypeId,
 ): { typeName: string; attrs: Record<string, unknown> } | null {
-  if (node.type.name === "mdOpaque") return null;
+  // 表格与不透明块都不给转：序列化器没有"把一张表变成段落"这条路，
+  // 允许转就是把用户的表格洗成一行 `|` 文本（D27 判死的正是这种）
+  if (node.type.name === "mdOpaque" || node.type.name === "mdTable") return null;
   const 清场 = { mdKind: "paragraph", mdLevel: null, mdChecked: null };
   switch (id) {
     case "paragraph":
@@ -444,22 +486,26 @@ export function replaceBlockWithSource(
 }
 
 function sourceBlock(state: EditorState, kind: string, source: string, gap: string): PmNode {
+  const 账本 = {
+    mdKind: kind,
+    mdRaw: "",
+    mdGap: gap,
+    mdId: null,
+    mdDepth: 0,
+    mdLevel: null,
+    mdChecked: null,
+    mdFields: [],
+    mdSig: "",
+  };
+  // 工具栏插入的表格骨架直接建成网格：插完就能在格子里打字，
+  // 而不是先看到三行 `|` 再被要求"点出去才变回表格"
+  if (kind === "table" && state.schema.nodes.mdTable) {
+    const t = parseTable(source + "\n");
+    if (t) return PmNodeModel.fromJSON(state.schema, tableJson(t, 账本) as never);
+  }
   const opaque = state.schema.nodes.mdOpaque;
   if (!opaque) throw new Error("schema 里没有 mdOpaque 节点");
-  return opaque.create(
-    {
-      mdKind: kind,
-      mdRaw: "",
-      mdGap: gap,
-      mdId: null,
-      mdDepth: 0,
-      mdLevel: null,
-      mdChecked: null,
-      mdFields: [],
-      mdSig: "",
-    },
-    state.schema.text(source),
-  );
+  return opaque.create(账本, state.schema.text(source));
 }
 
 /**
@@ -545,4 +591,139 @@ export function stampSignatures(state: EditorState): Transaction | null {
   const tr = state.tr.replaceWith(0, state.doc.content.size, Fragment.fromArray(kids));
   // 打签名不是用户的编辑，不该进撤销栈
   return tr.setMeta("addToHistory", false);
+}
+
+/**
+ * 选区所在的表格格子坐标。不在表格里返回 null。
+ *
+ * 坐标是**按绝对位置比出来的**（不是按序号猜）：`$from.before(n)` 给的就是那一层的起点，
+ * 与 `forEach` 的偏移正好对得上。靠序号在有多张表时迟早认错格子。
+ */
+export function cellAt(
+  state: EditorState,
+): { 表: number; 行: number; 列: number; 行数: number; 列数: number } | null {
+  const { $from } = state.selection;
+  if ($from.depth < 3 || $from.node(3).type.name !== "mdTableCell") return null;
+  const 表起点 = $from.before(1);
+  const 表 = state.doc.nodeAt(表起点);
+  if (!表 || 表.type.name !== "mdTable") return null;
+  const 行起点 = $from.before(2);
+  const 格起点 = $from.before(3);
+  let 行 = -1;
+  let 列 = -1;
+  表.forEach((r, ro, ri) => {
+    if (表起点 + 1 + ro !== 行起点) return;
+    行 = ri;
+    r.forEach((c, co, ci) => {
+      if (行起点 + 1 + co === 格起点) 列 = ci;
+    });
+  });
+  if (行 < 0 || 列 < 0) return null;
+  return { 表: 表起点, 行, 列, 行数: 表.childCount, 列数: 表.child(行)!.childCount };
+}
+
+/** 表里第 n 个格子（按文档序，0 起）的绝对起点 */
+function 第n格(表: PmNode, 表起点: number, n: number): number | null {
+  let i = 0;
+  let 找: number | null = null;
+  表.forEach((r, ro) =>
+    r.forEach((_c, co) => {
+      if (i++ === n) 找 = 表起点 + 1 + ro + 1 + co;
+    }),
+  );
+  return 找;
+}
+
+/** 加一行：照末行的列数与各列对齐补空格子 */
+export function addRow(state: EditorState, 表起点: number): Transaction | null {
+  const 表 = state.doc.nodeAt(表起点);
+  const 行型 = state.schema.nodes.mdTableRow;
+  const 格型 = state.schema.nodes.mdTableCell;
+  const 末 = 表?.lastChild;
+  if (!表 || !行型 || !格型 || !末) return null;
+  const aligns = (表.attrs.mdAligns as string[]) ?? [];
+  const 新行 = 行型.create(
+    null,
+    末.children.map((_c, i) => 格型.create({ header: false, align: aligns[i] ?? "" })),
+  );
+  return state.tr.insert(表起点 + 表.nodeSize - 1, 新行);
+}
+
+/**
+ * 加一列。**必须同时给 `mdAligns` 补一项**：产出的分隔行长度由它算，
+ * 只加格子的话 `| --- |` 会比表头短一列，重新解析就错位。
+ */
+export function addColumn(state: EditorState, 表起点: number): Transaction | null {
+  const 表 = state.doc.nodeAt(表起点);
+  const 格型 = state.schema.nodes.mdTableCell;
+  if (!表 || !格型 || 表.type.name !== "mdTable") return null;
+  const 位 = cellAt(state);
+  const 行们: PmNode[] = [];
+  表.forEach((行, _o, i) => {
+    行们.push(行.copy(行.content.addToEnd(格型.create({ header: i === 0, align: "" }))));
+  });
+  const 新表 = 表.type.create(
+    { ...表.attrs, mdAligns: [...((表.attrs.mdAligns as string[]) ?? []), ""] },
+    Fragment.from(行们),
+  );
+  const tr = state.tr.replaceWith(表起点, 表起点 + 表.nodeSize, 新表);
+  // **整块替换会把块内的选区映射到块尾**（PM 的规矩），于是加完一列光标就跑到了表格外面：
+  // 工具栏那两个按钮随即消失，用户以为它们"点一下就没了"。替完再走回原来那一格——
+  // 索引要按**新列数**算，否则同一格在长了一列的表里是另一个位置。
+  if (位) {
+    const 起 = 第n格(新表, 表起点, 位.行 * (位.列数 + 1) + 位.列);
+    if (起 !== null) tr.setSelection(TextSelection.near(tr.doc.resolve(起 + 1)));
+  }
+  return tr;
+}
+
+/**
+ * 把光标移到第 n 个格子；n 越界时先加一行再进去。
+ *
+ * 两条键都走这里：`Tab` 在最后一格 = 加一行（Notion 的肌肉记忆，也是填表最快的路），
+ * `Enter` = 下一行同一列、末行则加一行。GFM 的格子里装不下换行，所以 Enter **永不拆块**——
+ * 劈开表格节点产出来的形状 `serializeNode` 根本不认。
+ */
+function 走到格(state: EditorState, n: number): Transaction | null {
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  const 表起点 = $from.before(1);
+  const 表 = state.doc.nodeAt(表起点);
+  if (!表 || 表.type.name !== "mdTable") return null;
+  const 总 = 表.children.reduce((a, r) => a + r.childCount, 0);
+  if (n < 0) return null;
+  if (n < 总) {
+    const 起点 = 第n格(表, 表起点, n);
+    return 起点 === null
+      ? null
+      : state.tr.setSelection(TextSelection.near(state.doc.resolve(起点 + 1)));
+  }
+  const 加 = addRow(state, 表起点);
+  if (!加) return null;
+  const 新表 = 加.doc.nodeAt(表起点);
+  const 起点 = 新表 ? 第n格(新表, 表起点, n) : null;
+  return 起点 === null ? 加 : 加.setSelection(TextSelection.near(加.doc.resolve(起点 + 1)));
+}
+
+export function moveCell(state: EditorState, delta: 1 | -1): Transaction | null {
+  const 位 = cellAt(state);
+  if (!位) return null;
+  const n = 位.行 * 位.列数 + 位.列 + delta;
+  if (n >= 位.行数 * 位.列数 && delta < 0) return null;
+  return 走到格(state, n);
+}
+
+export function enterCell(state: EditorState): Transaction | null {
+  const 位 = cellAt(state);
+  if (!位) return null;
+  return 走到格(state, (位.行 + 1) * 位.列数 + 位.列);
+}
+
+/** 光标所在表格的起点；不在表格里返回 null（工具栏据此决定要不要给「+ 行 / + 列」） */
+export function tableAt(state: EditorState): number | null {
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  const 起点 = $from.before(1);
+  const 表 = state.doc.nodeAt(起点);
+  return 表?.type.name === "mdTable" ? 起点 : null;
 }
