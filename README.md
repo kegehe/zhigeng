@@ -161,7 +161,9 @@ G1 Markdown 唯一真相源 · G2 摘掉 AI 必须是空壳 · G3 AI 不得静�
 | 捕获落盘（含 fsync）p95 | 2.69ms | < 8ms |
 | 单篇增量索引 p95 | 7.33ms | 超线 → 已改异步 |
 
-数字都记在 `perf-budget.json`，由 `scripts/guard.mjs` 把关。release 构建尚未测。
+数字都记在 `perf-budget.json`，由 `scripts/guard.mjs` 把关。**release 构建已测**（2026-09-29，`pnpm tauri build` + 可信输入，2999 块 vs 8 块对照）：滚动 ~100 帧 **0 掉帧**（最差 19ms）、输入到呈现 p50/p95 **24 / 32ms 且长文档与对照逐分位相同**、INP 达标；两处超 8ms 预算的记在 [ADR-004] §真机复测 与 [05] 欠账（按键路径上事件处理 p95 10.2ms，大头是浏览器重排；`note_edit_doc` 15ms 是"打开一篇"的成本）。
+
+> **产 release 只能走 `pnpm tauri build`**。直接 `cargo build --release -p note-app` 出来的 exe 运行时会去加载 `devUrl`（实测打开后是 `127.0.0.1:1425 拒绝连接`，体积也比 CLI 产物小 216KB），也就是说它不是一份可测的发布件——这条坑是这一轮复测差点量错东西才照出来的。
 
 ---
 
