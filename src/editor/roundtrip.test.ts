@@ -18,6 +18,9 @@ import {
   moveBlock,
   moveCurrentBlock,
   reassemble,
+  removeColumn,
+  removeRow,
+  setAlign,
   type BlockTypeId,
   type EditDoc,
 } from "./blocks";
@@ -1168,6 +1171,115 @@ describe("表格网格化的字节判据", () => {
     expect(docToMarkdown(editor.state.doc, d).split("\n")[3]).toBe("| :--- | :---: | ---: |");
     expect(docToMarkdown(editor.state.doc, d)).toContain("| x3 |");
     editor.destroy();
+  });
+
+  it("删一行：产出的表少一行，前后段一字不动，光标落进顶上来的那一行", () => {
+    const d = 表doc("| A | B | C |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n");
+    const editor = createTestEditor(d);
+    进格(editor, 4); // 第一条数据行的中间那格
+    const tr = removeRow(editor.state, 表起点(editor));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| A | B | C |\n| --- | --- | --- |\n| 4 | 5 | 6 |\n",
+    );
+    expect(cellAt(editor.state)?.行).toBe(1);
+    expect(cellAt(editor.state)?.列).toBe(1);
+    editor.destroy();
+  });
+
+  it("删掉末行也钳得回来；表头与只剩表头都不给删", () => {
+    const d = 表doc(规范表); // 表头 + 一条数据行
+    const editor = createTestEditor(d);
+    进格(editor, 0); // 表头
+    expect(removeRow(editor.state, 表起点(editor))).toBeNull();
+    expect(docToMarkdown(editor.state.doc, d)).toBe("前一段\n\n" + 规范表);
+    进格(editor, 2); // 唯一的数据行
+    editor.view.dispatch(removeRow(editor.state, 表起点(editor))!);
+    // 表头 + 分隔行仍是合法 GFM，重新解析仍认它是表
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| 列 A | 列 B |\n| --- | --- |\n");
+    expect(parseTable(出.slice(出.indexOf("| 列")))!.rows).toEqual([["列 A", "列 B"]]);
+    expect(removeRow(editor.state, 表起点(editor))).toBeNull();
+    expect(docToMarkdown(editor.state.doc, d)).toBe(出);
+    editor.destroy();
+  });
+
+  it("删一列：每行都少一格、分隔行同位次少一段，别的列的对齐跟着挪过来", () => {
+    const d = 表doc("| A | B | C |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n");
+    const editor = createTestEditor(d);
+    进格(editor, 4); // 中间那一列（B / 居中）
+    const tr = removeColumn(editor.state, 表起点(editor));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| A | C |\n| :--- | ---: |\n| 1 | 3 |\n");
+    expect(parseTable(出.slice(出.indexOf("| A")))!.aligns).toEqual(["left", "right"]);
+    expect(cellAt(editor.state)?.列).toBe(1);
+    editor.destroy();
+  });
+
+  it("最后一列不给删：空表不是表", () => {
+    const d = 表doc("| A |\n| --- |\n| 1 |\n");
+    const editor = createTestEditor(d);
+    进格(editor, 1);
+    expect(removeColumn(editor.state, 表起点(editor))).toBeNull();
+    expect(docToMarkdown(editor.state.doc, d)).toBe("前一段\n\n| A |\n| --- |\n| 1 |\n");
+    editor.destroy();
+  });
+
+  it("设对齐：分隔行与每格的样子一起变，只改一边就是「看得见却落不下去」", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 1); // 第二列
+    const tr = setAlign(editor.state, 表起点(editor), "center");
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| 列 A | 列 B |\n| --- | :---: |\n| 1 | 2 |\n");
+    expect(parseTable(出.slice(出.indexOf("| 列")))!.aligns).toEqual(["", "center"]);
+    const 格们 = [...editor.view.dom.querySelectorAll("[data-md-cell]")];
+    expect(格们[1]?.getAttribute("data-align")).toBe("center");
+    expect(格们[3]?.getAttribute("data-align")).toBe("center");
+    expect(cellAt(editor.state)?.列).toBe(1);
+    editor.destroy();
+  });
+
+  it("同一档连点两次不设第二遍：不发事务、不标脏、不重写字节", () => {
+    const d = 表doc("| A | B |\n| --- | :---: |\n| 1 | 2 |\n");
+    const editor = createTestEditor(d);
+    进格(editor, 1);
+    expect(setAlign(editor.state, 表起点(editor), "center")).toBeNull();
+    expect(setAlign(editor.state, 表起点(editor), "left")).not.toBeNull();
+    editor.destroy();
+  });
+
+  it("删列 / 设对齐都只重写动过的那张表：旁边那张一字未动", () => {
+    const 异形 = "| A | B | C |\n|:-----|:---:|-----:|\n| 1 | 2 | 3 |\n";
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        段("前一段\n", "", "前一段"),
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+      ],
+    };
+    for (const 做 of [
+      (e: Editor) => removeColumn(e.state, 表起点(e)),
+      (e: Editor) => setAlign(e.state, 表起点(e), "left"),
+      (e: Editor) => removeRow(e.state, 表起点(e)),
+    ]) {
+      const editor = createTestEditor(d);
+      进格(editor, 4); // 第一张表的数据格
+      const tr = 做(editor);
+      expect(tr).not.toBeNull();
+      editor.view.dispatch(tr!);
+      const 出 = docToMarkdown(editor.state.doc, d);
+      // 第二张表必须逐字节还是原样：分隔行仍带着 `|:-----|` 那种不规则写法
+      expect(出.split(异形).length - 1).toBe(1);
+      editor.destroy();
+    }
   });
 
   it("两张相邻且源文本相同的表：改第一张不许重写第二张", () => {

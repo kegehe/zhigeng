@@ -650,9 +650,23 @@ export function addRow(state: EditorState, 表起点: number): Transaction | nul
 }
 
 /**
- * 加一列。**必须同时给 `mdAligns` 补一项**：产出的分隔行长度由它算，
- * 只加格子的话 `| --- |` 会比表头短一列，重新解析就错位。
+ * 结构动过之后把光标放回"原来那一格"。
+ *
+ * 为什么每次都要现算：整块替换与删行都会把块内选区映射到**块尾**（PM 的规矩），光标就跑到
+ * 表格外面，工具栏那一组按钮随即消失——用户看到的是"点一下就没了"。行列都按新表钳一下，
+ * 删掉的是光标所在那一格时，落点自然退到同行左边那一格 / 上一行。
  */
+function 回到格(tr: Transaction, 表起点: number, 行: number, 列: number): Transaction {
+  const 新表 = tr.doc.nodeAt(表起点);
+  const 列数 = 新表?.firstChild?.childCount ?? 0;
+  if (!新表 || !列数) return tr;
+  const n = Math.min(行, 新表.childCount - 1) * 列数 + Math.min(列, 列数 - 1);
+  const 起 = 第n格(新表, 表起点, n);
+  return 起 === null ? tr : tr.setSelection(TextSelection.near(tr.doc.resolve(起 + 1)));
+}
+
+/** 加一列。**必须同时给 `mdAligns` 补一项**：产出的分隔行长度由它算，
+ * 只加格子的话 `| --- |` 会比表头短一列，重新解析就错位。 */
 export function addColumn(state: EditorState, 表起点: number): Transaction | null {
   const 表 = state.doc.nodeAt(表起点);
   const 格型 = state.schema.nodes.mdTableCell;
@@ -667,14 +681,86 @@ export function addColumn(state: EditorState, 表起点: number): Transaction | 
     Fragment.from(行们),
   );
   const tr = state.tr.replaceWith(表起点, 表起点 + 表.nodeSize, 新表);
-  // **整块替换会把块内的选区映射到块尾**（PM 的规矩），于是加完一列光标就跑到了表格外面：
-  // 工具栏那两个按钮随即消失，用户以为它们"点一下就没了"。替完再走回原来那一格——
-  // 索引要按**新列数**算，否则同一格在长了一列的表里是另一个位置。
-  if (位) {
-    const 起 = 第n格(新表, 表起点, 位.行 * (位.列数 + 1) + 位.列);
-    if (起 !== null) tr.setSelection(TextSelection.near(tr.doc.resolve(起 + 1)));
-  }
-  return tr;
+  return 位 ? 回到格(tr, 表起点, 位.行, 位.列) : tr;
+}
+
+/**
+ * 删掉光标所在那一行。
+ *
+ * 两种情况直接不给删：**表头行**（GFM 的表格必须有表头，删了它产出的就不是表了，而"把第二行
+ * 提成表头"是替用户改语义）；**只剩表头**（再删就成空表）。光标删完落进顶上来的那一行——
+ * 删的是末行时钳回新的末行。
+ */
+export function removeRow(state: EditorState, 表起点: number): Transaction | null {
+  const 位 = cellAt(state);
+  const 表 = state.doc.nodeAt(表起点);
+  if (!位 || !表 || 表.type.name !== "mdTable" || 位.行 === 0 || 位.行数 <= 1) return null;
+  let 删 = -1;
+  表.forEach((行, o, i) => {
+    if (i === 位.行) 删 = 表起点 + 1 + o;
+  });
+  if (删 < 0) return null;
+  const tr = state.tr.delete(删, 删 + 表.child(位.行)!.nodeSize);
+  // 行号不变：删掉那一行之后顶上来的是它下面一行，光标跟着走才是"删的就是我站的那行"。
+  // 删的是末行时 `回到格` 自己钳到新的末行。
+  return 回到格(tr, 表起点, 位.行, 位.列);
+}
+
+/**
+ * 删掉光标所在那一列：**每一行都要少一格**，`mdAligns` 同位次也要削掉——
+ * 只删格子的话分隔行会比表头长一列，产出的那份重新解析就错位。
+ */
+export function removeColumn(state: EditorState, 表起点: number): Transaction | null {
+  const 位 = cellAt(state);
+  const 表 = state.doc.nodeAt(表起点);
+  if (!位 || !表 || 表.type.name !== "mdTable" || 位.列数 <= 1) return null;
+  const 行们: PmNode[] = [];
+  表.forEach((行) => {
+    const 格们: PmNode[] = [];
+    行.forEach((c, _o, j) => {
+      if (j !== 位.列) 格们.push(c);
+    });
+    行们.push(行.copy(Fragment.from(格们)));
+  });
+  const aligns = [...((表.attrs.mdAligns as string[]) ?? [])];
+  aligns.splice(位.列, 1);
+  const 新表 = 表.type.create({ ...表.attrs, mdAligns: aligns }, Fragment.from(行们));
+  const tr = state.tr.replaceWith(表起点, 表起点 + 表.nodeSize, 新表);
+  return 回到格(tr, 表起点, 位.行, 位.列);
+}
+
+/**
+ * 设当前列的对齐。**产出的分隔行（`mdAligns`）与画出来的样子（每格 `align`）必须一起改**：
+ * 只改一边就会出现"屏幕上居中、文件里写 `---`"，那是又一次"看得见却落不下去"。
+ *
+ * 已经是这一档就返回 null——不发事务、不标脏、不把整张表重新序列化一遍。用户在同一列上
+ * 连点两次"居中"不该让这篇笔记变成"待保存"。
+ */
+export function setAlign(
+  state: EditorState,
+  表起点: number,
+  对: Align,
+): Transaction | null {
+  const 位 = cellAt(state);
+  const 表 = state.doc.nodeAt(表起点);
+  if (!位 || !表 || 表.type.name !== "mdTable") return null;
+  const 格型 = state.schema.nodes.mdTableCell;
+  if (!格型) return null;
+  if (String(表.child(位.行)?.child(位.列)?.attrs.align ?? "") === 对) return null;
+  const 行们: PmNode[] = [];
+  表.forEach((行) => {
+    const 格们: PmNode[] = [];
+    行.forEach((c, _o, j) => {
+      格们.push(j === 位.列 ? 格型.create({ ...c.attrs, align: 对 }, c.content) : c);
+    });
+    行们.push(行.copy(Fragment.from(格们)));
+  });
+  const aligns: Align[] = [...((表.attrs.mdAligns as Align[]) ?? [])];
+  while (aligns.length < 位.列数) aligns.push("");
+  aligns[位.列] = 对;
+  const 新表 = 表.type.create({ ...表.attrs, mdAligns: aligns }, Fragment.from(行们));
+  const tr = state.tr.replaceWith(表起点, 表起点 + 表.nodeSize, 新表);
+  return 回到格(tr, 表起点, 位.行, 位.列);
 }
 
 /**

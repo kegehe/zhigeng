@@ -5,13 +5,18 @@ import {
   addColumn,
   addRow,
   applyBlockType,
+  cellAt,
   INSERTABLE,
   insertSourceBlock,
   moveCurrentBlock,
+  removeColumn,
+  removeRow,
+  setAlign,
   BLOCK_TYPES,
   tableAt,
   type BlockTypeId,
 } from "./blocks";
+import type { Align } from "./table";
 
 /** 结构块的按钮字形。工具栏与 `/` 菜单共用，两处不一致会让人怀疑是两种东西 */
 export const 图标: Record<string, string> = { divider: "—", quote: "❝", table: "▦" };
@@ -52,12 +57,24 @@ export function Toolbar({ editor }: { editor: Editor }) {
         ? (String(node?.attrs.mdKind) as BlockTypeId)
         : "paragraph";
   const 可选块 = typeName === "mdParagraph" || typeName === "mdHeading" || typeName === "mdItem";
-  // 光标在某张表里：这时工具栏该给的是"加行 / 加列"，不是块类型下拉
+  // 光标在某张表里：这时工具栏该给的是"行列与对齐"这一组，不是块类型下拉
   const 表起点 = tableAt(editor.state);
+  const 格 = cellAt(editor.state);
+  const 当前对齐: string = 格
+    ? String(
+        editor.state.doc.nodeAt(表起点 ?? -1)?.child(格.行)?.child(格.列)?.attrs.align ?? "",
+      )
+    : "";
 
   const 改表 = (做: (state: typeof editor.state, 起点: number) => ReturnType<typeof addRow>) => {
     if (表起点 === null) return;
     const tr = 做(editor.state, 表起点);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+  };
+  const 改对齐 = (对: Align) => {
+    if (表起点 === null) return;
+    const tr = setAlign(editor.state, 表起点, 对);
+    // 已经是这一档时 setAlign 给 null：同一列连点两次"居中"不该把这篇标成待保存
     if (tr) editor.view.dispatch(tr.scrollIntoView());
   };
 
@@ -167,7 +184,34 @@ export function Toolbar({ editor }: { editor: Editor }) {
       {表起点 !== null ? (
         <>
           {btn("row", "在下面加一行（末格按 Tab 也可以）", "+行", () => 改表(addRow))}
+          {btn(
+            "row-",
+            格 && 格.行 === 0 ? "表头行不给删：GFM 的表格必须有表头" : "删掉这一行",
+            "−行",
+            () => 改表(removeRow),
+            false,
+            !格 || 格.行 === 0 || 格.行数 <= 1,
+          )}
           {btn("col", "在右边加一列", "+列", () => 改表(addColumn))}
+          {btn(
+            "col-",
+            格 && 格.列数 <= 1 ? "最后一列不给删：空表不是表" : "删掉这一列",
+            "−列",
+            () => 改表(removeColumn),
+            false,
+            !格 || 格.列数 <= 1,
+          )}
+          {/* 对齐是这一列的属性：分隔行与每格的样子必须一起改（见 setAlign） */}
+          {btn("al-l", "本列靠左（产出 `:---`）", "⇤", () => 改对齐("left"), 当前对齐 === "left")}
+          {btn("al-c", "本列居中（产出 `:---:`）", "↔", () => 改对齐("center"), 当前对齐 === "center")}
+          {btn("al-r", "本列靠右（产出 `---:`）", "⇥", () => 改对齐("right"), 当前对齐 === "right")}
+          {btn(
+            "al-x",
+            "取消本列的对齐（产出 `---`）",
+            "⊘",
+            () => 改对齐(""),
+            当前对齐 === "" && (格?.列数 ?? 0) > 0,
+          )}
         </>
       ) : null}
       {btn("up", "上移这一块 Alt+↑", "↑", () => move(-1), false, !$from.depth)}
