@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import type { Editor } from "@tiptap/core";
+import { TextSelection } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
 import {
@@ -763,6 +765,168 @@ describe("回车拆段不许把原块的账本留给新块", () => {
     const editor = createTestEditor(doc);
     // 作者留了两个空行。整树替换（载入 / 打签名）里出现的相同源切片是文件本来的样子，
     // 照"拆块产物"去清账本，就会把这两个空行改没——那是另一种改用户内容
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+});
+
+/**
+ * 档 2 的回归线：显示形可以画错，但不许碰到字节。
+ *
+ * `render.ts` 的产物只往 DOM 里放，`docToMarkdown` 读的是 `mdRaw` 与节点正文。这组测试
+ * 钉的就是这条边界——**它红了比渲染画歪了严重得多**：前者是改用户文件，后者只是难看。
+ */
+
+/** 顶层不透明块的位置（按文档序）。显示形只挂在这一层 */
+function 不透明块(editor: Editor): { pos: number; kind: string }[] {
+  const 位: { pos: number; kind: string }[] = [];
+  editor.state.doc.forEach((n, off) => {
+    if (n.type.name === "mdOpaque") 位.push({ pos: off, kind: String(n.attrs.mdKind ?? "raw") });
+  });
+  return 位;
+}
+
+const 面孔 = (editor: Editor, pos: number) =>
+  editor.view.nodeDOM(pos) as HTMLElement | null;
+
+/** 光标进块 = 编辑器有焦点 + 选区落在那一块。缺了焦点就不该翻成源码形（见下面那条测试） */
+const 放进 = (editor: Editor, pos: number) => {
+  editor.view.focus();
+  editor.view.dispatch(
+    editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(pos + 1))),
+  );
+};
+
+const 放到文末 = (editor: Editor) =>
+  editor.view.dispatch(
+    editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)),
+  );
+
+describe("显示形切换不许碰到字节", () => {
+  for (const name of SAMPLES) {
+    const { src, doc } = load(name);
+
+    it(`${name}：光标逐个进出不透明块，产出仍等于源文件`, () => {
+      const editor = createTestEditor(doc);
+      const 装载后的文档 = editor.state.doc;
+      const 块 = 不透明块(editor);
+      expect(块.length, name).toBeGreaterThan(0);
+      for (const b of 块) {
+        放进(editor, b.pos);
+        放到文末(editor);
+      }
+      // 只写 DOM 属性、不发事务：doc 还是同一个对象，说明整趟焦点移动没经过事务通道
+      expect(editor.state.doc).toBe(装载后的文档);
+      expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+      editor.destroy();
+    });
+  }
+
+  it("光标进来退回源文本，交出口变回显示形", () => {
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 表 = 不透明块(editor).find((b) => b.kind === "table")!;
+    expect(表).toBeTruthy();
+
+    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBeUndefined();
+    expect(面孔(editor, 表.pos)!.querySelector("table")).not.toBeNull();
+    expect(面孔(editor, 表.pos)!.querySelector(".md-src")).not.toBeNull();
+
+    放进(editor, 表.pos);
+    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBe("source");
+    放到文末(editor);
+    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBeUndefined();
+    editor.destroy();
+  });
+
+  it("编辑器没焦点时不显示源码形", () => {
+    // 打开一篇时 PM 的选区可能落在文末。那时候没有焦点、没有插入符，
+    // 让最后一块顶着 ``` 围栏示人只会让人以为渲染坏了（真机就是这个样子）
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 表 = 不透明块(editor).find((b) => b.kind === "table")!;
+    放进(editor, 表.pos);
+    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBe("source");
+    editor.view.dom.blur(); // 真 blur：PM 的 hasFocus() 问的是 activeElement，合成事件改不了它
+    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBeUndefined();
+    editor.destroy();
+  });
+
+  it("改了表格的源文本，交出口之后显示形跟着变", () => {
+    // 重画发生在"交出焦点"那一刻，不在击键路径上。这条钉住两件事：
+    // 该重画的时候真的重画了，且它读的是节点正文而不是载入时那份旧字节
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 表 = 不透明块(editor).find((b) => b.kind === "table")!;
+    放进(editor, 表.pos);
+    const 块 = editor.state.doc.nodeAt(表.pos)!;
+    editor.view.dispatch(
+      editor.state.tr.insertText("改", 表.pos + 块.nodeSize - 1),
+    );
+    放到文末(editor);
+    expect(面孔(editor, 表.pos)!.querySelector("table")!.textContent).toContain("改");
+    editor.destroy();
+  });
+
+  it("显示形在 contentDOM 之外：PM 的解析与剪贴板都读不到它", () => {
+    const { doc } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 引 = 不透明块(editor)[0]!;
+    const 壳 = 面孔(editor, 引.pos)!;
+    const 宿主 = 壳.querySelector<HTMLElement>(".md-view")!;
+    const 源 = 壳.querySelector(".md-src")!;
+    expect(宿主.contentEditable).toBe("false");
+    expect(源.contains(宿主)).toBe(false);
+    // 宿主排在源文本前面：PM 按"点击元素在 contentDOM 之前"把落点判给块首
+    expect(壳.compareDocumentPosition(源) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    editor.destroy();
+  });
+
+  it("点显示形要真的把光标放进来", () => {
+    // 真机抓的：Chromium 不会把插入符放进 `contenteditable=false` 的岛里，点了什么也不发生。
+    // 所以这一下必须由 NodeView 自己发选区——不接管的话"点一下改源码"整条路是死的。
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 表 = 不透明块(editor).find((b) => b.kind === "table")!;
+    const 壳 = 面孔(editor, 表.pos)!;
+    expect(壳.dataset["mdMode"]).toBeUndefined();
+    壳
+      .querySelector(".md-view")!
+      .dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    expect(editor.state.selection.$from.parent.type.name).toBe("mdOpaque");
+    expect(editor.state.selection.from).toBe(表.pos + 1);
+    expect(面孔(editor, 表.pos)!.dataset["mdMode"]).toBe("source");
+    editor.destroy();
+  });
+
+  it("点 Callout 标题只改折叠态，不动选区也不动文档", () => {
+    const { doc, src } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 折 = 不透明块(editor).find((b) => b.kind === "callout")!;
+    const 壳 = 面孔(editor, 折.pos)!;
+    const 头 = 壳.querySelector(".cal-head")!;
+    const 选区前 = editor.state.selection.from;
+    const 文档前 = editor.state.doc;
+    头.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    expect(壳.querySelector<HTMLElement>(".callout")!.dataset["folded"]).toBeTruthy();
+    头.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    expect(壳.querySelector<HTMLElement>(".callout")!.dataset["folded"]).toBeUndefined();
+    expect(editor.state.doc).toBe(文档前);
+    expect(editor.state.selection.from).toBe(选区前);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("画不来的块不许被藏起来：明确降级，源文本继续在屏幕上", () => {
+    const { doc, src } = load("05-未识别语法");
+    const editor = createTestEditor(doc);
+    const 块 = 不透明块(editor);
+    expect(块.length).toBeGreaterThan(0);
+    for (const b of 块) {
+      const 壳 = 面孔(editor, b.pos)!;
+      expect(壳.dataset["mdView"], b.kind).toBe("none");
+      expect(壳.querySelector(".md-src")!.textContent!.trim(), b.kind).toBeTruthy();
+    }
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });

@@ -1,8 +1,10 @@
 import { Extension, Mark, Node, type Attributes, type Editor } from "@tiptap/core";
 import type { Node as PmNode } from "@tiptap/pm/model";
-import { Plugin, type Transaction, type EditorState } from "@tiptap/pm/state";
+import { Plugin, TextSelection, type Transaction, type EditorState } from "@tiptap/pm/state";
+import type { EditorView, NodeView, ViewMutationRecord } from "@tiptap/pm/view";
 import { history, redo, undo } from "@tiptap/pm/history";
 import { applyBlockType, moveCurrentBlock, numberedMarker, type BlockTypeId } from "./blocks";
+import { mightRender, renderOpaque } from "./render";
 
 /**
  * 与 md-kernel 块模型一一对应的节点集，加上五个行内标记。
@@ -130,13 +132,144 @@ export const MdItem = Node.create({
   },
 });
 
+/** 焦点切换插件靠它把 DOM 认回实例：整树替换后元素是新的，位置才是线索 */
+const 渲染实例 = new WeakMap<HTMLElement, OpaqueView>();
+
 /**
- * 暂时不做富文本的块：节点正文就是它自己的源文本，未改动时精确回写 `raw`。
+ * 不透明块的两副面孔：**平时是显示形（表格画成网格、引用画成引用），光标进来就退回源文本**。
  *
- * 不是 atom、不是占位符——`code: true` + `content: "text*"` 让它像代码块那样**可以直接
- * 改源码**（表格、公式、引用都读得懂源文本），改了就把用户输入的文本原样落盘。
- * 用户要的从来不是"不能编辑"，而是"别把我的格式洗掉"。
+ * 为什么不"渲染 + 结构化编辑"一起做：`serializeNode` 产不出 `> ` 与 ` ``` ` 前缀，
+ * 也不产表格的管道行（[02] D27）。把渲染出来的网格做成可点的编辑面，就得同时发明一套
+ * "网格 → 字节"的写法——那正是第一轮块编辑器吃掉用户内容的位置。所以：
+ *
+ * 1. **显示形是纯投影**。`render.ts` 从源文本画 DOM，`docToMarkdown` 一个字都不读它。
+ *    画错了最坏是"看着不对"，改源码就能改回来；落盘那条路完全没被碰过。
+ * 2. **切换只写 DOM 属性**（`data-md-mode`），不发事务。发事务会走 `onUpdate` → 标脏 →
+ *    停手 800ms 把"只是挪了挪光标"的一篇写盘，与焦点竖线同一条纪律。
+ * 3. **重画发生在交出焦点的那一刻，不是打字的时候**。ADR-004 量的就是击键路径
+ *    （2999 块 p95 0.2ms），每次按键重画一张表格会把这笔预算花在画界面上。
  */
+class OpaqueView implements NodeView {
+  dom: HTMLDivElement;
+  contentDOM: HTMLElement;
+  readonly host: HTMLDivElement;
+  private kind = "raw";
+  private 正文 = "";
+  private 待重算 = true;
+
+  constructor(
+    node: PmNode,
+    HTMLAttributes: Record<string, unknown>,
+    private readonly view: EditorView,
+    private readonly 位置: () => number | undefined,
+  ) {
+    this.kind = String(node.attrs.mdKind ?? "raw");
+    this.正文 = node.textContent;
+
+    const dom = document.createElement("div");
+    dom.className = "md-opaque";
+    // 与 renderHTML 同一份口径：账本属性不进 DOM，看得见的是类型与缩进
+    for (const [k, v] of Object.entries(HTMLAttributes)) {
+      if (k.startsWith("md") || v === null || v === undefined) continue;
+      dom.setAttribute(k, String(v));
+    }
+    dom.setAttribute("data-md-raw", this.kind);
+    dom.style.setProperty("--md-indent", String(Number(node.attrs.mdDepth ?? 0)));
+
+    const host = document.createElement("div");
+    host.className = "md-view";
+    host.contentEditable = "false";
+    host.setAttribute("aria-hidden", "true");
+
+    const pre = document.createElement("pre");
+    pre.className = "md-src";
+    const code = document.createElement("code");
+    pre.append(code);
+
+    // 宿主排在源文本**前面**：PM 的 `localPosFromDOM` 按"点击的元素在 contentDOM 之前还是
+    // 之后"决定落点，排在前面才拿到块首，点一下就是"从这块的开头改源码"。
+    dom.append(host, pre);
+    this.dom = dom;
+    this.host = host;
+    this.contentDOM = code;
+    渲染实例.set(dom, this);
+    this.补渲染();
+  }
+
+  /** 只在脏了的时候重画：一次焦点转移不该重排没动过的块 */
+  补渲染(): void {
+    if (!this.待重算) return;
+    this.待重算 = false;
+    const 画 = mightRender(this.kind) ? renderOpaque(this.kind, this.正文, document) : null;
+    // 画不出来（HTML、未识别语法、带子项的列表项）就别藏源文本：
+    // 把内容收进一个空宿主里，等于在界面上吃掉这一块。
+    this.dom.dataset["mdView"] = 画 ? "on" : "none";
+    this.host.replaceChildren(画 ?? document.createTextNode(""));
+  }
+
+  update(node: PmNode): boolean {
+    const kind = String(node.attrs.mdKind ?? "raw");
+    if (kind !== this.kind) {
+      this.kind = kind;
+      this.dom.setAttribute("data-md-raw", kind);
+      this.待重算 = true;
+    }
+    if (node.textContent !== this.正文) {
+      this.正文 = node.textContent;
+      this.待重算 = true;
+    }
+    return true;
+  }
+
+  /** 我们自己那半棵子树（含 wrapper 上的 data-md-*）不许惊动 DOM 观察器 */
+  ignoreMutation(mut: ViewMutationRecord): boolean {
+    const 目标 = mut.target as globalThis.Node;
+    return !(目标 === this.contentDOM || this.contentDOM.contains(目标));
+  }
+
+  /**
+   * 显示形上的鼠标：自己把光标放进这一块。
+   *
+   * 真机抓到的：**Chromium 不会把插入符放进 `contenteditable=false` 的岛里**，点了就是
+   * 选那块 DOM、什么也不发生。所以"点一下退回源文本"不能指望浏览器与 PM 的默认行为，
+   * 必须自己发选区。PM 的 `stopEvent` 返回 true 之后这件事就完全归我们管。
+   *
+   * Callout 标题是另一种控件：只改折叠态，连选区都不该动（那条是显示态，不是内容）。
+   */
+  stopEvent(ev: Event): boolean {
+    const 目标 = ev.target as Element | null;
+    if (!目标 || !this.host.contains(目标)) return false;
+    if (目标.closest(".cal-head")) {
+      if (ev.type === "mousedown") {
+        const box = 目标.closest<HTMLElement>(".callout");
+        if (box) {
+          if (box.dataset["folded"]) delete box.dataset["folded"];
+          else box.dataset["folded"] = "1";
+        }
+      }
+      return true;
+    }
+    if (ev.type === "mousedown") this.进源码();
+    return true;
+  }
+
+  /** 光标落到块首：显示形随即翻成源文本形（`OpaqueFace` 认选区） */
+  private 进源码(): void {
+    let pos: number | undefined;
+    try {
+      pos = this.位置();
+    } catch {
+      return; // 节点已经不在文档里了
+    }
+    if (pos === undefined || !this.view.state.doc.nodeAt(pos)) return;
+    const tr = this.view.state.tr.setSelection(
+      TextSelection.near(this.view.state.doc.resolve(pos + 1)),
+    );
+    this.view.dispatch(tr.scrollIntoView());
+    this.view.focus();
+  }
+}
+
 export const MdOpaque = Node.create({
   name: "mdOpaque",
   group: "block",
@@ -161,6 +294,10 @@ export const MdOpaque = Node.create({
       },
       ["code", 0],
     ];
+  },
+  addNodeView() {
+    return ({ node, view, getPos, HTMLAttributes }) =>
+      new OpaqueView(node, HTMLAttributes, view, getPos);
   },
 });
 
@@ -415,6 +552,76 @@ export const FocusIndicator = Extension.create({
 });
 
 /**
+ * 焦点决定不透明块显示哪一副面孔：选区碰到的块是源文本形，其余是显示形。
+ *
+ * 三条口径：
+ * 1. **只写 DOM 属性，不发事务**（与 `FocusIndicator` 同一条纪律）。事务会经
+ *    `onUpdate` → 标脏 → 800ms 后把"只是点了点别处"的一篇写盘。
+ * 2. **每次更新都把手上的那几个位置对一遍**，不按"位置没变"提前返回：`moveBlock` 与
+ *    装载都是整树替换，PM 会把那一块的视图重建，新元素身上没有 `data-md-mode`。
+ *    只按位置比就会留下"选区在里面、屏幕上却是显示形"的状态——光标看不见。
+ *    空选区走 `$from.before(1)`，是 O(1)，不碰 `doc.forEach`。
+ * 3. 交出焦点的那一块才重画（`补渲染`），所以打字的路上没有 DOM 构建。
+ */
+export const OpaqueFace = Extension.create({
+  name: "opaqueFace",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        view: (view) => {
+          let 上次: number[] = [];
+
+          const 改 = (pos: number, 开: boolean) => {
+            const dom = view.nodeDOM(pos);
+            if (!(dom instanceof HTMLElement) || !dom.classList.contains("md-opaque")) return;
+            if (开) {
+              if (dom.dataset["mdMode"] !== "source") dom.dataset["mdMode"] = "source";
+            } else {
+              delete dom.dataset["mdMode"];
+              渲染实例.get(dom)?.补渲染();
+            }
+          };
+
+          const sync = (state: EditorState) => {
+            const sel = state.selection;
+            const 现在: number[] = [];
+            // 没有焦点就不算"正在改这一块"：打开一篇时 PM 的选区可能落在文末，
+            // 那不该让最后一块顶着源码示人（真机看过：像渲染坏了）
+            if (view.hasFocus()) {
+              if (sel.empty) {
+                if (sel.$from.depth) 现在.push(sel.$from.before(1));
+              } else {
+                state.doc.forEach((node, off) => {
+                  if (sel.from < off + node.nodeSize && sel.to > off) 现在.push(off);
+                });
+              }
+            }
+            const 留着 = new Set(现在);
+            for (const p of 上次) if (!留着.has(p)) 改(p, false);
+            for (const p of 现在) 改(p, true);
+            上次 = 现在;
+          };
+
+          // 焦点变化不发事务，PM 也就不会调 update——只能自己听
+          const on焦点 = () => sync(view.state);
+          view.dom.addEventListener("focus", on焦点);
+          view.dom.addEventListener("blur", on焦点);
+          sync(view.state);
+          return {
+            update: (v: EditorView) => sync(v.state),
+            destroy: () => {
+              view.dom.removeEventListener("focus", on焦点);
+              view.dom.removeEventListener("blur", on焦点);
+              上次.forEach((p) => 改(p, false));
+            },
+          };
+        },
+      }),
+    ];
+  },
+});
+
+/**
  * Notion 式的输入原语：前缀转块 + `/` 唤出块菜单。
  *
  * 三条不显然的实现口径：
@@ -493,5 +700,6 @@ export const mdExtensions = [
   BlockTools,
   BlockKeys,
   FocusIndicator,
+  OpaqueFace,
   History,
 ];

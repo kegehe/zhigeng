@@ -208,6 +208,190 @@
   .block-editor [data-md-raw]:last-child {
     margin-bottom: var(--gap-para);
   }
+
+  /* ── 不透明块的两副面孔（docs/03 §块渲染）────────────────────────────
+     显示形是源文本的**投影**：画它只为了看着对，落盘永远读 mdRaw 与节点正文。
+     哪一副露出来由 `OpaqueFace` 插件写 `data-md-mode` 决定（只写 DOM，不发事务）；
+     画不来的那一档（HTML、未识别语法、带子项的列表项）标 `data-md-view="none"`，
+     源文本继续显示——把内容藏进一个空宿主里，等于在界面上吃掉这一块。 */
+  .block-editor .md-opaque .md-view {
+    display: none;
+    white-space: normal; /* 上面 [data-md-raw] 的 pre-wrap 会继承进来，显示形自己排版 */
+    cursor: text; /* 点它就是改这一块的源码，别让它看起来像一张图 */
+  }
+  .block-editor .md-opaque[data-md-view="on"]:not([data-md-mode]) .md-view {
+    display: block;
+  }
+  .block-editor .md-opaque[data-md-view="on"]:not([data-md-mode]) .md-src {
+    display: none;
+  }
+  /* 源文本形要一眼看出"这是在改文件"：沉底、等宽、左边一条强线 */
+  .block-editor .md-src {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border-inline-start: 2px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunken);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-mono);
+    line-height: var(--leading-body);
+  }
+  .block-editor .md-view > :last-child,
+  .block-editor .md-view blockquote > :last-child,
+  .block-editor .md-view .cal-body > :last-child {
+    margin-bottom: 0;
+  }
+  .block-editor .md-view p {
+    margin: 0 0 var(--gap-para);
+  }
+  .block-editor .md-view ul,
+  .block-editor .md-view ol {
+    margin: 0 0 var(--gap-para);
+    padding-inline-start: var(--space-4);
+  }
+  .block-editor .md-view li {
+    margin-block: var(--gap-list);
+    padding-inline-start: calc(var(--md-indent, 0) * 1.5em);
+  }
+  .block-editor .md-view .tick {
+    margin-inline-end: var(--space-2);
+    accent-color: var(--accent);
+  }
+  .block-editor .md-view .quote {
+    margin: 0 0 var(--gap-para);
+    padding-inline-start: var(--space-4);
+    border-inline-start: 3px solid var(--border-strong);
+    color: var(--text-secondary);
+  }
+  .block-editor .md-view .callout {
+    margin: 0 0 var(--gap-para);
+    padding: var(--space-3) var(--space-4);
+    border-inline-start: 3px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--bg-sunken);
+  }
+  .block-editor .md-view .cal-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+  }
+  .block-editor .md-view .cal-badge {
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+  }
+  .block-editor .md-view .cal-title {
+    font-weight: 600;
+  }
+  .block-editor .md-view .cal-body {
+    margin-top: var(--space-1);
+  }
+  .block-editor .md-view .callout[data-folded] .cal-body {
+    display: none;
+  }
+  /* Callout 的类型只挑已有语义色：为每种类型新造一个 token，等于把样式表变成语法表 */
+  .block-editor .md-view .callout[data-callout="tip"],
+  .block-editor .md-view .callout[data-callout="success"] {
+    background: var(--success-soft);
+    border-color: var(--success);
+  }
+  .block-editor .md-view .callout[data-callout="warning"],
+  .block-editor .md-view .callout[data-callout="caution"] {
+    background: var(--warning-soft);
+    border-color: var(--warning);
+  }
+  .block-editor .md-view .callout[data-callout="danger"],
+  .block-editor .md-view .callout[data-callout="error"] {
+    background: var(--danger-soft);
+    border-color: var(--danger);
+  }
+  .block-editor .md-view .callout[data-callout="question"],
+  .block-editor .md-view .callout[data-callout="example"],
+  .block-editor .md-view .callout[data-callout="info"] {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+  }
+  .block-editor .md-view .mdtable {
+    inline-size: 100%;
+    margin: 0 0 var(--gap-para);
+    border-collapse: collapse;
+  }
+  .block-editor .md-view .mdtable th,
+  .block-editor .md-view .mdtable td {
+    border: 1px solid var(--border-subtle);
+    padding: var(--space-2) var(--space-3);
+    text-align: start;
+  }
+  .block-editor .md-view .mdtable th {
+    background: var(--bg-sunken);
+    font-weight: 600;
+  }
+  .block-editor .md-view .mdtable [data-align="center"] {
+    text-align: center;
+  }
+  .block-editor .md-view .mdtable [data-align="right"] {
+    text-align: end;
+  }
+  .block-editor .md-view .codeblock {
+    margin: 0 0 var(--gap-para);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--bg-sunken);
+  }
+  .block-editor .md-view .codeblock pre {
+    margin: 0;
+    padding: 0;
+    background: none; /* 盒子由 .codeblock 画一次就够，别让 .prose-note pre 再套一层 */
+    border: none;
+    border-radius: 0;
+    white-space: pre-wrap; /* 与源文本形同一条口径：窄栏里换行，不逼人横向滚动 */
+    overflow-x: visible;
+  }
+  .block-editor .md-view .codeblock code {
+    font-family: var(--font-mono);
+    font-size: var(--text-mono);
+    line-height: var(--leading-body);
+  }
+  .block-editor .md-view .codeblock .lang {
+    display: block;
+    margin-bottom: var(--space-1);
+    color: var(--text-disabled);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+  /* 公式只剥围栏、居中排。没有 TeX 渲染器，画成公式是另一档活（docs/02 未列它） */
+  .block-editor .md-view .math {
+    margin: 0 0 var(--gap-para);
+    padding: var(--space-3);
+    text-align: center;
+    font-family: var(--font-mono);
+    white-space: pre-wrap;
+  }
+  .block-editor .md-view .divider {
+    margin: var(--space-6) 0;
+    border: none;
+    border-block-start: 1px solid var(--border-strong);
+  }
+  /* 资产与嵌入只显示名字，不去加载本地路径（WebView 里加载不了，画个碎图比不画更坏） */
+  .block-editor .md-view .asset {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunken);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+  .block-editor .md-view .wikilink {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: var(--radius-sm);
+    padding-inline: var(--space-1);
+  }
   /* 气泡工具条与 `/` 块菜单：绝对定位在 .editor-wrap 里，坐标由选区算（BlockEditor.tsx）。
      浮层上的按钮靠全局 `:focus-visible` 环给焦点指示，这里不另描边。 */
   .editor-wrap {
