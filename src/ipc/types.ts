@@ -9,6 +9,8 @@ export type ListNotes = {
   }[];
   vaultPath: string;
   indexed: number;
+  /** 这次只取了前 limit 篇（Rust 侧 `NoteList.truncated`）。目录树的篇数要说真话就靠它 */
+  truncated: boolean;
 };
 
 export type AppInfo = {
@@ -81,7 +83,10 @@ export type LinkRow = {
 export type LinkPanel = {
   rel: string;
   incoming: LinkRow[];
+  /** 这一半取不完。面板要把它说出来，不能让用户以为链到这就没了 */
+  incomingTruncated: boolean;
   outgoing: LinkRow[];
+  outgoingTruncated: boolean;
 };
 
 /** 与 `note_core::service::EditBlock` 对应。raw 是精确源切片，未改动的块靠它字节级回写 */

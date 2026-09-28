@@ -23,8 +23,8 @@ export function LinkPanelView({
   if (!入.length && !出.length) return null;
   return (
     <section className="mt-10 flex flex-col gap-5 border-t border-line pt-4">
-      <LinkGroup label="反向链接" rows={入} onOpen={onOpen} />
-      <LinkGroup label="我链到" rows={出} onOpen={onOpen} />
+      <LinkGroup label="反向链接" rows={入} 截断={panel.incomingTruncated} onOpen={onOpen} />
+      <LinkGroup label="我链到" rows={出} 截断={panel.outgoingTruncated} onOpen={onOpen} />
     </section>
   );
 }
@@ -56,10 +56,13 @@ function 分组(rows: LinkRow[]): 面板行[] {
 function LinkGroup({
   label,
   rows,
+  截断,
   onOpen,
 }: {
   label: string;
   rows: 面板行[];
+  /** 后端多取一条探到的"还有没有"。不说就等于把截断藏起来 */
+  截断?: boolean;
   onOpen: (rel: string, title: string) => void;
 }) {
   if (!rows.length) return null;
@@ -109,6 +112,9 @@ function LinkGroup({
           );
         })}
       </ul>
+      {截断 ? (
+        <p className="mt-1.5 px-3 text-xs text-fg-disabled">还有更多没列出来。</p>
+      ) : null}
     </div>
   );
 }

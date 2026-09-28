@@ -158,12 +158,15 @@ export function App() {
    * 保存之后**不**立刻调它：链接图是后台索引算出来的，那时问到的还是旧图。
    * 面板跟着 `note://indexed` 走，索引一落地就自己更新。
    */
-  const loadLinks = useCallback((rel: string) => {
-    setLinks(null);
+  const loadLinks = useCallback((rel: string, 静默 = false) => {
+    if (!静默) setLinks(null);
     void api
       .noteLinks(rel)
       .then((p) => setLinks(p.rel === rel ? p : null))
-      .catch(() => setLinks(null));
+      // 静默刷新失败就留着手上那份：面板是辅助信息，一次读失败不该把它抹成空
+      .catch(() => {
+        if (!静默) setLinks(null);
+      });
   }, []);
 
   // 索引是异步补的。速记捕获落盘后主窗必须自己长回来，否则新笔记要重启才看得见。
@@ -179,7 +182,10 @@ export function App() {
       if (!alive) return;
       void refresh();
       const rels = e.payload ?? [];
-      if (selected && rels.includes(selected.rel)) loadLinks(selected.rel); // 链接图是这一趟算出来的
+      // 面板跟着索引走。**不按 rels 过滤**：改名 / 归档的负载里只有"被搬走的那一篇"，
+      // 而它的一批入链方（可能正是眼前这篇）不在名单里——只认"库里刚补过索引"这件事。
+      // 静默刷新：不清空重画，避免每存一次面板闪一下。
+      if (selected) loadLinks(selected.rel, true);
       if (!unsaved && selected && rels.includes(selected.rel)) {
         // **先比内容，再决定要不要重装载**。自己按下保存也会绕一圈回到这里，而重装载是
         // 整棵编辑器重挂载：光标、撤销栈、正开着的菜单全丢。真机就是这么暴露的——
@@ -841,6 +847,14 @@ export function App() {
                       </button>
                     );
                   })}
+              {/* 侧栏只吃 listNotes(300)。不说的话，目录树上那个篇数就是在少报——
+                  树把"少了多少"藏进了某个折叠目录，比平铺列表更需要这句提示 */}
+              {!searching && notes?.truncated ? (
+                <div className="px-3 py-2 text-xs text-fg-disabled">
+                  只列出了最近 {notes.notes.length} 篇（库里共 {notes.indexed} 篇）。
+                  要找别的，直接在上面搜。
+                </div>
+              ) : null}
             </nav>
             <div className="border-t border-line p-2">
               <button

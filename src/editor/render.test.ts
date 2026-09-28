@@ -43,6 +43,18 @@ describe("显示形：分隔线 / 引用 / Callout", () => {
     expect([...(q?.querySelectorAll("li") ?? [])].map((n) => n.textContent)).toEqual(["甲", "乙"]);
   });
 
+  it("嵌套引用只吃连续那几行，后面的外层内容留在外层", () => {
+    // 复查时抓到的：原先遇到 `>` 就 slice 到结尾并 return，"外层乙"被画进了内层
+    const q = r("quote", "> 外层甲\n>\n> > 内层\n>\n> 外层乙");
+    const 内层 = q!.querySelectorAll("blockquote");
+    expect(内层).toHaveLength(1);
+    expect(内层[0]!.textContent).toBe("内层");
+    expect([...q!.querySelectorAll(":scope > p")].map((p) => p.textContent)).toEqual([
+      "外层甲",
+      "外层乙",
+    ]);
+  });
+
   it("行内语法在显示形里被解开，不留 ** 与 `[[`", () => {
     const q = r("quote", "> 注意 **重点** 与 `code`，见 [[检索策略#^b-m2n5p8r1ic]]");
     expect(q?.querySelector("strong")?.textContent).toBe("重点");

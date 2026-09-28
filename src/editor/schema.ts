@@ -186,7 +186,9 @@ class OpaqueView implements NodeView {
     const host = document.createElement("div");
     host.className = "md-view";
     host.contentEditable = "false";
-    host.setAttribute("aria-hidden", "true");
+    // 不挂常驻 aria-hidden：两副面孔靠 display:none 互换，同一时刻只有一棵在渲染树里，
+    // AT 本来就读不到被隐藏的那份。挂上它反而把**看得见**的显示形（以及能点的 Callout
+    // 折叠开关）从无障碍树里抹掉——那是"屏幕上有、读屏里没有"的第二种说谎。
 
     const pre = document.createElement("pre");
     pre.className = "md-src";
@@ -447,7 +449,13 @@ export const LedgerGuard = () =>
         const a = { ...n.attrs, ...改.get(i) };
         const raw = typeof a.mdRaw === "string" ? a.mdRaw : "";
         const 前一份 = i > 0 ? (块[i - 1]!.n.attrs.mdRaw ?? "") : "";
-        if (raw && raw === 前一份) {
+        // 表格**不参与这条判据**。它的前提是"重新序列化等于原字节"——段落、标题、列表、
+        // 不透明块都成立（产回来就是那份文本），表格不成立：`serializeTable` 产的是规范形，
+        // 清掉账本等于把一张用户没碰过的表从 `|:-----|` 重写成 `| :--- |`（真机取证过：
+        // 两张相邻且源文本相同的表，给第一张加一列，第二张的字节就跟着变了）。
+        // 而这条判据本来也用不到表格身上：格子里的 Enter 被 `TableKeys` 接管成跳格，
+        // 表格拆不出"相邻两块同源"这种产物。
+        if (raw && raw === 前一份 && n.type.name !== "mdTable") {
           // 新块没有源切片可回，账本按"新建"重来；`mdKind` 还得与**实际节点类型**对齐：
           // 拆一个列表项会得到 `mdParagraph`，而复制来的 `mdKind` 还写着 `bullet`——
           // 那种状态下序列化器认为它是列表的延续（gap `""`），两行就粘回一个列表项。

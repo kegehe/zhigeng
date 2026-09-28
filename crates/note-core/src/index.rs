@@ -136,7 +136,14 @@ impl Index {
                     // ——写回去的还是旧值，而 `meta` 里那条压根没更新，于是每次开库都重跑一遍
                     // 迁移（对大库就是重扫全库的块重算链接图）。真机暴露它是因为这个 bug
                     // 让真库一直停在 v1，而 v1 那条分支正好撞上上面的迁移顺序错误。
-                    self.set_meta(SCHEMA_VERSION, MD_FORMAT_VERSION)?;
+                    //
+                    // 只写 `schema_version` 那一列：`md_format_version` 是长在用户资产里的
+                    // 版本号（docs/02 §版本，改它必须写数据迁移），不能跟着索引架构一起被顺手刷掉。
+                    self.conn.execute(
+                        "INSERT INTO meta(key,value) VALUES('schema_version',?1)
+                         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        [SCHEMA_VERSION.to_string()],
+                    )?;
                 }
                 self.conn
                     .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1404,7 +1411,12 @@ impl Index {
         &self,
         rel: &str,
         limit: i64,
-    ) -> Result<(Vec<crate::service::LinkRow>, Vec<crate::service::LinkRow>)> {
+    ) -> Result<(
+        Vec<crate::service::LinkRow>,
+        bool,
+        Vec<crate::service::LinkRow>,
+        bool,
+    )> {
         let 一行 = |r: &Row| {
             Ok(crate::service::LinkRow {
                 rel: r.get(0)?,
@@ -1417,6 +1429,9 @@ impl Index {
                 broken: r.get::<_, i64>(7)? != 0,
             })
         };
+        // 多取一条只为了知道"后面还有没有"：面板上那句「还有更多没列出」不能靠前端猜
+        // 数组长度——猜就等于把截断藏起来
+        let 取 = limit + 1;
         let mut stmt = self.conn.prepare(
             "SELECT n.path, n.title, n.status, substr(b.text,1,140),
                     (l.to_block IS NOT NULL), l.kind, l.target, 0
@@ -1428,10 +1443,12 @@ impl Index {
              ORDER BY n.updated_at DESC, b.ordinal
              LIMIT ?2",
         )?;
-        let 入链 = stmt
-            .query_map(params![rel, limit], 一行)?
+        let mut 入链: Vec<crate::service::LinkRow> = stmt
+            .query_map(params![rel, 取], 一行)?
             .filter_map(|x| x.ok())
             .collect();
+        let 入截 = 入链.len() as i64 > limit;
+        入链.truncate(limit as usize);
         let mut stmt = self.conn.prepare(
             "SELECT COALESCE(n.path,''), COALESCE(n.title, l.target), COALESCE(n.status,'missing'),
                     substr(b.text,1,140),
@@ -1444,10 +1461,12 @@ impl Index {
              ORDER BY l.broken DESC, b.ordinal
              LIMIT ?2",
         )?;
-        let 出链 = stmt
-            .query_map(params![rel, limit], 一行)?
+        let mut 出链: Vec<crate::service::LinkRow> = stmt
+            .query_map(params![rel, 取], 一行)?
             .filter_map(|x| x.ok())
             .collect();
-        Ok((入链, 出链))
+        let 出截 = 出链.len() as i64 > limit;
+        出链.truncate(limit as usize);
+        Ok((入链, 入截, 出链, 出截))
     }
 }

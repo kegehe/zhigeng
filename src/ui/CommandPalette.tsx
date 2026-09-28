@@ -11,6 +11,20 @@ import { 匹配, type PaletteItem } from "./palette";
  *   键盘用户每开一次面板都要重新找光标。
  * - 列表只画前 20 条（`匹配` 的上限）。库里 300 篇全渲染进一个浮层，打字那一下就是白付的。
  */
+/**
+ * 按 `group` 把结果切成连续段（保留全局序号，`aria-activedescendant` 与键盘导航都按序号走）。
+ * 段就是 ARIA 的 `role=group`：listbox 允许 group 作为直接后代，group 里才是 option。
+ */
+function 分段(items: PaletteItem[]): { 名: string; 项: { c: PaletteItem; i: number }[] }[] {
+  const 出: { 名: string; 项: { c: PaletteItem; i: number }[] }[] = [];
+  items.forEach((c, i) => {
+    const 末项 = 出[出.length - 1];
+    if (末项 && 末项.名 === c.group) 末项.项.push({ c, i });
+    else 出.push({ 名: c.group, 项: [{ c, i }] });
+  });
+  return 出;
+}
+
 export function CommandPalette({
   标题,
   items,
@@ -71,6 +85,7 @@ export function CommandPalette({
           role="combobox"
           aria-expanded="true"
           aria-controls="palette-list"
+          aria-activedescendant={中 >= 0 && 出.length ? `palette-opt-${中}` : undefined}
           value={q}
           placeholder="搜笔记，或打个动作…"
           spellCheck={false}
@@ -92,26 +107,31 @@ export function CommandPalette({
           }}
           className="w-full border-b border-line bg-transparent px-4 py-3 text-base text-fg outline-none placeholder:text-fg-disabled"
         />
-        <ul id="palette-list" role="listbox" aria-label="结果" className="min-h-0 flex-1 overflow-y-auto p-1.5">
+        {/* ARIA 的 owned-by 规则：option 必须是 listbox 的**直接**后代（中间只允许 role=group）。
+            原先 option 挂在 li 里的 button 上，读屏按 ARIA 走树的时候找不到它——
+            看着有 role 标记，实际不播报。焦点留在输入框，靠 aria-activedescendant 指过去。 */}
+        <div
+          id="palette-list"
+          role="listbox"
+          aria-label="结果"
+          className="min-h-0 flex-1 overflow-y-auto p-1.5"
+        >
           {出.length === 0 ? (
-            <li className="px-3 py-6 text-center text-sm text-fg-disabled">
-              没有匹配的笔记或动作
-            </li>
+            <p className="px-3 py-6 text-center text-sm text-fg-disabled">没有匹配的笔记或动作</p>
           ) : null}
-          {出.map((c, i) => {
-            const 是新组 = i === 0 || 出[i - 1]!.group !== c.group;
-            return (
-              <li key={c.id}>
-                {是新组 ? (
-                  <div className="px-3 pt-2 pb-1 text-xs text-fg-disabled">{c.group}</div>
-                ) : null}
-                <button
+          {分段(出).map((段) => (
+            <div key={段.名} role="group" aria-label={段.名}>
+              <div className="px-3 pt-2 pb-1 text-xs text-fg-disabled">{段.名}</div>
+              {段.项.map(({ c, i }) => (
+                <div
+                  key={c.id}
+                  id={`palette-opt-${i}`}
                   role="option"
                   aria-selected={i === 中}
                   onMouseEnter={() => set选(i)}
                   onClick={() => 执行(c)}
                   className={
-                    "block w-full rounded-md px-3 py-2 text-left text-sm " +
+                    "block w-full cursor-default rounded-md px-3 py-2 text-left text-sm " +
                     (i === 中 ? "bg-accent-soft text-fg" : "text-fg-2")
                   }
                 >
@@ -123,11 +143,11 @@ export function CommandPalette({
                       </span>
                     ) : null}
                   </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

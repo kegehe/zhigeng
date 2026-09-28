@@ -1119,6 +1119,33 @@ describe("表格网格化的字节判据", () => {
     editor.destroy();
   });
 
+  it("两张相邻且源文本相同的表：改第一张不许重写第二张", () => {
+    // 复查查出来的字节级缺陷。账本守卫的判据是"相邻两块 mdRaw 相同 ⇒ 拆块产物，清掉后一块"，
+    // 它的前提是"重新序列化等于原字节"。表格是唯一不满足这个前提的块（产的是规范形），
+    // 所以清完账本，用户没碰过的那张表会从 `|:-----|` 变成 `| :--- |`
+    const 异形 = "| A | B |\n|:-----|-----:|\n| 1 | 2 |\n";
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        段("前一段\n", "", "前一段"),
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+      ],
+    };
+    const 源 = "前一段\n\n" + 异形 + "\n" + 异形;
+    const editor = createTestEditor(d);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(源);
+    进格(editor, 2); // 第一张表的数据格
+    const 起点 = 表起点(editor);
+    editor.view.dispatch(addColumn(editor.state, 起点)!);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    // 第二张表必须逐字节还是那三份字节：它的分隔行仍是 `|:-----|-----:|`
+    expect(出.split(异形).length - 1).toBe(1);
+    expect(出).toContain("|:-----|-----:|");
+    editor.destroy();
+  });
+
   it("看不准的形状一律不接管：列数不齐 / 带块锚 / 有缩进都还是源文本块", () => {
     const 不接管 = [
       "| 甲 | 乙 |\n| --- |\n| 1 | 2 | 3 |\n",

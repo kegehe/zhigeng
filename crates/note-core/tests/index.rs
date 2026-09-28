@@ -375,7 +375,7 @@ fn 反链面板给出入链与出链且悬空那条带着原始写法() {
     idx.rebuild_all(&v).unwrap();
     // 夹具的形状：主动层设计 → [[检索策略]] + [[不存在的笔记]]（悬空）；
     // 检索策略 → [[主动层设计#^b-k3x9m2v7qa]]（块级）
-    let (入, 出) = idx.note_links("notes/主动层设计.md", 50).unwrap();
+    let (入, _, 出, _) = idx.note_links("notes/主动层设计.md", 50).unwrap();
     assert_eq!(入.len(), 1, "只该有一篇链到我: {入:?}");
     assert_eq!(入[0].rel, "notes/检索策略.md");
     assert!(入[0].to_block, "对方指到的是我某个块，不整篇");
@@ -395,7 +395,7 @@ fn 反链面板给出入链与出链且悬空那条带着原始写法() {
     assert_eq!(出[1].rel, "notes/检索策略.md");
 
     // 另一头看回来：块级引用在入链侧认得出"指到具体块"
-    let (入, 出) = idx.note_links("notes/检索策略.md", 50).unwrap();
+    let (入, _, 出, _) = idx.note_links("notes/检索策略.md", 50).unwrap();
     assert_eq!(入[0].rel, "notes/主动层设计.md");
     assert!(!入[0].to_block, "对方链的是整篇");
     assert_eq!(出.len(), 1);
@@ -416,7 +416,7 @@ fn 视图文件不进反链面板() {
     .unwrap();
     let idx = Index::open(&v).unwrap();
     idx.rebuild_all(&v).unwrap();
-    let (入, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    let (入, _, _, _) = idx.note_links("notes/甲.md", 50).unwrap();
     assert!(
         入.is_empty(),
         "视图不是笔记，链到它不该出现在面板上: {入:?}"
@@ -436,7 +436,7 @@ fn 归档笔记的入链照收但带着状态() {
     .unwrap();
     let idx = Index::open(&v).unwrap();
     idx.rebuild_all(&v).unwrap();
-    let (入, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    let (入, _, _, _) = idx.note_links("notes/甲.md", 50).unwrap();
     assert_eq!(入.len(), 1, "归档是真结构，藏起来面板就说谎: {入:?}");
     assert_eq!(入[0].status, "archived", "但要带着状态，界面好淡化");
 }
@@ -510,7 +510,7 @@ fn 旧库的链接表在打开时补上原始写法() {
         );
     }
     let idx = note_core::index::Index::open(&vault).unwrap();
-    let (入, 出) = idx.note_links("notes/甲.md", 50).unwrap();
+    let (入, _, 出, _) = idx.note_links("notes/甲.md", 50).unwrap();
     assert_eq!(入.len(), 0);
     assert_eq!(出.len(), 2, "迁移后链接图要完整回来: {出:?}");
     assert_eq!(
@@ -564,8 +564,27 @@ fn 老库的两张链接表一起升级且版本号要记下来() {
         idx.conn()
             .execute("UPDATE meta SET value='1' WHERE key='schema_version'", [])
             .unwrap();
+        // 故意留一个**不等于本程序 MD_FORMAT_VERSION** 的值：schema 迁移不该碰它。
+        // 这两个版本号管的对象不同——`md_format_version` 长在用户资产里，改它要写数据迁移
+        idx.conn()
+            .execute(
+                "UPDATE meta SET value='7' WHERE key='md_format_version'",
+                [],
+            )
+            .unwrap();
     }
     let idx = note_core::index::Index::open(&vault).unwrap();
+    assert_eq!(
+        idx.conn()
+            .query_row(
+                "SELECT value FROM meta WHERE key='md_format_version'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "7",
+        "schema 迁移把 md_format_version 一起刷掉了——那是资产格式的版本号"
+    );
     assert_eq!(
         idx.conn()
             .query_row(
@@ -585,7 +604,7 @@ fn 老库的两张链接表一起升级且版本号要记下来() {
         2,
         "v1 库升级后链接图要完整回来且带写法"
     );
-    let (入, 出) = idx.note_links("notes/乙.md", 50).unwrap();
+    let (入, _, 出, _) = idx.note_links("notes/乙.md", 50).unwrap();
     assert_eq!(入.len(), 1, "甲 → 乙 的入链要在");
     assert!(入[0].snippet.contains("链到"));
     assert!(出.is_empty());
@@ -777,4 +796,33 @@ fn 视图文件的标签不进标签表() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn 反链取不完要老实说截断() {
+    // 面板上那句「还有更多没列出」靠这两个布尔位。前端猜数组长度等于把截断藏起来
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic(
+        "notes/目标.md",
+        "---\nid: n-t1\n---\n被链的一方。\n".as_bytes(),
+    )
+    .unwrap();
+    for i in 1..=3 {
+        v.write_atomic(
+            &format!("notes/来源{i}.md"),
+            format!("---\nid: n-s{i}\n---\n第 {i} 篇链到 [[目标]]。\n").as_bytes(),
+        )
+        .unwrap();
+    }
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+    let (入, 入截, 出, 出截) = idx.note_links("notes/目标.md", 2).unwrap();
+    assert_eq!(入.len(), 2, "取回来的不超过 limit");
+    assert!(入截, "还有第 3 条没取回来，必须报截断");
+    assert_eq!(出.len(), 0);
+    assert!(!出截, "一篇都没链出去，不该谎报截断");
+    let (入, 入截, _, _) = idx.note_links("notes/目标.md", 50).unwrap();
+    assert_eq!(入.len(), 3);
+    assert!(!入截, "全取回来了就不该报截断");
 }

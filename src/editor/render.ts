@@ -131,16 +131,19 @@ function blocksFromLines(d: Document, lines: string[]): HTMLElement[] {
       列表 = null;
       continue;
     }
+    // 又一层 `>` 是嵌套引用。**只吃连续的那几行**：原先是 `slice(i)` 一路到结尾再 return，
+    // 于是 `> 外层甲 / > > 内层 / > 外层乙` 把"外层乙"画进了内层——显示层在说谎
     if (QUOTE_LINE.test(line)) {
       收段落();
       列表 = null;
-      const inner = lines
-        .slice(i)
-        .map((l) => l.replace(/^\s{0,3}>\s?/, ""));
+      let 末 = i;
+      while (末 < lines.length && QUOTE_LINE.test(lines[末]!.replace(/\s+$/, ""))) 末++;
+      const inner = lines.slice(i, 末).map((l) => l.replace(/^\s{0,3}>\s?/, ""));
       const q = el(d, "blockquote", "quote");
       q.append(...blocksFromLines(d, inner));
       out.push(q);
-      return out;
+      i = 末 - 1; // 下面 for 的 ++ 把游标接到嵌套段之后
+      continue;
     }
     const todo = TODO.exec(line);
     const bullet = todo ? null : BULLET.exec(line);

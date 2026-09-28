@@ -119,13 +119,16 @@ pub struct LinkRow {
     pub broken: bool,
 }
 
-/// 一篇的链接图两半。
+/// 一篇的链接图两半。`*Truncated` 说的是"这一半还有更多没取回来"——
+/// 面板不能安静地把截断藏起来，用户会以为链到这就没了。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPanel {
     pub rel: String,
     pub incoming: Vec<LinkRow>,
+    pub incoming_truncated: bool,
     pub outgoing: Vec<LinkRow>,
+    pub outgoing_truncated: bool,
 }
 
 /// 打开后的应用级状态。`Hub` 不是 `Sync`（内含 rusqlite 连接），
@@ -530,11 +533,13 @@ impl Hub {
     /// 反链面板：一篇的入链与出链。纯读命令，走主连接（GUI 里那条只读），
     /// 预算与 `read_note` 同档——它只查 `links_to_idx` 与本篇的块，代价与库的规模无关。
     pub fn note_links(&self, rel: &str, limit: usize) -> Result<LinkPanel> {
-        let (incoming, outgoing) = self.index.note_links(rel, limit as i64)?;
+        let (incoming, 入截, outgoing, 出截) = self.index.note_links(rel, limit as i64)?;
         Ok(LinkPanel {
             rel: rel.to_string(),
             incoming,
+            incoming_truncated: 入截,
             outgoing,
+            outgoing_truncated: 出截,
         })
     }
 
