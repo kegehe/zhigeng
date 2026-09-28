@@ -1,4 +1,5 @@
 import { Extension, Mark, Node, type Attributes, type Editor } from "@tiptap/core";
+import type { Node as PmNode } from "@tiptap/pm/model";
 import { Plugin, type Transaction } from "@tiptap/pm/state";
 import { history } from "@tiptap/pm/history";
 import { applyBlockType, moveCurrentBlock, numberedMarker, type BlockTypeId } from "./blocks";
@@ -191,26 +192,80 @@ export const MdLink = Mark.create({
   },
 });
 
-/** 回车切块时 ProseMirror 会把属性复制给下半段，同一个 ` ^b-xxx` 锚点就会出现在两个块上。
- *  ID 一经分配永不复用（docs/02），所以重复的只留第一个，其余退回"无 ID"。 */
-export const UniqueBlockIds = () =>
+/** 块账本的守卫：拆块与粘贴会把原块的账本复制给新块，这里把它认出来并清掉。
+ *
+ * ProseMirror 拆块时把 attrs 复制给两半，于是 `mdRaw` / `mdSig` / `mdId` **同时描述着
+ * 两块**。两条后果都是"屏幕上生效、落盘就错"，都是真机抓到的：
+ *
+ * - 新块带着 `mdRaw`，序列化器就认为它来自文件、于是沿用原块的 `mdGap`。文件没有
+ *   front-matter 时第一块的 gap 是 `""`，拆出来的两块之间因此没有空行，重新解析
+ *   **并回一段**——用户那次回车等于没按。
+ * - 锚点落在文档序靠前那一半。在段首按回车，` ^b-xxx` 会挂到新产生的**空块**上、
+ *   正文那块反而没有 ID，指向它的反向链接从此指向空。
+ * - `mdKind` 与实际节点类型不一致。拆一个列表项得到的是 `mdParagraph`，而 `mdKind`
+ *   还复制着 `bullet`——序列化器按 `mdKind` 判断"是不是同一个列表的延续"，于是两块
+ *   之间不给空行，落盘被内核读回**一个**列表项。
+ *
+ * 口径：**重复的源切片只留原块那一份**（新块没有源切片可回，按新建块处理），
+ * **ID 只给有内容的那一半**（空块在 Markdown 里根本不存在，不配拥有 ID）。
+ * ID 一经分配永不复用，见 [02]。
+ *
+ * 只在**局部改动**里认拆块产物：载入、`moveBlock`、插入结构块、打签名走的都是整树
+ * 替换，那些事务里出现的"相邻两块源切片相同"是文件本来的样子（`甲\n\n甲\n`），
+ * 清掉就会把作者故意留的空行改没——那是另一种改用户内容。
+ */
+export const LedgerGuard = () =>
   new Plugin({
-    appendTransaction: (_steps, _old, state) => {
-      const seen = new Set<string>();
-      let tr: Transaction | null = null;
-      // 顶层节点的 offset 就是绝对位置（doc 没有开始标记），不要再 +1
-      state.doc.forEach((node, offset) => {
-        const id = node.attrs.mdId as string | null;
-        if (!id) return;
-        if (seen.has(id)) {
-          tr = (tr ?? state.tr).setNodeMarkup(offset, undefined, {
-            ...node.attrs,
-            mdId: null,
+    appendTransaction: (steps, old, state) => {
+      const 整树替换 = steps.some((tr) =>
+        tr.steps.some((s) => {
+          const { from, to } = s as unknown as { from?: number; to?: number };
+          return from === 0 && to === old.doc.content.size;
+        }),
+      );
+      if (整树替换) return undefined;
+
+      const 块: { n: PmNode; 位置: number }[] = [];
+      state.doc.forEach((n, 位置) => 块.push({ n, 位置 }));
+      const 改 = new Map<number, Record<string, unknown>>();
+      const 合 = (i: number, 属性: Record<string, unknown>) =>
+        改.set(i, { ...块[i]!.n.attrs, ...改.get(i), ...属性 });
+      const ID在 = new Map<string, number>();
+
+      块.forEach(({ n }, i) => {
+        const a = { ...n.attrs, ...改.get(i) };
+        const raw = typeof a.mdRaw === "string" ? a.mdRaw : "";
+        const 前一份 = i > 0 ? (块[i - 1]!.n.attrs.mdRaw ?? "") : "";
+        if (raw && raw === 前一份) {
+          // 新块没有源切片可回，账本按"新建"重来；`mdKind` 还得与**实际节点类型**对齐：
+          // 拆一个列表项会得到 `mdParagraph`，而复制来的 `mdKind` 还写着 `bullet`——
+          // 那种状态下序列化器认为它是列表的延续（gap `""`），两行就粘回一个列表项。
+          const 型 = n.type.name;
+          合(i, {
+            mdRaw: "",
             mdSig: "",
+            ...(型 === "mdParagraph" || 型 === "mdHeading" ? { mdKind: 型 === "mdHeading" ? "heading" : "paragraph" } : {}),
           });
+        }
+
+        const id = a.mdId as string | null;
+        if (!id) return;
+        const 前 = ID在.get(id);
+        if (前 === undefined) {
+          ID在.set(id, i);
           return;
         }
-        seen.add(id);
+        if (n.textContent && !块[前]!.n.textContent) {
+          合(前, { mdId: null, mdSig: "" });
+          ID在.set(id, i);
+        } else {
+          合(i, { mdId: null, mdSig: "" });
+        }
+      });
+
+      let tr: Transaction | null = null;
+      改.forEach((属性, i) => {
+        tr = (tr ?? state.tr).setNodeMarkup(块[i]!.位置, undefined, 属性);
       });
       return tr ?? undefined;
     },
@@ -219,7 +274,7 @@ export const UniqueBlockIds = () =>
 export const BlockIdGuard = Extension.create({
   name: "blockIdGuard",
   addProseMirrorPlugins() {
-    return [UniqueBlockIds()];
+    return [LedgerGuard()];
   },
 });
 

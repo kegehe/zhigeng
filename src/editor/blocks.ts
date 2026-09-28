@@ -498,13 +498,22 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     // **只要这块来自文件，它的空白就还是它自己的**：改内容不改排版。这里原先写的是
     // "没改才沿用 gap"，于是把文件第一块改一个字，gap 从 "" 变成 "\n"——保存一次
     // 就在文件开头凭空多出一个空行（新测试把它钉住了）。只有真正新建的块（没有源
-    // 切片可回）才需要现算：延续同一个列表用 ""，正文最前面那块也用 ""，其余用 "\n"。
-    // 那个"最前面"的例外是斜杠菜单选表格踩出来的：`frontMatter` 为空时文件第一个字节
-    // 就是内容，给它一个空行等于在开头凭空多一行；有 frontmatter 时倒是要空行隔开。
+    // 切片可回）才需要现算：延续同一个列表用 ""，文件还没落笔时也用 ""，其余用 "\n"。
+    // 两个"没落笔"的来历：① 斜杠菜单选表格——`frontMatter` 为空时文件第一个字节就是
+    // 内容，给它一个空行等于在开头凭空多一行（有 front-matter 时那个空行倒是必须）；
+    // ② 回车拆在段首，前一半是空块、被下面那条规则整个跳过，此时"第二块"其实是第一
+    // 个落笔的块，按 index 判就会给它补出前导空行。
     const gap =
-      raw.length > 0 ? String(a.mdGap ?? "") : continuesList || (index === 0 && !head.frontMatter) ? "" : "\n";
+      raw.length > 0 ? String(a.mdGap ?? "") : continuesList || !out ? "" : "\n";
     const eol = index === doc.childCount - 1 && !srcEndsNewline ? "" : "\n";
-    out += gap + (unchanged ? raw : serializeNode(node) + eol);
+    const 正文 = unchanged ? raw : serializeNode(node) + eol;
+    // **重新产出后是空白的块不落任何字节**：Markdown 里没有"空段落"这个东西，写出来就是
+    // 文件里凭空多出的空行（回车一次 → `---\n\n\n\n第一段`）。回车拆出来的那一半在用户
+    // 打字之前就走这条；**未改动的块不算**——它的 `raw` 是文件本来的字节，空白也得原样留。
+    // 它也不更新 `prev`：落盘之后这一块的"前驱"就是上一个真写了字的块，与内核重新解析
+    // 时的形状一致。
+    if (!unchanged && !正文.trim()) return;
+    out += gap + 正文;
     prev = { kind, depth };
   });
   return out + head.trailingGap;

@@ -125,7 +125,8 @@ describe("块编辑器字节级往返", () => {
     expect(editor.state.doc.childCount).toBe(3000);
     expect(docToMarkdown(editor.state.doc, big)).toBe(src);
     editor.destroy();
-  });
+  }, 20_000); // 这条量级测试在满载的机器上会跑到秒级（同一份改动实测 0.8–3.2 秒），
+  // 默认 5 秒超时会把"机器忙"报成"门禁红"。它慢是真慢，但慢不是坏。
 
   it("改一个有序项的文字，序号仍按源文件里写的那个数落盘", () => {
     // 序号不是结构化字段，只活在 raw 的前缀里。显示与落盘必须由同一个函数算，
@@ -640,6 +641,114 @@ describe("编辑不透明块不许把整块写成空", () => {
     const out = docToMarkdown(editor.state.doc, doc);
     expect(out).toContain("引用的话啊");
     expect(out).toContain("```\nlet a = 1\n```");
+    editor.destroy();
+  });
+});
+
+/**
+ * 回车拆段。
+ *
+ * ProseMirror 拆块时把 attrs 复制给两半，于是新块带着原块的**账本**（`mdRaw` /
+ * `mdGap` / `mdId` / `mdSig` / `mdKind`）。四条后果全部有证据（前两条真机、后两条
+ * 由这组测试钉住）：新块沿用原块的 gap → 没有 front-matter 的文件里第一块的 gap 是
+ * `""`，拆出来的两块之间没有空行，重新解析并回一段（"回车等于没按"）；锚点落在文档序
+ * 靠前那一半 → 段首回车时 ` ^b-xxx` 挂到新产生的空块上，正文那块反而没了 ID，反向
+ * 链接指向空；`mdKind` 与实际节点类型不一致 → 拆列表项会把两行粘回一个列表项；
+ * 空块还多挤出一个空行。守卫是 `schema.ts` 的 `LedgerGuard`。
+ */
+describe("回车拆段不许把原块的账本留给新块", () => {
+  const 段 = (raw: string, gapBefore: string, content: string, id: string | null = null) => ({
+    kind: "paragraph",
+    id,
+    raw,
+    gapBefore,
+    content,
+    level: null,
+    checked: null,
+    fields: [],
+    children: [],
+  });
+  const 装 = (blocks: EditDoc["blocks"], frontMatter = "") => {
+    const doc: EditDoc = { frontMatter, trailingGap: "", blocks };
+    return { doc, src: reassemble(doc) };
+  };
+  const 按Enter = (editor: ReturnType<typeof createTestEditor>) => {
+    const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    // jsdom 的 KeyboardEvent 不收 keyCode，但 PM 认键要看它——不补就是在测一个真机上不存在的按键形状
+    Object.defineProperty(ev, "keyCode", { value: 13 });
+    Object.defineProperty(ev, "which", { value: 13 });
+    editor.view.dom.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+  /** 第 `i` 块的开头（0）或末尾（-1） */
+  const 块端 = (editor: ReturnType<typeof createTestEditor>, i: number, 端: 0 | -1) => {
+    let 目标 = -1;
+    let 计 = 0;
+    editor.state.doc.forEach((n, off) => {
+      if (计++ === i) 目标 = 端 === 0 ? off + 1 : off + n.nodeSize - 1;
+    });
+    editor.commands.setTextSelection(目标);
+  };
+
+  it("第一段末尾回车并打字：新段落自己占一行，不并回上一段", () => {
+    const { doc } = 装([段("甲\n", "", "甲"), 段("乙\n", "\n", "乙")]);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, -1);
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("新"));
+    // 守卫没生效时这里会是 "甲\n新\n\n乙\n"：新块继承了 gap `""`，内核把两行读成同一段
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n新\n\n乙\n");
+    editor.destroy();
+  });
+
+  it("段首回车：锚点跟着正文那一半，空的那半不落任何字节", () => {
+    const { doc, src } = 装([段("甲段 ^b-p1\n", "", "甲段", "b-p1"), 段("乙\n", "\n", "乙")]);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, 0);
+    expect(按Enter(editor)).toBe(true);
+    const 出 = docToMarkdown(editor.state.doc, doc);
+    // 守卫没生效时：` ^b-p1` 独占一行挂在**空块**上，正文那块反而没了 ID——指向它的
+    // 反向链接从此指向空。空块本身在 Markdown 里不存在，所以整篇应当等于源文件。
+    expect(出).toContain("甲段 ^b-p1\n");
+    expect(出).not.toMatch(/^\s*\^b-p1\s*$/m);
+    expect(出).toBe(src);
+    editor.destroy();
+  });
+
+  it("拆列表项：新块不许顶着上一项的 kind，否则两行粘回一个列表项", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("- 项甲\n", "", "项甲"), kind: "bullet" },
+      { ...段("乙\n", "\n", "乙"), kind: "paragraph" },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, -1);
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("项乙"));
+    // PM 拆 mdItem 产出的是 mdParagraph，而复制来的 mdKind 还写着 bullet。序列化器照
+    // mdKind 判断"是不是同一个列表的延续"，于是 gap 给成 ""——`- 项甲\n项乙\n` 会被
+    // 内核读成**一个**列表项。守卫把 kind 与实际节点类型对齐，两块之间才有那行空行。
+    // （"回车在列表项里应该续一个项"是另一回事，见 docs/05 的未决条目）
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 项甲\n\n项乙\n\n乙\n");
+    editor.destroy();
+  });
+
+  it("回车之后什么都不打：文件一个字节都不许多", () => {
+    const { doc, src } = 装([段("甲\n", "", "甲"), 段("乙\n", "\n", "乙")]);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, -1);
+    expect(按Enter(editor)).toBe(true);
+    // Markdown 里没有"空段落"这个东西。落一个空行进去，用户按一次回车文件就长一行
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("载入时相邻两块的源切片本来就相同：不算拆块产物，一个字都不许动", () => {
+    const { doc, src } = 装([段("甲\n", "", "甲"), 段("甲\n", "\n\n", "甲")]);
+    const editor = createTestEditor(doc);
+    // 作者留了两个空行。整树替换（载入 / 打签名）里出现的相同源切片是文件本来的样子，
+    // 照"拆块产物"去清账本，就会把这两个空行改没——那是另一种改用户内容
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
 });
