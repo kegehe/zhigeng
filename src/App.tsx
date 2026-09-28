@@ -13,6 +13,8 @@ import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri } from "./ipc/commands";
 import { buildTree, dirsOf, flatten } from "./ui/tree";
 import { LinkPanelView } from "./ui/Links";
+import { CommandPalette } from "./ui/CommandPalette";
+import type { PaletteItem } from "./ui/palette";
 import type {
   AppInfo,
   EditDoc,
@@ -463,8 +465,8 @@ export function App() {
     }
   };
 
-  const createNote = async () => {
-    const title = newTitle.trim();
+  const createNote = async (标题?: string) => {
+    const title = (标题 ?? newTitle).trim();
     if (!title) return;
     if (editing && !(await persist())) return;
     try {
@@ -620,8 +622,77 @@ export function App() {
 
   const win = inTauri() ? getCurrentWindow() : null;
 
+  /**
+   * 命令面板。`Ctrl+K` 唤起（Cmd 一并认，Mac 用户也在）。
+   *
+   * 只放**不需要二次确认**的动作：改名 / 归档 / 删除在界面上都带着确认或冲突处理，
+   * 把它们塞进"打字 + 回车"的入口等于绕过那道确认。
+   *
+   * 列表**开着面板才现搭**：300 篇笔记的数组每次渲染都建一遍的话，正文里每敲一个字
+   * 都要白付一次（App 因 inlineRev 而重渲染）。
+   */
+  const [palette, setPalette] = useState(false);
+  const 焦点回 = useRef<Element | null>(null);
+  const closePalette = () => {
+    setPalette(false);
+    // 浮层关掉要回到开它之前的地方，否则键盘用户每开一次都得重新找光标
+    (焦点回.current as HTMLElement | null)?.focus?.();
+  };
+  useEffect(() => {
+    const on键 = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        if (palette) closePalette();
+        else {
+          焦点回.current = document.activeElement;
+          setPalette(true);
+        }
+      }
+    };
+    window.addEventListener("keydown", on键);
+    return () => window.removeEventListener("keydown", on键);
+  }, [palette]);
+  const 面板项 = (): PaletteItem[] => {
+    const 动作: PaletteItem[] = [
+      { id: "a-refresh", group: "动作", label: "重新读取索引与列表", run: () => void refresh() },
+      { id: "a-trash", group: "动作", label: "打开回收站", run: () => void openTrash() },
+      { id: "a-import", group: "动作", label: "导入外部 Markdown", run: () => void openImport() },
+      { id: "a-backup", group: "动作", label: "打开备份面板", run: () => void openBackup() },
+      { id: "a-t1", group: "动作", label: "主题：跟随系统", run: () => setTheme("system") },
+      { id: "a-t2", group: "动作", label: "主题：亮色", run: () => setTheme("light") },
+      { id: "a-t3", group: "动作", label: "主题：暗色", run: () => setTheme("dark") },
+    ];
+    if (selected) {
+      动作.unshift({
+        id: "a-surface",
+        group: "动作",
+        label: mode === "source" ? "回到正文编辑" : "看这篇的源文本",
+        hint: mode === "source" ? "Esc" : undefined,
+        run: () => void switchSurface(),
+      });
+    }
+    return [
+      ...动作,
+      ...list.map((n) => ({
+        id: "n:" + n.rel,
+        group: "笔记",
+        label: n.title || stemOf(n.rel),
+        hint: n.rel,
+        run: () => void openNote(n.rel, n.title),
+      })),
+    ];
+  };
+
   return (
     <div className="flex h-full flex-col bg-base text-fg">
+      {palette ? (
+        <CommandPalette
+          标题="命令面板"
+          items={面板项()}
+          新建={(t) => void createNote(t)}
+          onClose={closePalette}
+        />
+      ) : null}
       <header className="titlebar surface" data-tauri-drag-region>
         <span className="px-2 font-mono text-xs text-fg-2">
           note<span className="text-fg-disabled"> {info?.version}</span>

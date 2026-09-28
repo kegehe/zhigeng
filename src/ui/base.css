@@ -392,6 +392,21 @@
     border-radius: var(--radius-sm);
     padding-inline: var(--space-1);
   }
+  /* 命令面板。只动 transform / opacity（[06] §动效），reduced-motion 由 tokens.css 全局归零。
+     遮罩不做淡入：它一出现就该是"挡住了"，动画会让第一次按键落在半透明层上。 */
+  .palette-panel {
+    animation: palette-in 160ms var(--ease-out);
+  }
+  @keyframes palette-in {
+    from {
+      opacity: 0;
+      transform: translateY(-6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
   /* 气泡工具条与 `/` 块菜单：绝对定位在 .editor-wrap 里，坐标由选区算（BlockEditor.tsx）。
      浮层上的按钮靠全局 `:focus-visible` 环给焦点指示，这里不另描边。 */
   .editor-wrap {
