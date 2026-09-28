@@ -1,7 +1,7 @@
 import { Extension, Mark, Node, type Attributes, type Editor } from "@tiptap/core";
 import type { Node as PmNode } from "@tiptap/pm/model";
-import { Plugin, type Transaction } from "@tiptap/pm/state";
-import { history } from "@tiptap/pm/history";
+import { Plugin, type Transaction, type EditorState } from "@tiptap/pm/state";
+import { history, redo, undo } from "@tiptap/pm/history";
 import { applyBlockType, moveCurrentBlock, numberedMarker, type BlockTypeId } from "./blocks";
 
 /**
@@ -283,6 +283,23 @@ export const History = Extension.create({
   name: "history",
   addProseMirrorPlugins() {
     return [history({ newGroupDelay: 500 })];
+  },
+  /**
+   * 键必须绑上，不只是"插件有了"。两个理由：一是 `Ctrl+Z` 是肌肉记忆，只有工具栏
+   * 上一个 ↶ 等于没有；二是在 contenteditable 里不接管它，浏览器会去撤销**它自己的**
+   * DOM 输入记录，ProseMirror 的文档与历史栈就此分叉。
+   */
+  addKeyboardShortcuts() {
+    const 走 =
+      (做: (state: EditorState, dispatch?: (tr: Transaction) => void) => boolean) =>
+      ({ editor }: { editor: Editor }) =>
+        做(editor.state, (tr) => editor.view.dispatch(tr));
+    return {
+      "Mod-z": 走(undo),
+      "Mod-Shift-z": 走(redo),
+      // Windows 上 Ctrl+Y 是另一个肌肉记忆，别只给 Mac 的 Shift+Cmd+Z
+      "Mod-y": 走(redo),
+    };
   },
 });
 

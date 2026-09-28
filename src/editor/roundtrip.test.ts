@@ -490,6 +490,21 @@ describe("块操作的键盘快捷键", () => {
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
+
+  it("Ctrl+Z / Ctrl+Y 真的绑上了：撤销回到源文件，重做再变回去", () => {
+    const { doc, src } = 键盘样本();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    editor.view.dispatch(editor.state.tr.insertText("啊"));
+    expect(docToMarkdown(editor.state.doc, doc)).not.toBe(src);
+    // 只有工具栏那个 ↶ 不算数：contenteditable 里不接管 Ctrl+Z，浏览器会去撤销它自己的
+    // DOM 输入记录，文档与历史栈就此分叉
+    expect(按键(editor, "z", { ctrl: true })).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    expect(按键(editor, "y", { ctrl: true })).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).not.toBe(src);
+    editor.destroy();
+  });
 });
 
 /**
