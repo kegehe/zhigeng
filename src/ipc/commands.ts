@@ -6,6 +6,7 @@ import type {
   ImportEntry,
   ImportReport,
   ListNotes,
+  LinkPanel,
   NoteSource,
   SnapshotRow,
   TrashRow,
@@ -45,6 +46,8 @@ export const api = {
     ),
   /** 行内编辑器要的块结构：每块带精确源切片，未改动的块由前端原样回写 */
   noteEditDoc: (rel: string) => invoke<EditDoc>("note_edit_doc", { rel }),
+  /** 反链面板：一篇的入链与出链（含悬空的，带原始写法） */
+  noteLinks: (rel: string, limit = 40) => invoke<LinkPanel>("note_links", { rel, limit }),
   /** 原文 + hash。hash 要原样带回 saveNote，服务端才判得出"磁盘这份还是不是你看到的那份" */
   readRaw: (rel: string) => invoke<NoteSource>("read_raw", { rel }),
   saveNote: (rel: string, content: string, expectHash?: string) =>

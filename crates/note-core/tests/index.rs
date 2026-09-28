@@ -369,6 +369,238 @@ fn 旧库的链接暂存表在打开时重灌锚点不再丢() {
 }
 
 #[test]
+fn 反链面板给出入链与出链且悬空那条带着原始写法() {
+    let dir = fixture();
+    let (v, idx) = open(dir.path());
+    idx.rebuild_all(&v).unwrap();
+    // 夹具的形状：主动层设计 → [[检索策略]] + [[不存在的笔记]]（悬空）；
+    // 检索策略 → [[主动层设计#^b-k3x9m2v7qa]]（块级）
+    let (入, 出) = idx.note_links("notes/主动层设计.md", 50).unwrap();
+    assert_eq!(入.len(), 1, "只该有一篇链到我: {入:?}");
+    assert_eq!(入[0].rel, "notes/检索策略.md");
+    assert!(入[0].to_block, "对方指到的是我某个块，不整篇");
+    assert!(
+        入[0].snippet.contains("分节渲染之后"),
+        "上下文要带发起那条链的块: {入:?}"
+    );
+    assert!(!入[0].broken, "入链必然是解析成功的");
+
+    assert_eq!(出.len(), 2, "两条出链: {出:?}");
+    assert!(出[0].broken, "悬空的那条排在前面（面板上它才是要处理的）");
+    assert_eq!(出[0].rel, "", "没有对方笔记");
+    assert_eq!(出[0].status, "missing");
+    assert_eq!(出[0].target, "不存在的笔记", "原始写法是仅剩的信息");
+    assert_eq!(出[0].title, "不存在的笔记", "标题退回写法，别显示空");
+    assert!(!出[1].broken);
+    assert_eq!(出[1].rel, "notes/检索策略.md");
+
+    // 另一头看回来：块级引用在入链侧认得出"指到具体块"
+    let (入, 出) = idx.note_links("notes/检索策略.md", 50).unwrap();
+    assert_eq!(入[0].rel, "notes/主动层设计.md");
+    assert!(!入[0].to_block, "对方链的是整篇");
+    assert_eq!(出.len(), 1);
+    assert!(出[0].to_block, "我链到对方的具体块");
+}
+
+#[test]
+fn 视图文件不进反链面板() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic("notes/甲.md", "---\nid: n-a1\n---\n甲的内容。\n".as_bytes())
+        .unwrap();
+    v.write_atomic(
+        "views/看板.md",
+        "---\nid: n-v1\ntitle: 看板\nview:\n  kind: smart\n  query: 甲\n---\n\n视图里也写了 [[甲]]。\n"
+            .as_bytes(),
+    )
+    .unwrap();
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+    let (入, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    assert!(
+        入.is_empty(),
+        "视图不是笔记，链到它不该出现在面板上: {入:?}"
+    );
+}
+
+#[test]
+fn 归档笔记的入链照收但带着状态() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic("notes/甲.md", "---\nid: n-a1\n---\n甲的内容。\n".as_bytes())
+        .unwrap();
+    v.write_atomic(
+        "archive/旧笔记.md",
+        "---\nid: n-old1\n---\n以前写过 [[甲]]。\n".as_bytes(),
+    )
+    .unwrap();
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+    let (入, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    assert_eq!(入.len(), 1, "归档是真结构，藏起来面板就说谎: {入:?}");
+    assert_eq!(入[0].status, "archived", "但要带着状态，界面好淡化");
+}
+
+#[test]
+fn 旧库的链接表在打开时补上原始写法() {
+    // 钉的是 v2 → v3 这条迁移。`links` 是纯解析结果，所以迁移按"删掉重算"而不是改写：
+    // link_targets 没动，重跑一次 rebuild_links 就该把 target 填回每一行
+    let dir = tempfile::tempdir().unwrap();
+    let vault = note_core::vault::Vault::open(dir.path()).unwrap();
+    {
+        let idx = note_core::index::Index::open(&vault).unwrap();
+        vault
+            .write_atomic(
+                "notes/甲.md",
+                "链到 [[乙]]，还链到 [[不存在的笔记]]。\n".as_bytes(),
+            )
+            .unwrap();
+        vault
+            .write_atomic("notes/乙.md", "被链的一方。\n".as_bytes())
+            .unwrap();
+        idx.rebuild_all(&vault).unwrap();
+        assert_eq!(
+            idx.conn()
+                .query_row("SELECT COUNT(*) FROM links WHERE target<>''", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2,
+            "新库每条链接都该带写法"
+        );
+        // 手工退回 v2 的形状与版本号
+        idx.conn().execute_batch("DROP TABLE links;").unwrap();
+        idx.conn()
+            .execute_batch(
+                "CREATE TABLE links (
+               id INTEGER PRIMARY KEY,
+               from_block TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+               to_note TEXT REFERENCES notes(id) ON DELETE CASCADE,
+               to_block TEXT REFERENCES blocks(id) ON DELETE SET NULL,
+               kind TEXT NOT NULL, provenance TEXT NOT NULL DEFAULT 'human',
+               broken INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0);
+             CREATE INDEX links_to_idx ON links(to_note);
+             CREATE INDEX links_from_idx ON links(from_block);
+             CREATE INDEX links_to_block_idx ON links(to_block);",
+            )
+            .unwrap();
+        // 按 v2 的行为灌两条：一条解析到了对方，一条悬空——两条都没有 target 这一列
+        for (to, broken) in [
+            ("(SELECT id FROM notes WHERE path='notes/乙.md')", false),
+            ("NULL", true),
+        ] {
+            idx.conn()
+                .execute(
+                    &format!(
+                        "INSERT INTO links(from_block,to_note,to_block,kind,broken)
+                         SELECT id, {to}, NULL, 'ref', ?1 FROM blocks WHERE markdown LIKE '%[[%'"
+                    ),
+                    rusqlite::params![broken as i64],
+                )
+                .unwrap();
+        }
+        idx.conn()
+            .execute("UPDATE meta SET value='2' WHERE key='schema_version'", [])
+            .unwrap();
+        assert_eq!(
+            idx.conn()
+                .query_row("SELECT COUNT(*) FROM links", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2,
+            "v2 的形状就该有两条没有写法的链接，否则这个测试没在测东西"
+        );
+    }
+    let idx = note_core::index::Index::open(&vault).unwrap();
+    let (入, 出) = idx.note_links("notes/甲.md", 50).unwrap();
+    assert_eq!(入.len(), 0);
+    assert_eq!(出.len(), 2, "迁移后链接图要完整回来: {出:?}");
+    assert_eq!(
+        idx.conn()
+            .query_row("SELECT COUNT(*) FROM links WHERE target<>''", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "打开时没把原始写法补进 links"
+    );
+    let 悬空 = 出.iter().find(|l| l.broken).expect("悬空那条没了");
+    assert_eq!(悬空.target, "不存在的笔记");
+}
+
+#[test]
+fn 老库的两张链接表一起升级且版本号要记下来() {
+    // 真机照出来的两条，缺一不可：
+    // ① 迁移原先"每档各自 drop/建/算"，v1 那一档跑 `rebuild_links` 时 `links` 还是旧形状，
+    //    插 target 列直接 `table links has no column named target`，整个库打不开；
+    // ② 迁移完只 `pragma_update(user_version, 旧值)`，meta 里那条没更新 ⇒ 每次开库重跑迁移。
+    let dir = tempfile::tempdir().unwrap();
+    let vault = note_core::vault::Vault::open(dir.path()).unwrap();
+    vault
+        .write_atomic("notes/甲.md", "链到 [[乙]] 和 [[不存在]]。\n".as_bytes())
+        .unwrap();
+    vault
+        .write_atomic("notes/乙.md", "被链的一方。\n".as_bytes())
+        .unwrap();
+    {
+        let idx = note_core::index::Index::open(&vault).unwrap();
+        idx.rebuild_all(&vault).unwrap();
+        // 手工退回 v1：两张表都是旧形状，版本号也改回去
+        idx.conn()
+            .execute_batch("DROP TABLE links; DROP TABLE link_targets;")
+            .unwrap();
+        idx.conn()
+            .execute_batch(
+                "CREATE TABLE links (
+               id INTEGER PRIMARY KEY,
+               from_block TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+               to_note TEXT REFERENCES notes(id) ON DELETE CASCADE,
+               to_block TEXT REFERENCES blocks(id) ON DELETE SET NULL,
+               kind TEXT NOT NULL, provenance TEXT NOT NULL DEFAULT 'human',
+               broken INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE link_targets (
+               from_block TEXT NOT NULL REFERENCES blocks(id) ON DELETE CASCADE,
+               target TEXT NOT NULL, to_block TEXT, kind TEXT NOT NULL,
+               PRIMARY KEY (from_block, target, kind));",
+            )
+            .unwrap();
+        idx.conn()
+            .execute("UPDATE meta SET value='1' WHERE key='schema_version'", [])
+            .unwrap();
+    }
+    let idx = note_core::index::Index::open(&vault).unwrap();
+    assert_eq!(
+        idx.conn()
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "3",
+        "迁移跑完没把版本号记下来，下次开库还要重跑"
+    );
+    assert_eq!(
+        idx.conn()
+            .query_row("SELECT COUNT(*) FROM links WHERE target<>''", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "v1 库升级后链接图要完整回来且带写法"
+    );
+    let (入, 出) = idx.note_links("notes/乙.md", 50).unwrap();
+    assert_eq!(入.len(), 1, "甲 → 乙 的入链要在");
+    assert!(入[0].snippet.contains("链到"));
+    assert!(出.is_empty());
+    // 再开一次：版本号已经是 3，不该再有迁移动作，数据也不能变
+    drop(idx);
+    let idx = note_core::index::Index::open(&vault).unwrap();
+    assert_eq!(
+        idx.conn()
+            .query_row("SELECT COUNT(*) FROM links", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
 fn 标签与属性按类型落进各自的列() {
     let dir = tempfile::tempdir().unwrap();
     let v = Vault::open(dir.path()).unwrap();

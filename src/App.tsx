@@ -12,11 +12,13 @@ import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri } from "./ipc/commands";
 import { buildTree, dirsOf, flatten } from "./ui/tree";
+import { LinkPanelView } from "./ui/Links";
 import type {
   AppInfo,
   EditDoc,
   ImportEntry,
   ImportReport,
+  LinkPanel,
   ListNotes,
   SnapshotRow,
   TrashRow,
@@ -89,6 +91,8 @@ export function App() {
   const [baseHash, setBaseHash] = useState("");
   const [savedDraft, setSavedDraft] = useState("");
   const [editDoc, setEditDoc] = useState<EditDoc | null>(null);
+  /** 反链面板。null = 还没拿到或这篇没有链接；面板自己判空，不占位 */
+  const [links, setLinks] = useState<LinkPanel | null>(null);
   const [editEpoch, setEditEpoch] = useState(0);
   const [inlineRev, setInlineRev] = useState(0);
   const [saveState, setSaveState] = useState<"clean" | "saving" | "saved" | "conflict">("clean");
@@ -143,6 +147,23 @@ export function App() {
     void refresh();
   }, [refresh]);
 
+  /**
+   * 反链面板的读命令。**不挡正文**：单独一趟，晚一点到就晚一点到。
+   *
+   * 回来时按 `panel.rel` 对一下当前要看的那一篇——快速连开两篇时，先发的请求可能后到，
+   * 不判就会把上一篇的面板贴到这一篇下面。
+   *
+   * 保存之后**不**立刻调它：链接图是后台索引算出来的，那时问到的还是旧图。
+   * 面板跟着 `note://indexed` 走，索引一落地就自己更新。
+   */
+  const loadLinks = useCallback((rel: string) => {
+    setLinks(null);
+    void api
+      .noteLinks(rel)
+      .then((p) => setLinks(p.rel === rel ? p : null))
+      .catch(() => setLinks(null));
+  }, []);
+
   // 索引是异步补的。速记捕获落盘后主窗必须自己长回来，否则新笔记要重启才看得见。
   // 事件负载是"变了哪些路径"：正在看的那一篇如果被外部（Obsidian、同步盘）改了，
   // 手里没有未落盘的东西就整个重装载——停在旧内容上是验收 ⑤ 没通过的样子。
@@ -156,6 +177,7 @@ export function App() {
       if (!alive) return;
       void refresh();
       const rels = e.payload ?? [];
+      if (selected && rels.includes(selected.rel)) loadLinks(selected.rel); // 链接图是这一趟算出来的
       if (!unsaved && selected && rels.includes(selected.rel)) {
         // **先比内容，再决定要不要重装载**。自己按下保存也会绕一圈回到这里，而重装载是
         // 整棵编辑器重挂载：光标、撤销栈、正开着的菜单全丢。真机就是这么暴露的——
@@ -179,7 +201,7 @@ export function App() {
     };
     // 少了 selected / unsaved 就是白订阅一次：闭包永远停在挂载时那份 selected = null，
     // 外部改动的事件到了、列表也刷了，只有正文不动。速记窗那个"连按守卫"踩过同一类坑。
-  }, [refresh, selected, unsaved, savedDraft]);
+  }, [refresh, selected, unsaved, savedDraft, loadLinks]);
 
   useEffect(() => {
     if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
@@ -310,6 +332,7 @@ export function App() {
     setEditDoc(blocks);
     setInlineRev(0);
     setEditEpoch((n) => n + 1);
+    loadLinks(rel);
   };
 
   const openNote = async (rel: string, title?: string) => {
@@ -1089,6 +1112,12 @@ export function App() {
                         <div className="skeleton h-3 w-5/6" />
                       </div>
                     )}
+                    {links && selected ? (
+                      <LinkPanelView
+                        panel={links}
+                        onOpen={(rel, title) => void openNote(rel, title)}
+                      />
+                    ) : null}
                     {/* 保存状态挪到右下角，1.5 秒自己消失。它以前是顶栏上的一行常驻文字，
                         和"完成"按钮一起把"我在编辑"念个不停——现在打开就是可编辑的，
                         没改动就不写盘，状态只需要在**真的存了东西**时说一声。

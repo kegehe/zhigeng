@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS links (
   -- 悬空链接没有目标笔记，必须可为空，否则 UI 无法标红（docs/02 已同步）
   to_note    TEXT REFERENCES notes(id) ON DELETE CASCADE,
   to_block   TEXT REFERENCES blocks(id) ON DELETE SET NULL,
+  -- 链接目标的**原始写法**（schema v2 → v3 补）。`to_note` 为空时它是仅剩的信息：
+  -- 界面要能说出"这篇链到了不存在的 [[某写法]]"，否则反链面板只能报一个数字。
+  -- 与 `link_targets.target` 有意重复：那张表是解析前的暂存，会被按篇重灌，
+  -- 而 links 是解析结果，读一次就够——面板不该为了显示写法再去join暂存表。
+  target     TEXT NOT NULL DEFAULT '',
   kind       TEXT NOT NULL,
   provenance TEXT NOT NULL DEFAULT 'human',
   broken     INTEGER NOT NULL DEFAULT 0,

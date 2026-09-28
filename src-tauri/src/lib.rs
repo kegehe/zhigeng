@@ -6,7 +6,8 @@ use note_core::import::{Entry as ImportEntry, Report as ImportReport};
 use note_core::index::Index;
 use note_core::service::{
     apply_external, reindex_captured, reindex_moved, reindex_note, snapshot_vault, unindex,
-    AppInfo, EditDoc, HitRow, Hub, NoteDetail, NoteList, NoteSource, SnapshotRow, TrashRow,
+    AppInfo, EditDoc, HitRow, Hub, LinkPanel, NoteDetail, NoteList, NoteSource, SnapshotRow,
+    TrashRow,
 };
 use note_core::vault::Vault;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -340,6 +341,18 @@ fn search_keyword(
     })
 }
 
+/// 反链面板：一篇的入链与出链（含悬空的，带原始写法）
+#[tauri::command]
+fn note_links(
+    state: State<'_, Shared>,
+    rel: String,
+    limit: Option<usize>,
+) -> Result<LinkPanel, String> {
+    with_hub(&state, |h| {
+        h.note_links(&rel, limit.unwrap_or(40).clamp(1, 500))
+    })
+}
+
 #[tauri::command]
 fn vault_default_path() -> String {
     note_core::vault::default_vault_path().display().to_string()
@@ -556,6 +569,7 @@ pub fn run() {
             read_raw,
             note_edit_doc,
             search_keyword,
+            note_links,
             vault_default_path,
             vault_open,
             save_note,

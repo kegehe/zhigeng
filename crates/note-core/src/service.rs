@@ -99,6 +99,35 @@ pub struct HitRow {
     pub score: f64,
 }
 
+/// 反链面板里的一条。入链与出链共用一个形状：面板要说的都是"哪篇、哪块、什么写法、
+/// 断没断"。入链的 `broken` 恒为 false（能算入链就说明目标就是本篇）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkRow {
+    /// 对方笔记的路径。悬空出链没有对方 → 空串
+    pub rel: String,
+    pub title: String,
+    /// 对方的状态：active / inbox / archived；悬空出链是 "missing"
+    pub status: String,
+    /// 发起这条链的那个块的文字（已剥语法），面板拿它当上下文
+    pub snippet: String,
+    /// 这条链是不是指到某个具体块（`[[笔记#^b-xxx]]`），而不是整篇
+    pub to_block: bool,
+    pub kind: String,
+    /// 用户写下的原始写法。悬空时这是仅剩的信息
+    pub target: String,
+    pub broken: bool,
+}
+
+/// 一篇的链接图两半。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPanel {
+    pub rel: String,
+    pub incoming: Vec<LinkRow>,
+    pub outgoing: Vec<LinkRow>,
+}
+
 /// 打开后的应用级状态。`Hub` 不是 `Sync`（内含 rusqlite 连接），
 /// 所以包在 `Mutex` 后面由调用方持有。
 pub struct Hub {
@@ -496,6 +525,17 @@ impl Hub {
     pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<HitRow>> {
         let hits = self.index.search_keyword(query, limit)?;
         Ok(hits.into_iter().map(Into::into).collect())
+    }
+
+    /// 反链面板：一篇的入链与出链。纯读命令，走主连接（GUI 里那条只读），
+    /// 预算与 `read_note` 同档——它只查 `links_to_idx` 与本篇的块，代价与库的规模无关。
+    pub fn note_links(&self, rel: &str, limit: usize) -> Result<LinkPanel> {
+        let (incoming, outgoing) = self.index.note_links(rel, limit as i64)?;
+        Ok(LinkPanel {
+            rel: rel.to_string(),
+            incoming,
+            outgoing,
+        })
     }
 
     /// 捕获一篇速记：落盘 + 立刻索引。GUI 走的是拆分后的两步版本。

@@ -17,7 +17,7 @@ use crate::schema::SCHEMA;
 use crate::vault::{NoteFile, NoteKind, NoteStatus, Vault};
 use crate::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 pub const MD_FORMAT_VERSION: i64 = 1;
 
 /// 切片预算（字符数近似 token：中文一字≈一 token，英文约 4 字符≈1 token）。
@@ -132,8 +132,14 @@ impl Index {
             Some(v) => {
                 if v < SCHEMA_VERSION {
                     self.migrate_from(v)?;
+                    // **迁移跑完要把新版本号记下来**。这里原先只 `pragma_update(user_version, v)`
+                    // ——写回去的还是旧值，而 `meta` 里那条压根没更新，于是每次开库都重跑一遍
+                    // 迁移（对大库就是重扫全库的块重算链接图）。真机暴露它是因为这个 bug
+                    // 让真库一直停在 v1，而 v1 那条分支正好撞上上面的迁移顺序错误。
+                    self.set_meta(SCHEMA_VERSION, MD_FORMAT_VERSION)?;
                 }
-                self.conn.pragma_update(None, "user_version", v)?;
+                self.conn
+                    .pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
         }
         Ok(())
@@ -142,17 +148,29 @@ impl Index {
     /// 低版本库就地升级。索引是**纯派生物**（G1），所以迁移的原则是"重算"而不是
     /// "改写"——而且尽量不碰文件系统。
     ///
+    /// **顺序不能改**：先把所有要换形状的表 DROP 掉 → 跑一遍 `SCHEMA` 把新形状建回来 →
+    /// 再重算内容。之前是"每档各自 drop/建/算"，于是 v1 库走 `from < 2` 那一档时
+    /// `links` 还是旧形状，`rebuild_links` 插 `target` 列直接报
+    /// `table links has no column named target`，整个库打不开（真机照的）。
+    ///
     /// v1 → v2：`link_targets` 的旧主键是 `(from_block, target, kind)`，漏了 `to_block`。
     /// 于是同一段里指向同一篇的 `[[乙]]`、`[[乙#某标题]]`、`[[乙#^b-xxx]]` 塌成一行，
     /// **块级锚点被静默丢掉**（`INSERT OR IGNORE`，第一条赢），AI 引用溯源退化成
     /// "指向整篇"。每一篇的 markdown 就在 `blocks.markdown` 里，所以重灌暂存表 +
     /// 重解析链接图即可，不用重扫全库。
+    ///
+    /// v2 → v3：`links` 补上目标的原始写法（悬空链接在反链面板上唯一还能显示的信息）。
     fn migrate_from(&self, from: i64) -> Result<()> {
         if from < 2 {
             self.conn
                 .execute_batch("DROP TABLE IF EXISTS link_targets;")?;
-            // SCHEMA 全是 IF NOT EXISTS，重跑一遍就把新形状建回来
-            self.conn.execute_batch(SCHEMA)?;
+        }
+        if from < 3 {
+            self.conn.execute_batch("DROP TABLE IF EXISTS links;")?;
+        }
+        // SCHEMA 全是 IF NOT EXISTS，重跑一遍就把上面缺的形状建回来
+        self.conn.execute_batch(SCHEMA)?;
+        if from < 2 {
             let rows: Vec<(String, String)> = {
                 let mut s = self.conn.prepare("SELECT id, markdown FROM blocks")?;
                 let r = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -166,12 +184,9 @@ impl Index {
                     )?;
                 }
             }
-            let n = rebuild_links(&self.conn)?;
-            tracing::info!(
-                "索引 schema v{from} → v{SCHEMA_VERSION}：重灌 {} 篇的链接，解析出 {n} 条",
-                rows.len()
-            );
         }
+        let n = rebuild_links(&self.conn)?;
+        tracing::info!("索引 schema v{from} → v{SCHEMA_VERSION}：重算链接图 {n} 条");
         Ok(())
     }
 
@@ -388,6 +403,7 @@ impl Index {
             put_link(
                 &self.conn,
                 from,
+                target,
                 to.as_deref(),
                 anchor.as_ref().filter(|a| a.starts_with("b-")).cloned(),
                 kind,
@@ -889,16 +905,19 @@ fn insert_resolved(
     put_link(
         conn,
         from_block,
+        target,
         lookup.get(base).map(String::as_str),
         anchor.filter(|a| a.starts_with("b-")).cloned(),
         kind,
     )
 }
 
-/// 写一行解析结果。`to_note=None` 即悬空。
+/// 写一行解析结果。`to_note=None` 即悬空，此时 `target`（用户写下的那个 `[[…]]` 里的
+/// 原文）是界面上唯一还能显示的东西。
 fn put_link(
     conn: &Connection,
     from_block: &str,
+    target: &str,
     to_note: Option<&str>,
     to_block: Option<String>,
     kind: &str,
@@ -918,14 +937,14 @@ fn put_link(
     let anchor = anchor.as_deref();
     match to_note {
         Some(to) => conn.execute(
-            "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
-             VALUES(?1,?2,?3,?4,'human',0)",
-            params![from_block, to, anchor, kind],
+            "INSERT INTO links(from_block,target,to_note,to_block,kind,provenance,broken)
+             VALUES(?1,?2,?3,?4,?5,'human',0)",
+            params![from_block, target, to, anchor, kind],
         )?,
         None => conn.execute(
-            "INSERT INTO links(from_block,to_note,to_block,kind,provenance,broken)
-             VALUES(?1,NULL,?2,?3,'human',1)",
-            params![from_block, anchor, kind],
+            "INSERT INTO links(from_block,target,to_note,to_block,kind,provenance,broken)
+             VALUES(?1,?2,NULL,?3,?4,'human',1)",
+            params![from_block, target, anchor, kind],
         )?,
     };
     Ok(())
@@ -1367,5 +1386,68 @@ impl Index {
             })
         })?;
         Ok((title, rows.filter_map(|x| x.ok()).collect()))
+    }
+
+    /// 一篇的链接图两半：**入链**（谁链到我）与**出链**（我链到谁，含悬空的）。
+    ///
+    /// 三条口径：
+    /// - 视图文件（`note_kind='view'`）不进出链的对方，也不当入链的来源。它不是笔记，
+    ///   把它列进面板等于把"查询定义"混进"我的笔记"。
+    /// - **归档的照收，但带着 `status`**。归档是"不主动想起它"，不是"它不存在"——
+    ///   一条来自归档笔记的入链是真结构，藏起来会让面板说谎。界面按状态淡化。
+    /// - 悬空出链没有 `to_note`，此时 `target`（用户写下的原文）是唯一还能显示的信息，
+    ///   所以 schema v3 把它抄进了 `links`。面板要说的正是"这篇链到了一个不存在的东西"。
+    ///
+    /// 隐私位（`ai_private` / `no_ai`）**不过滤**：那条硬门管的是"别进 AI 上下文"
+    /// （docs/04），而这是人自己在看自己的库。
+    pub fn note_links(
+        &self,
+        rel: &str,
+        limit: i64,
+    ) -> Result<(Vec<crate::service::LinkRow>, Vec<crate::service::LinkRow>)> {
+        let 一行 = |r: &Row| {
+            Ok(crate::service::LinkRow {
+                rel: r.get(0)?,
+                title: r.get(1)?,
+                status: r.get(2)?,
+                snippet: r.get(3)?,
+                to_block: r.get::<_, i64>(4)? != 0,
+                kind: r.get(5)?,
+                target: r.get(6)?,
+                broken: r.get::<_, i64>(7)? != 0,
+            })
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT n.path, n.title, n.status, substr(b.text,1,140),
+                    (l.to_block IS NOT NULL), l.kind, l.target, 0
+             FROM links l
+             JOIN blocks b ON b.id = l.from_block
+             JOIN notes n ON n.id = b.note_id
+             WHERE l.to_note = (SELECT id FROM notes WHERE path = ?1)
+               AND n.note_kind <> 'view'
+             ORDER BY n.updated_at DESC, b.ordinal
+             LIMIT ?2",
+        )?;
+        let 入链 = stmt
+            .query_map(params![rel, limit], 一行)?
+            .filter_map(|x| x.ok())
+            .collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(n.path,''), COALESCE(n.title, l.target), COALESCE(n.status,'missing'),
+                    substr(b.text,1,140),
+                    (l.to_block IS NOT NULL), l.kind, l.target, l.broken
+             FROM links l
+             JOIN blocks b ON b.id = l.from_block
+             LEFT JOIN notes n ON n.id = l.to_note
+             WHERE b.note_id = (SELECT id FROM notes WHERE path = ?1)
+               AND (n.id IS NULL OR n.note_kind <> 'view')
+             ORDER BY l.broken DESC, b.ordinal
+             LIMIT ?2",
+        )?;
+        let 出链 = stmt
+            .query_map(params![rel, limit], 一行)?
+            .filter_map(|x| x.ok())
+            .collect();
+        Ok((入链, 出链))
     }
 }

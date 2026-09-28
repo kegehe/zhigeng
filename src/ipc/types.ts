@@ -61,6 +61,29 @@ export type NoteSource = {
   hash: string;
 };
 
+/** 反链面板里的一条。入链与出链共用一个形状（`note_core::service::LinkRow`） */
+export type LinkRow = {
+  /** 对方笔记的路径；悬空出链没有对方，是空串 */
+  rel: string;
+  title: string;
+  /** active / inbox / archived；悬空出链是 "missing" */
+  status: string;
+  /** 发起这条链的块的文字（已剥语法） */
+  snippet: string;
+  /** 链的是具体块（`[[笔记#^b-xxx]]`）还是整篇 */
+  toBlock: boolean;
+  kind: string;
+  /** 用户写下的原始写法。悬空时这是仅剩的信息 */
+  target: string;
+  broken: boolean;
+};
+
+export type LinkPanel = {
+  rel: string;
+  incoming: LinkRow[];
+  outgoing: LinkRow[];
+};
+
 /** 与 `note_core::service::EditBlock` 对应。raw 是精确源切片，未改动的块靠它字节级回写 */
 export type EditBlock = {
   kind: string;
