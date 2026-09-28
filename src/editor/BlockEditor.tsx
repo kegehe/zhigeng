@@ -15,16 +15,18 @@ import {
   type EditDoc,
 } from "./blocks";
 import { mdExtensions } from "./schema";
+import { 工具图标, type 图标名 } from "./icons";
 import { LinkEditor, Toolbar } from "./Toolbar";
 
 /** 浮层位置：相对外层容器算，滚动时重算，不让它跟着漂 */
 type Float = { top: number; left: number; pos?: number };
 
-const MARKS: { name: string; 标签: string; 样例: string }[] = [
-  { name: "bold", 标签: "加粗", 样例: "B" },
-  { name: "italic", 标签: "斜体", 样例: "I" },
-  { name: "strike", 标签: "删除线", 样例: "S" },
-  { name: "code", 标签: "行内代码", 样例: "{}" },
+/** 选区气泡上的行内标记。图标与常驻工具栏**同一张表**（`icons.tsx`），两处不同就是两副面孔 */
+const MARKS: { name: string; 标签: string; 图: 图标名 }[] = [
+  { name: "bold", 标签: "加粗", 图: "bold" },
+  { name: "italic", 标签: "斜体", 图: "italic" },
+  { name: "strike", 标签: "删除线", 图: "strike" },
+  { name: "code", 标签: "行内代码", 图: "code" },
 ];
 
 /**
@@ -316,21 +318,28 @@ export function BlockEditor({
           role="toolbar"
           aria-label="选区格式"
         >
-          {MARKS.map((m) => (
-            <button
-              key={m.name}
-              type="button"
-              className={editor.isActive(m.name) ? "on" : ""}
-              title={m.标签}
-              onClick={() => editor.chain().focus().toggleMark(m.name).run()}
-            >
-              {m.样例}
-            </button>
-          ))}
+          {MARKS.map((m) => {
+            const Icon = 工具图标[m.图];
+            return (
+              <button
+                key={m.name}
+                type="button"
+                className={editor.isActive(m.name) ? "on" : ""}
+                title={m.标签}
+                aria-label={m.标签}
+                aria-pressed={editor.isActive(m.name) || undefined}
+                onClick={() => editor.chain().focus().toggleMark(m.name).run()}
+              >
+                <Icon />
+              </button>
+            );
+          })}
           <button
             type="button"
             className={editor.isActive("link") ? "on" : ""}
             title="链接"
+            aria-label="链接"
+            aria-pressed={editor.isActive("link") || undefined}
             onClick={() => {
               if (editor.isActive("link")) {
                 editor.chain().focus().unsetMark("link").run();
@@ -340,7 +349,7 @@ export function BlockEditor({
               setLinking(true);
             }}
           >
-            链
+            <工具图标.link />
           </button>
           {linking ? (
             // 输入框用工具栏那份实现：两处各写一份，早晚一处改了 `extendMarkRange`

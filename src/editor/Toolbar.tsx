@@ -17,9 +17,7 @@ import {
   type BlockTypeId,
 } from "./blocks";
 import type { Align } from "./table";
-
-/** 结构块的按钮字形。工具栏与 `/` 菜单共用，两处不一致会让人怀疑是两种东西 */
-export const 图标: Record<string, string> = { divider: "—", quote: "❝", table: "▦" };
+import { 工具图标, type 图标名 } from "./icons";
 
 /**
  * 常驻顶部工具栏。
@@ -88,25 +86,36 @@ export function Toolbar({ editor }: { editor: Editor }) {
     if (tr) editor.view.dispatch(tr.scrollIntoView());
   };
 
+  /**
+   * 一个按钮 = 一枚图标 + 一句 `title`。
+   *
+   * **不再往按钮里写字**：`+行` / `链` / `清` 那种"文字当图标"在一排里既读不出层级也认不出
+   * 动作，图标才是要扫的东西，文字交给 `title` 与 `aria-label`（鼠标悬停与读屏都从这一句来）。
+   */
   const btn = (
     key: string,
     标签: string,
-    样例: string,
+    图: 图标名,
     做: () => void,
     开着 = false,
     禁用 = false,
-  ) => (
-    <button
-      key={key}
-      type="button"
-      title={标签}
-      className={开着 ? "on" : ""}
-      disabled={禁用}
-      onClick={做}
-    >
-      {样例}
-    </button>
-  );
+  ) => {
+    const Icon = 工具图标[图];
+    return (
+      <button
+        key={key}
+        type="button"
+        title={标签}
+        aria-label={标签}
+        aria-pressed={开着 || undefined}
+        className={开着 ? "on" : ""}
+        disabled={禁用}
+        onClick={做}
+      >
+        <Icon />
+      </button>
+    );
+  };
 
   return (
     <div
@@ -140,16 +149,16 @@ export function Toolbar({ editor }: { editor: Editor }) {
         </select>
       )}
       <span className="sep" aria-hidden="true" />
-      {btn("bold", "加粗 Ctrl+B", "B", () => editor.chain().focus().toggleMark("bold").run(), editor.isActive("bold"))}
-      {btn("italic", "斜体 Ctrl+I", "I", () => editor.chain().focus().toggleMark("italic").run(), editor.isActive("italic"))}
-      {btn("strike", "删除线", "S", () => editor.chain().focus().toggleMark("strike").run(), editor.isActive("strike"))}
-      {btn("code", "行内代码", "{}", () => editor.chain().focus().toggleMark("code").run(), editor.isActive("code"))}
-      {btn("link", "链接", "链", () => setLinking((v) => !v), editor.isActive("link"))}
+      {btn("bold", "加粗 Ctrl+B", "bold", () => editor.chain().focus().toggleMark("bold").run(), editor.isActive("bold"))}
+      {btn("italic", "斜体 Ctrl+I", "italic", () => editor.chain().focus().toggleMark("italic").run(), editor.isActive("italic"))}
+      {btn("strike", "删除线", "strike", () => editor.chain().focus().toggleMark("strike").run(), editor.isActive("strike"))}
+      {btn("code", "行内代码", "code", () => editor.chain().focus().toggleMark("code").run(), editor.isActive("code"))}
+      {btn("link", "链接", "link", () => setLinking((v) => !v), editor.isActive("link"))}
       {linking ? <LinkEditor editor={editor} onDone={() => setLinking(false)} /> : null}
       {btn(
         "clear",
         "清除格式（回到正文，去掉加粗 / 斜体 / 删除线 / 行内码；链接保留）",
-        "清",
+        "clear",
         () => {
           // 只去行内样式，**留着链接**：`unsetAllMarks` 会把 link 一起抹掉，而"清除格式"
           // 在 Notion / 语雀 里都不该顺手删掉用户挂上去的链接
@@ -172,7 +181,9 @@ export function Toolbar({ editor }: { editor: Editor }) {
         btn(
           "ins-" + b.kind,
           `在下面插入${b.标签}`,
-          图标[b.kind] ?? "＋",
+          // kind 与图标名同名（divider / quote / table）。对不上就是 undefined，React 当场炸，
+          // 不静默画个加号——漏一个图标在界面上是"这个按钮没脸"，比编译失败更难查
+          b.kind as 图标名,
           () => {
             const tr = insertSourceBlock(editor.state, b.kind, b.源文本);
             if (tr) editor.view.dispatch(tr);
@@ -183,42 +194,42 @@ export function Toolbar({ editor }: { editor: Editor }) {
       )}
       {表起点 !== null ? (
         <>
-          {btn("row", "在下面加一行（末格按 Tab 也可以）", "+行", () => 改表(addRow))}
+          {btn("row", "在下面加一行（末格按 Tab 也可以）", "rowAdd", () => 改表(addRow))}
           {btn(
             "row-",
             格 && 格.行 === 0 ? "表头行不给删：GFM 的表格必须有表头" : "删掉这一行",
-            "−行",
+            "rowRemove",
             () => 改表(removeRow),
             false,
             !格 || 格.行 === 0 || 格.行数 <= 1,
           )}
-          {btn("col", "在右边加一列", "+列", () => 改表(addColumn))}
+          {btn("col", "在右边加一列", "colAdd", () => 改表(addColumn))}
           {btn(
             "col-",
             格 && 格.列数 <= 1 ? "最后一列不给删：空表不是表" : "删掉这一列",
-            "−列",
+            "colRemove",
             () => 改表(removeColumn),
             false,
             !格 || 格.列数 <= 1,
           )}
           {/* 对齐是这一列的属性：分隔行与每格的样子必须一起改（见 setAlign） */}
-          {btn("al-l", "本列靠左（产出 `:---`）", "⇤", () => 改对齐("left"), 当前对齐 === "left")}
-          {btn("al-c", "本列居中（产出 `:---:`）", "↔", () => 改对齐("center"), 当前对齐 === "center")}
-          {btn("al-r", "本列靠右（产出 `---:`）", "⇥", () => 改对齐("right"), 当前对齐 === "right")}
+          {btn("al-l", "本列靠左（产出 `:---`）", "alignLeft", () => 改对齐("left"), 当前对齐 === "left")}
+          {btn("al-c", "本列居中（产出 `:---:`）", "alignCenter", () => 改对齐("center"), 当前对齐 === "center")}
+          {btn("al-r", "本列靠右（产出 `---:`）", "alignRight", () => 改对齐("right"), 当前对齐 === "right")}
           {btn(
             "al-x",
             "取消本列的对齐（产出 `---`）",
-            "⊘",
+            "alignNone",
             () => 改对齐(""),
             当前对齐 === "" && (格?.列数 ?? 0) > 0,
           )}
         </>
       ) : null}
-      {btn("up", "上移这一块 Alt+↑", "↑", () => move(-1), false, !$from.depth)}
-      {btn("down", "下移这一块 Alt+↓", "↓", () => move(1), false, !$from.depth)}
+      {btn("up", "上移这一块 Alt+↑", "up", () => move(-1), false, !$from.depth)}
+      {btn("down", "下移这一块 Alt+↓", "down", () => move(1), false, !$from.depth)}
       <span className="sep" aria-hidden="true" />
-      {btn("undo", "撤销", "↶", () => undo(editor.state, (tr) => editor.view.dispatch(tr)), false, undoDepth(editor.state) <= 0)}
-      {btn("redo", "重做", "↷", () => redo(editor.state, (tr) => editor.view.dispatch(tr)), false, redoDepth(editor.state) <= 0)}
+      {btn("undo", "撤销", "undo", () => undo(editor.state, (tr) => editor.view.dispatch(tr)), false, undoDepth(editor.state) <= 0)}
+      {btn("redo", "重做", "redo", () => redo(editor.state, (tr) => editor.view.dispatch(tr)), false, redoDepth(editor.state) <= 0)}
     </div>
   );
 }

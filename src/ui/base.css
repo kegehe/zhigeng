@@ -492,6 +492,14 @@
     text-align: start;
     cursor: pointer;
   }
+  /* 图标尺寸随字阶（[06] §技术选型 给 Lucide 定的那条就是"尺寸随字阶"），颜色走 currentColor：
+     hover / `.on` / `:disabled` 改的都是 color，图标自己会跟着变，不需要各写一份 */
+  .block-editor .bubble button svg,
+  .block-editor .toolbar button svg {
+    display: block;
+    width: 1em;
+    height: 1em;
+  }
   .block-editor .bubble button:hover,
   .block-editor .slash button:hover,
   .block-editor .toolbar button:hover:not(:disabled) {
