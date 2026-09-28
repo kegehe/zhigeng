@@ -4,7 +4,9 @@ import { createTestEditor } from "./testEditor";
 import {
   applyBlockType,
   docToMarkdown,
-  insertDividerAfter,
+  insertSourceBlock,
+  INSERTABLE,
+  replaceBlockWithSource,
   moveBlock,
   moveCurrentBlock,
   reassemble,
@@ -29,6 +31,7 @@ const SAMPLES = [
   "03-代码表格与公式",
   "04-引用与标注",
   "05-未识别语法",
+  "06-插入骨架", // 工具栏插入的三种结构块，内核必须按字节认回来
 ] as const;
 
 function load(name: string) {
@@ -464,6 +467,18 @@ describe("块操作的键盘快捷键", () => {
     editor.destroy();
   });
 
+  it("标题 4–6 也有键：下拉里能选到的类型，键盘不许漏", () => {
+    const { doc } = 键盘样本();
+    const 前缀: Record<string, string> = { "4": "#### ", "5": "##### ", "6": "###### " };
+    for (const 键 of ["4", "5", "6"]) {
+      const editor = createTestEditor(doc);
+      editor.commands.setTextSelection(2);
+      expect(按键(editor, 键, { ctrl: true, alt: true }), 键).toBe(true);
+      expect(docToMarkdown(editor.state.doc, doc).startsWith(前缀[键] + "第一段 ^b-p1\n"), 键).toBe(true);
+      editor.destroy();
+    }
+  });
+
   it("Ctrl+Alt+0 回到正文：绕一圈仍然等于源文件", () => {
     const { doc, src } = 键盘样本();
     const editor = createTestEditor(doc);
@@ -520,15 +535,82 @@ describe("工具栏的移动与分隔线", () => {
     editor.destroy();
   });
 
-  it("插入分隔线必须自带一个空行，否则会把上一段变成 setext 标题", () => {    const { doc } = 三块();
+  it("插入结构块：产出的源文本必须与内核认得的骨架一字不差", () => {
+    const { doc } = 三块();
+    const 骨架 = (kind: string) => INSERTABLE.find((b) => b.kind === kind)!.源文本;
+    const 期望: Record<string, string> = {
+      divider: "甲\n\n---\n\n乙\n\n丙\n",
+      quote: "甲\n\n> \n\n乙\n\n丙\n",
+      table: "甲\n\n| 列 | 列 |\n| --- | --- |\n|  |  |\n\n乙\n\n丙\n",
+    };
+    for (const kind of ["divider", "quote", "table"]) {
+      const editor = createTestEditor(doc);
+      editor.commands.setTextSelection(2); // 光标在"甲"
+      const tr = insertSourceBlock(editor.state, kind, 骨架(kind));
+      expect(tr, kind).not.toBeNull();
+      editor.view.dispatch(tr!);
+      // 三种都要自带一个空行：紧贴上一行的 `---` 会被读成 setext 标题下划线，
+      // 表格与引用的首行同理会并进上一段
+      expect(docToMarkdown(editor.state.doc, doc), kind).toBe(期望[kind]);
+      editor.destroy();
+    }
+  });
+
+  it("斜杠菜单选结构块是整块替换：不留下那个 /，也不留空段落", () => {
+    const blocks: EditDoc["blocks"] = [
+      { kind: "paragraph", id: null, raw: "/\n", gapBefore: "", content: "/", level: null, checked: null, fields: [], children: [] },
+      { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, fields: [], children: [] },
+    ];
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
     const editor = createTestEditor(doc);
-    editor.commands.setTextSelection(2); // 光标在"甲"
-    const tr = insertDividerAfter(editor.state);
+    const tr = replaceBlockWithSource(
+      editor.state,
+      0,
+      "table",
+      INSERTABLE.find((b) => b.kind === "table")!.源文本,
+    );
     expect(tr).not.toBeNull();
     editor.view.dispatch(tr!);
-    const out = docToMarkdown(editor.state.doc, doc);
-    // "甲\n---\n" 会被 CommonMark 读成"甲"是二级标题；"甲\n\n---\n" 才是分隔线
-    expect(out).toBe("甲\n\n---\n\n乙\n\n丙\n");
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "| 列 | 列 |\n| --- | --- |\n|  |  |\n\n乙\n",
+    );
+    editor.destroy();
+  });
+
+  it("标题给到 1–6 级：内核收 6 级，前端不许自己砍到 3", () => {
+    const { doc } = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    const 前缀: Record<string, string> = { heading4: "#### ", heading5: "##### ", heading6: "###### " };
+    for (const id of ["heading4", "heading5", "heading6"] as BlockTypeId[]) {
+      const tr = applyBlockType(editor.state, 0, id);
+      expect(tr, id).not.toBeNull();
+      editor.view.dispatch(tr!);
+      expect(docToMarkdown(editor.state.doc, doc).startsWith(前缀[id] + "甲\n"), id).toBe(true);
+    }
+    editor.destroy();
+  });
+
+  it("带 frontmatter 的文档把某块挪到最前面：那个空行还得在", () => {
+    const b = (raw: string, gapBefore: string, content: string) => ({
+      kind: "paragraph",
+      id: null,
+      raw,
+      gapBefore,
+      content,
+      level: null,
+      checked: null,
+      fields: [],
+      children: [],
+    });
+    const blocks: EditDoc["blocks"] = [b("甲\n", "\n", "甲"), b("乙\n", "\n", "乙")];
+    const doc: EditDoc = { frontMatter: "---\nid: n-x\n---\n", trailingGap: "", blocks };
+    const editor = createTestEditor(doc);
+    const tr = moveBlock(editor.state, 1, 0);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    // 写死 "" 会产出 `---\n乙\n`：frontmatter 与正文粘连，内核下一轮读不回 frontmatter
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("---\nid: n-x\n---\n\n乙\n\n甲\n");
     editor.destroy();
   });
 });

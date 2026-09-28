@@ -233,6 +233,17 @@
     flex-direction: column;
     min-width: 9rem;
   }
+  /* 菜单分成「类型 / 插入」两组：组标签不能长得像可点的项，否则 13 行看着像 13 个操作 */
+  .block-editor .slash .grp {
+    padding: var(--space-1) var(--space-2) 0;
+    color: var(--text-disabled);
+    font-size: var(--text-xs);
+  }
+  .block-editor .slash button + .grp {
+    margin-top: var(--space-1);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--border-subtle);
+  }
   .block-editor .bubble button,
   .block-editor .slash button,
   .block-editor .toolbar button {

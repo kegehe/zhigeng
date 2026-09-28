@@ -1,7 +1,10 @@
 import { undo, redo, undoDepth, redoDepth } from "@tiptap/pm/history";
 import type { Editor } from "@tiptap/react";
 import { useEffect, useState } from "react";
-import { applyBlockType, insertDividerAfter, moveCurrentBlock, BLOCK_TYPES, type BlockTypeId } from "./blocks";
+import { applyBlockType, INSERTABLE, insertSourceBlock, moveCurrentBlock, BLOCK_TYPES, type BlockTypeId } from "./blocks";
+
+/** 结构块的按钮字形。工具栏与 `/` 菜单共用，两处不一致会让人怀疑是两种东西 */
+export const 图标: Record<string, string> = { divider: "—", quote: "❝", table: "▦" };
 
 /**
  * 常驻顶部工具栏。
@@ -34,7 +37,7 @@ export function Toolbar({ editor }: { editor: Editor }) {
   const opaque = typeName === "mdOpaque";
   const 当前类型: BlockTypeId =
     typeName === "mdHeading"
-      ? (`heading${Math.min(3, Math.max(1, Number(node?.attrs.mdLevel ?? 1)))}` as BlockTypeId)
+      ? (`heading${Math.min(6, Math.max(1, Number(node?.attrs.mdLevel ?? 1)))}` as BlockTypeId)
       : typeName === "mdItem"
         ? (String(node?.attrs.mdKind) as BlockTypeId)
         : "paragraph";
@@ -125,10 +128,20 @@ export function Toolbar({ editor }: { editor: Editor }) {
         !node,
       )}
       <span className="sep" aria-hidden="true" />
-      {btn("divider", "在下面插入分隔线", "—", () => {
-        const tr = insertDividerAfter(editor.state);
-        if (tr) editor.view.dispatch(tr);
-      }, false, !$from.depth)}
+      {/* 结构块从 INSERTABLE 生成：加一种块只改那张表，工具栏与 `/` 菜单同时长出来 */}
+      {INSERTABLE.map((b) =>
+        btn(
+          "ins-" + b.kind,
+          `在下面插入${b.标签}`,
+          图标[b.kind] ?? "＋",
+          () => {
+            const tr = insertSourceBlock(editor.state, b.kind, b.源文本);
+            if (tr) editor.view.dispatch(tr);
+          },
+          false,
+          !$from.depth,
+        ),
+      )}
       {btn("up", "上移这一块 Alt+↑", "↑", () => move(-1), false, !$from.depth)}
       {btn("down", "下移这一块 Alt+↓", "↓", () => move(1), false, !$from.depth)}
       <span className="sep" aria-hidden="true" />

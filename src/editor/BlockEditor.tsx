@@ -6,7 +6,10 @@ import {
   BLOCK_TYPES,
   docToMarkdown,
   docToJson,
+  INSERTABLE,
+  insertSourceBlock,
   moveBlock,
+  replaceBlockWithSource,
   stampSignatures,
   type BlockTypeId,
   type EditDoc,
@@ -244,6 +247,23 @@ export function BlockEditor({
   };
 
   /**
+   * 从 `/` 菜单选了一个结构块。
+   *
+   * 斜杠触发时那一块里只有一个 `/`，所以**整块换掉**它——往后面插会留下一个空段落，
+   * 而且那个 `/` 还得再删一次。手柄菜单（`⋮`）对着的是有内容的块，那里只能"在其后插入"。
+   */
+  const applyInsert = (kind: string, source: string) => {
+    if (!menu) return;
+    const { state } = editor;
+    const tr =
+      menu.dropSlash !== undefined
+        ? replaceBlockWithSource(state, menu.start, kind, source)
+        : insertSourceBlock(state, kind, source);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+    setMenu(null);
+  };
+
+  /**
    * 手柄按下：挪动超过 5px 算拖拽，否则算点击开类型菜单。
    *
    * 用 pointer 事件而不是 HTML5 拖放：一是拖放要在 contenteditable 里和 ProseMirror
@@ -350,8 +370,20 @@ export function BlockEditor({
           role="menu"
           aria-label="块类型"
         >
+          <span className="grp">类型</span>
           {BLOCK_TYPES.map((b) => (
             <button key={b.id} type="button" role="menuitem" onClick={() => applyType(b.id)}>
+              {b.标签}
+            </button>
+          ))}
+          <span className="grp">插入</span>
+          {INSERTABLE.map((b) => (
+            <button
+              key={b.kind}
+              type="button"
+              role="menuitem"
+              onClick={() => applyInsert(b.kind, b.源文本)}
+            >
               {b.标签}
             </button>
           ))}

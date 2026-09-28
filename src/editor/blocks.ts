@@ -212,6 +212,9 @@ export type BlockTypeId =
   | "heading1"
   | "heading2"
   | "heading3"
+  | "heading4"
+  | "heading5"
+  | "heading6"
   | "bullet"
   | "numbered"
   | "todo";
@@ -221,9 +224,24 @@ export const BLOCK_TYPES: { id: BlockTypeId; 标签: string }[] = [
   { id: "heading1", 标签: "标题 1" },
   { id: "heading2", 标签: "标题 2" },
   { id: "heading3", 标签: "标题 3" },
+  { id: "heading4", 标签: "标题 4" },
+  { id: "heading5", 标签: "标题 5" },
+  { id: "heading6", 标签: "标题 6" },
   { id: "bullet", 标签: "无序列表" },
   { id: "numbered", 标签: "有序列表" },
   { id: "todo", 标签: "待办" },
+];
+
+/**
+ * 可以"插入"的结构块。全都是**不透明块**：节点正文就是它自己的源文本，
+ * 所以插入不需要序列化器会产这些语法（那是"转换"，档 B 的活）。
+ *
+ * 源文本**不带结尾换行**——`docToMarkdown` 会给每块补 `eol`，多写一个就成了空行。
+ */
+export const INSERTABLE: { kind: string; 标签: string; 源文本: string }[] = [
+  { kind: "divider", 标签: "分隔线", 源文本: "---" },
+  { kind: "quote", 标签: "引用", 源文本: "> " },
+  { kind: "table", 标签: "表格", 源文本: "| 列 | 列 |\n| --- | --- |\n|  |  |" },
 ];
 
 /**
@@ -244,7 +262,12 @@ export function blockTypePatch(
       return { typeName: "mdParagraph", attrs: 清场 };
     case "heading1":
     case "heading2":
-    case "heading3": {
+    case "heading3":
+    case "heading4":
+    case "heading5":
+    case "heading6": {
+      // 1–6 级都能给：md-kernel 的 `Kind::Heading { level }` 收 1–6，`serializeNode`
+      // 也照这个数拼 `#`。之前只列到 3 是前端自己砍的，不是内核限制。
       const level = Number(id.slice(-1));
       if (node.type.name === "mdHeading" && Number(node.attrs.mdLevel ?? 0) === level) return null;
       return { typeName: "mdHeading", attrs: { ...清场, mdKind: "heading", mdLevel: level } };
@@ -315,12 +338,21 @@ export function moveBlock(state: EditorState, from: number, to: number): Transac
 
   const 原前驱 = new Map<PmNode, PmNode | null>();
   kids.forEach((n, i) => 原前驱.set(n, i === 0 ? null : (kids[i - 1] ?? null)));
+  // 挪到最前面时该用什么空白：**照抄原来第一块的**。它编码的是"正文开头与文件头的
+  // 关系"——有 frontmatter 的是 "\n"（`---` 后面那个空行），没有的是 ""（正文就是第
+  // 一个字节）。写死 "" 会把前一种的空行吃掉，save 一次 frontmatter 就和内容粘连。
+  const 顶gap = String(kids[0]?.attrs.mdGap ?? "");
 
   let changed = false;
   const out = list.map((n, i) => {
     const prev = i === 0 ? null : (list[i - 1] ?? null);
     if (原前驱.get(n) === prev) return n; // 前面还是原来那块：它的空白不归我们管
-    const want = prev === null ? "" : continuesList(prev, String(n.attrs.mdKind ?? "paragraph"), Number(n.attrs.mdDepth ?? 0)) ? "" : "\n";
+    const want =
+      prev === null
+        ? 顶gap
+        : continuesList(prev, String(n.attrs.mdKind ?? "paragraph"), Number(n.attrs.mdDepth ?? 0))
+          ? ""
+          : "\n";
     if (String(n.attrs.mdGap ?? "") === want) return n;
     changed = true;
     return n.type.create({ ...n.attrs, mdGap: want }, n.content, n.marks);
@@ -367,24 +399,58 @@ export function moveCurrentBlock(state: EditorState, delta: number): Transaction
 }
 
 /**
- * 在光标所在块**之后**插一条分隔线。
+ * 在光标所在块**之后**插一个结构块（分隔线 / 引用 / 表格……见 `INSERTABLE`）。
  *
- * 走 `mdOpaque`（分隔线不在可行内编辑的白名单里，节点正文就是它自己的源文本 `---`），
- * 并且**必须带一个空行的 gap**：紧贴上一段落的 `---` 会被 Markdown 读成那段的 setext
- * 二级标题下划线，插个分隔线结果把上一段变成了标题。
+ * 走 `mdOpaque`：节点正文就是它自己的源文本，未改动时精确回写，所以插入不需要
+ * 序列化器会产这些语法。两条要紧的口径：
+ * - **必须带一个空行的 gap**。紧贴上一段落的 `---` 会被 CommonMark 读成那段的 setext
+ *   二级标题下划线——插个分隔线结果把上一段变成了标题；表格与引用的首行同理会并进上一段。
+ * - **源文本不带结尾换行**，`docToMarkdown` 会给每块补 `eol`。
  */
-export function insertDividerAfter(state: EditorState): Transaction | null {
+export function insertSourceBlock(
+  state: EditorState,
+  kind: string,
+  source: string,
+): Transaction | null {
   const { $from } = state.selection;
   if (!$from.depth) return null;
-  const opaque = state.schema.nodes.mdOpaque;
   const start = $from.before(1);
   const node = state.doc.nodeAt(start);
+  if (!node) return null;
+  return state.tr
+    .insert(start + node.nodeSize, sourceBlock(state, kind, source, "\n"))
+    .scrollIntoView();
+}
+
+/**
+ * 把当前块**整块换成**一个结构块。
+ *
+ * 斜杠菜单选"表格 / 引用 / 分隔线"要的是这个语义：那一块本来就是空的、只装着一个 `/`，
+ * 往它后面插会留下一个空段落，而且那个 `/` 还得单独再删一次——换掉它一步就对了。
+ *
+ * `mdGap` 沿用当前块原来的空白：换内容不改排版，不该顺手挪动空行。
+ */
+export function replaceBlockWithSource(
+  state: EditorState,
+  start: number,
+  kind: string,
+  source: string,
+): Transaction | null {
+  const opaque = state.schema.nodes.mdOpaque;
+  const node = state.doc.nodeAt(start);
   if (!opaque || !node) return null;
-  const divider = opaque.create(
+  const gap = String(node.attrs.mdGap ?? "\n");
+  return state.tr.replaceWith(start, start + node.nodeSize, sourceBlock(state, kind, source, gap));
+}
+
+function sourceBlock(state: EditorState, kind: string, source: string, gap: string): PmNode {
+  const opaque = state.schema.nodes.mdOpaque;
+  if (!opaque) throw new Error("schema 里没有 mdOpaque 节点");
+  return opaque.create(
     {
-      mdKind: "divider",
+      mdKind: kind,
       mdRaw: "",
-      mdGap: "\n",
+      mdGap: gap,
       mdId: null,
       mdDepth: 0,
       mdLevel: null,
@@ -392,9 +458,8 @@ export function insertDividerAfter(state: EditorState): Transaction | null {
       mdFields: [],
       mdSig: "",
     },
-    state.schema.text("---"),
+    state.schema.text(source),
   );
-  return state.tr.insert(start + node.nodeSize, divider).scrollIntoView();
 }
 
 /**
@@ -433,8 +498,11 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     // **只要这块来自文件，它的空白就还是它自己的**：改内容不改排版。这里原先写的是
     // "没改才沿用 gap"，于是把文件第一块改一个字，gap 从 "" 变成 "\n"——保存一次
     // 就在文件开头凭空多出一个空行（新测试把它钉住了）。只有真正新建的块（没有源
-    // 切片可回）才需要现算：延续同一个列表用 ""，其余用 "\n"。
-    const gap = raw.length > 0 ? String(a.mdGap ?? "") : continuesList ? "" : "\n";
+    // 切片可回）才需要现算：延续同一个列表用 ""，正文最前面那块也用 ""，其余用 "\n"。
+    // 那个"最前面"的例外是斜杠菜单选表格踩出来的：`frontMatter` 为空时文件第一个字节
+    // 就是内容，给它一个空行等于在开头凭空多一行；有 frontmatter 时倒是要空行隔开。
+    const gap =
+      raw.length > 0 ? String(a.mdGap ?? "") : continuesList || (index === 0 && !head.frontMatter) ? "" : "\n";
     const eol = index === doc.childCount - 1 && !srcEndsNewline ? "" : "\n";
     out += gap + (unchanged ? raw : serializeNode(node) + eol);
     prev = { kind, depth };
