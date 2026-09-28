@@ -4,7 +4,7 @@ import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
 import { inlineToJson, serializeInline } from "./inline";
-import { parseTable, serializeTable, type Align } from "./table";
+import { parseGrid, parseTable, serializeTable, type Align } from "./table";
 
 export type { EditBlock, EditDoc };
 
@@ -485,9 +485,10 @@ export function replaceBlockWithSource(
   return state.tr.replaceWith(start, start + node.nodeSize, sourceBlock(state, kind, source, gap));
 }
 
-function sourceBlock(state: EditorState, kind: string, source: string, gap: string): PmNode {
-  const 账本 = {
-    mdKind: kind,
+/** 新建块的账本：没有源切片可回，所以 `mdRaw` 空、签名空（必被重新序列化） */
+function 新块账本(gap: string) {
+  return {
+    mdKind: "paragraph",
     mdRaw: "",
     mdGap: gap,
     mdId: null,
@@ -497,6 +498,10 @@ function sourceBlock(state: EditorState, kind: string, source: string, gap: stri
     mdFields: [],
     mdSig: "",
   };
+}
+
+function sourceBlock(state: EditorState, kind: string, source: string, gap: string): PmNode {
+  const 账本 = { ...新块账本(gap), mdKind: kind };
   // 工具栏插入的表格骨架直接建成网格：插完就能在格子里打字，
   // 而不是先看到三行 `|` 再被要求"点出去才变回表格"
   if (kind === "table" && state.schema.nodes.mdTable) {
@@ -506,6 +511,57 @@ function sourceBlock(state: EditorState, kind: string, source: string, gap: stri
   const opaque = state.schema.nodes.mdOpaque;
   if (!opaque) throw new Error("schema 里没有 mdOpaque 节点");
   return opaque.create(账本, state.schema.text(source));
+}
+
+/**
+ * 剪贴板里是表格时，把**当前这个空段落**换成网格。
+ *
+ * 只在空段落上接管：光标在写着字的段落里、或在别人的格子里，默认粘贴才是用户预期的
+ * （往格子里粘一串字就是填那一格）。判据是 `parseGrid`，与文件里的表同一条——认不准就
+ * 返回 null，让 PM 按纯文本粘，绝不"看起来像表就先接下来再说"。
+ */
+export function pasteGrid(state: EditorState, text: string): Transaction | null {
+  const 表型 = state.schema.nodes.mdTable;
+  if (!表型) return null;
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  const 起点 = $from.before(1);
+  const 块 = state.doc.nodeAt(起点);
+  if (!块 || 块.type.name !== "mdParagraph" || 块.textContent.trim()) return null;
+  const 结构 = parseGrid(text);
+  if (!结构) return null;
+  const 账本 = { ...新块账本(String(块.attrs.mdGap ?? "\n")), mdKind: "table" };
+  const 节点 = PmNodeModel.fromJSON(state.schema, tableJson(结构, 账本) as never);
+  const tr = state.tr.replaceWith(起点, 起点 + 块.nodeSize, 节点);
+  // 粘完直接把光标放进第一格：用户的下一件事是打字，不是再点一下
+  const 首 = 第n格(节点, 起点, 0);
+  return 首 === null ? tr : tr.setSelection(TextSelection.near(tr.doc.resolve(首 + 1)));
+}
+
+/**
+ * 剪贴板里那堆字在这个落点该怎么处理。**判据与动作分开**：判据是纯函数、能被测，
+ * 扩展里只留"照着做"。四条分支各有各的不接管理由：
+ *
+ * - **格子里 + 多行 → 摊平**：单元格是 `inline*`，装不下换行。交回 PM 的默认粘贴会把
+ *   换行变成拆块，于是**原来那张表被顶成两半**（真机抓到过：3 行的表变成 1 行 + 2 行，
+ *   中间掉出两个空段落）。GFM 的格子里本来就没有换行，折成空格与 `写格()` 落盘那条同规矩。
+ * - **格子里 + 单行 → 交回**：行内样式（加粗、链接）的默认粘贴不该被我们抢走。
+ * - **空段落 + 剪贴板是表 → 换成网格**（判据在 `parseGrid`，认不准就不接）。
+ * - **其余 → 交回**。
+ */
+export type 粘贴判 =
+  | { 做: "摊平"; 文: string }
+  | { 做: "网格"; tr: Transaction }
+  | { 做: "交回" };
+
+export function 判粘贴(state: EditorState, text: string): 粘贴判 {
+  if (!text) return { 做: "交回" };
+  if (cellAt(state)) {
+    if (!/[\r\n]/.test(text)) return { 做: "交回" };
+    return { 做: "摊平", 文: text.replace(/[ \t]*(?:\r?\n[ \t]*)+/g, " ").trim() };
+  }
+  const tr = pasteGrid(state, text);
+  return tr ? { 做: "网格", tr } : { 做: "交回" };
 }
 
 /**

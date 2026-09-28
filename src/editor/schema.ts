@@ -9,6 +9,7 @@ import {
   moveCell,
   moveCurrentBlock,
   numberedMarker,
+  判粘贴,
   type BlockTypeId,
 } from "./blocks";
 import { mightRender, renderOpaque } from "./render";
@@ -831,6 +832,34 @@ export const TableKeys = Extension.create({
   },
 });
 
+/**
+ * 粘贴成网格：剪贴板里是 Markdown 表或电子表格的 TSV 时，落进来就是能打字的那张网格；
+ * 格子里粘多行则先摊平，别把这张表顶成两半。**判据全在 `判粘贴`**（纯函数、能被测），
+ * 这里只照着做。
+ *
+ * 只读 `text/plain`：带 HTML 的粘贴交回 PM。我们的 schema 只认自己画的那套 `data-md-*`，
+ * 网页表格的 `<td>` 进不来，硬接就是把样式当内容吃。
+ */
+export const TablePaste = Extension.create({
+  name: "tablePaste",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handlePaste: (view, event) => {
+            const 判 = 判粘贴(view.state, event.clipboardData?.getData("text/plain") ?? "");
+            if (判.做 === "交回") return false;
+            if (判.做 === "网格") view.dispatch(判.tr.scrollIntoView());
+            else if (判.文) view.dispatch(view.state.tr.insertText(判.文));
+            // 摊平后是空的（整串都是换行）：什么都不落，也比劈开这张表好
+            return true;
+          },
+        },
+      }),
+    ];
+  },
+});
+
 export const mdExtensions = [
   MdDoc,
   MdText,
@@ -850,6 +879,7 @@ export const mdExtensions = [
   BlockTools,
   BlockKeys,
   TableKeys,
+  TablePaste,
   FocusIndicator,
   OpaqueFace,
   History,

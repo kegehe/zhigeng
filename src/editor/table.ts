@@ -87,7 +87,33 @@ export function parseTable(src: string): ParsedTable | null {
 const 换行带白 = /[ \t]*(?:\r?\n[ \t]*)+/g;
 
 /**
- * 单元格 → 可安全写进一行的文字。两条硬规矩，缺一条产出的就不是表：
+ * 剪贴板里那堆字是不是一张表。**两种来路都认，认不准一律返回 null**（交回默认粘贴）：
+ *
+ * - Markdown 源文本：走 `parseTable` 同一条判据，一个字都不猜——所以"粘进来的表"与
+ *   "库里的表"之后走的是同一套字节口径，不存在第二种表格。
+ * - 电子表格的 TSV：制表符分列、换行分行，**每行列数必须相同、至少两列两行**。
+ *   列数不齐就拒绝（Excel 会省掉行尾的空格，"补空列"就是替用户编内容）。
+ *
+ * **CSV 不认**：逗号在正文里太常见，把一句话切成"三列"是拿用户的内容赌概率。
+ * 第一行当表头不是我们对内容的判断，是 GFM 的格式要求（表必须有表头行）。
+ */
+export function parseGrid(text: string): ParsedTable | null {
+  const 干净 = text.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+  if (!干净) return null;
+  if (干净.includes("\t")) return 从制表符(干净);
+  return 干净.startsWith("|") ? parseTable(干净 + "\n") : null;
+}
+
+function 从制表符(干净: string): ParsedTable | null {
+  const 行 = 干净.split("\n").map((l) => l.replace(/\t+$/, "").split("\t").map((c) => c.trim()));
+  const 列 = 行[0]!.length;
+  if (列 < 2 || 行.length < 2) return null;
+  if (行.some((r) => r.length !== 列)) return null;
+  if (行.every((r) => r.every((c) => !c))) return null; // 全空：那是几个制表符，不是表
+  return { rows: 行, aligns: new Array<Align>(列).fill("") };
+}
+
+/** 单元格 → 可安全写进一行的文字。两条硬规矩，缺一条产出的就不是表：
  * - 竖线必须转义，否则重新解析多出一列；
  * - **格子里不许留换行**：GFM 的换行就是行结束，留一个 `\n` 进去，那块就从 N 行变成
  *   N+1 行、列数对不上，`parseTable` 随即返回 null——下一次打开它不再是表格，

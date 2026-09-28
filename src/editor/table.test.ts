@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseTable, serializeTable, splitRow, type ParsedTable } from "./table";
+import { parseGrid, parseTable, serializeTable, splitRow, type ParsedTable } from "./table";
 
 /**
  * 表格的双向转换是"改一个格子就会重写整块"的那条路，所以**接管判据**比转换本身更要钉：
@@ -71,6 +71,47 @@ describe("产回 GFM", () => {
     const 二次 = serializeTable(parseTable(一次 + "\n")!);
     expect(二次).toBe(一次);
     expect(serializeTable(parseTable(二次 + "\n")!)).toBe(二次);
+  });
+});
+
+describe("剪贴板里的表：parseGrid", () => {
+  it("Markdown 源文本走 parseTable 同一条判据", () => {
+    const t = parseGrid("| A | B |\n| --- | --- |\n| 1 | 2 |\n")!;
+    expect(t.rows).toEqual([
+      ["A", "B"],
+      ["1", "2"],
+    ]);
+    // 列数不齐 / 带块锚 / 有缩进：文件里不接管的，粘贴同样不接管
+    expect(parseGrid("| A | B |\n| --- |\n| 1 | 2 | 3 |\n")).toBeNull();
+    expect(parseGrid("  | A | B |\n  |---|---|\n")).toBeNull();
+    expect(parseGrid("甲\n乙")).toBeNull();
+  });
+
+  it("电子表格的 TSV：制表符分列，第一行当表头", () => {
+    const t = parseGrid("指标\t目标\t实测\n打字\t16ms\t待测\n滚动\t不掉帧\t已验")!;
+    expect(t.rows.length).toBe(3);
+    expect(t.rows[0]).toEqual(["指标", "目标", "实测"]);
+    expect(t.aligns).toEqual(["", "", ""]);
+  });
+
+  it("CRLF 与行尾多出来的制表符都先收干净", () => {
+    const t = parseGrid("A\tB\r\n1\t2\r\n3\t4\t")!;
+    expect(t.rows).toEqual([
+      ["A", "B"],
+      ["1", "2"],
+      ["3", "4"],
+    ]);
+  });
+
+  it("列数不齐 / 只有一列 / 只有一行 / 全是制表符：都不接", () => {
+    expect(parseGrid("A\tB\n1")).toBeNull(); // Excel 会省掉行尾空格，补空列就是替用户编内容
+    expect(parseGrid("只有一列\n第二行")).toBeNull();
+    expect(parseGrid("A\tB")).toBeNull();
+    expect(parseGrid("\t\t\n\t\t")).toBeNull();
+  });
+
+  it("CSV 不认：逗号在正文里太常见，不拿用户的内容赌概率", () => {
+    expect(parseGrid("甲,乙,丙\n1,2,3")).toBeNull();
   });
 });
 

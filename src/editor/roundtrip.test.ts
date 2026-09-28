@@ -12,11 +12,13 @@ import {
   docToMarkdown,
   enterCell,
   insertSourceBlock,
+  判粘贴,
   INSERTABLE,
   moveCell,
   replaceBlockWithSource,
   moveBlock,
   moveCurrentBlock,
+  pasteGrid,
   reassemble,
   removeColumn,
   removeRow,
@@ -1041,6 +1043,19 @@ function 格起点(editor: Editor, n: number): number {
   return 找;
 }
 
+/** 把光标放进第 n 个顶层块（有焦点，与真机一致） */
+function 进块(editor: Editor, n: number): void {
+  editor.view.focus();
+  let 起 = -1;
+  let i = 0;
+  editor.state.doc.forEach((node, off) => {
+    if (i++ === n) 起 = off;
+  });
+  editor.view.dispatch(
+    editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(起 + 1))),
+  );
+}
+
 /** 把光标放进第 n 个格子（有焦点，与真机一致） */
 function 进格(editor: Editor, n: number): void {
   editor.view.focus();
@@ -1280,6 +1295,118 @@ describe("表格网格化的字节判据", () => {
       expect(出.split(异形).length - 1).toBe(1);
       editor.destroy();
     }
+  });
+
+  it("粘贴 Markdown 表：空段落变成网格，产出的正是规范形那几个字节", () => {
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("前一段\n", "", "前一段"), 段("\n", "\n", "")],
+    };
+    const editor = createTestEditor(d);
+    进块(editor, 1);
+    const tr = pasteGrid(editor.state, "| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n",
+    );
+    // 粘完光标就在第一格里，用户下一件事是打字而不是再点一下
+    expect(cellAt(editor.state)?.行).toBe(0);
+    expect(cellAt(editor.state)?.列).toBe(0);
+    editor.destroy();
+  });
+
+  it("粘贴电子表格的 TSV：落成同一套 GFM 字节，第一行按格式要求当表头", () => {
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("前一段\n", "", "前一段"), 段("\n", "\n", "")],
+    };
+    const editor = createTestEditor(d);
+    进块(editor, 1);
+    editor.view.dispatch(pasteGrid(editor.state, "指标\t目标\r\n打字\t16ms\r\n")!);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| 指标 | 目标 |\n| --- | --- |\n| 打字 | 16ms |\n");
+    // 产出的那份重新解析仍是这张表（粘进来与库里存的走同一条判据）
+    expect(parseTable(出.slice(出.indexOf("| 指标")))!.rows[1]).toEqual(["打字", "16ms"]);
+    editor.destroy();
+  });
+
+  it("粘进去的格子里带竖线：重新产出必须再转义回去", () => {
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("前一段\n", "", "前一段"), 段("\n", "\n", "")],
+    };
+    const editor = createTestEditor(d);
+    进块(editor, 1);
+    editor.view.dispatch(
+      pasteGrid(editor.state, "| A \\| B | C |\n| --- | --- |\n| 1 | 2 |\n")!,
+    );
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| A \\| B | C |\n| --- | --- |\n| 1 | 2 |\n");
+    expect(parseTable(出.slice(出.indexOf("| A")))!.rows[0]).toEqual(["A | B", "C"]);
+    editor.destroy();
+  });
+
+  it("不接的三种粘贴：写着字的段落、别人的格子、以及一段普通的话", () => {
+    const 表文 = "| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    // ① 光标在表格里：往格子里粘贴就是填那一格，不许在表里再套一张表
+    进格(editor, 2);
+    expect(pasteGrid(editor.state, 表文)).toBeNull();
+    editor.destroy();
+
+    // ② 段落里有字：粘贴是往那句话里插字，不是把整段换掉
+    const 有字 = createTestEditor({
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("前一段\n", "", "前一段")],
+    });
+    进块(有字, 0);
+    expect(pasteGrid(有字.state, 表文)).toBeNull();
+    有字.destroy();
+
+    // ③ 空段落里粘的内容本身不像表：CSV 与两句话都不接，字节一个不动
+    const 空的源: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("前一段\n", "", "前一段"), 段("\n", "\n", "")],
+    };
+    const 空的 = createTestEditor(空的源);
+    进块(空的, 1);
+    expect(pasteGrid(空的.state, "甲,乙,丙\n1,2,3")).toBeNull();
+    expect(pasteGrid(空的.state, "今天想把一件事记下来\n另一行接着说")).toBeNull();
+    expect(docToMarkdown(空的.state.doc, 空的源)).toContain("前一段");
+    空的.destroy();
+  });
+
+  it("格子里粘多行：判据要摊平，不许把这张表顶成两半（真机抓到的破坏）", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 2);
+    const 块数前 = editor.state.doc.childCount;
+    // 多行 → 摊平；单行 → 交回（行内样式的默认粘贴不该被抢走）
+    expect(判粘贴(editor.state, "甲\n乙")).toEqual({ 做: "摊平", 文: "甲 乙" });
+    expect(判粘贴(editor.state, "单行")).toEqual({ 做: "交回" });
+    expect(判粘贴(editor.state, "\n\n")).toEqual({ 做: "摊平", 文: "" });
+    // 照着做：顶层块数不变＝表格没被顶开，落盘的仍是这一格里的字
+    const 判 = 判粘贴(editor.state, "甲\n乙");
+    expect(判.做).toBe("摊平");
+    if (判.做 === "摊平" && 判.文) editor.view.dispatch(editor.state.tr.insertText(判.文));
+    expect(editor.state.doc.childCount).toBe(块数前);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| 列 A | 列 B |\n| --- | --- |\n| 甲 乙1 | 2 |\n",
+    );
+    // 整串都是换行：判据给"摊平"而文是空，动作什么也不发——文档对象还是同一个
+    const 落字后 = editor.state.doc;
+    const 空判 = 判粘贴(editor.state, "\n\n");
+    expect(空判).toEqual({ 做: "摊平", 文: "" });
+    if (空判.做 === "摊平" && 空判.文) editor.view.dispatch(editor.state.tr.insertText(空判.文));
+    expect(editor.state.doc).toBe(落字后);
+    editor.destroy();
   });
 
   it("两张相邻且源文本相同的表：改第一张不许重写第二张", () => {
