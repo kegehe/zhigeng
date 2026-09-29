@@ -7,6 +7,7 @@ import {
   applyBlockType,
   enterCell,
   exitTableDown,
+  exitOpaqueDown,
   moveCell,
   moveCurrentBlock,
   numberedMarker,
@@ -831,6 +832,10 @@ export const BlockTools = Extension.create({
  * 这四条必须**在键位层面**接管：`Tab` 默认会跳出编辑器（焦点跑到工具栏上），
  * `Enter` 默认会拆块——拆出来的两半表格 `serializeNode` 根本不认；而 `ArrowDown` 不接的话，
  * 表格是文档最后一块时用户**没有任何出路**（2026-09-29 用户报的死局，见 `enterCell` 那条）。
+ *
+ * `ArrowDown` 这一条顺手也管**不透明块**（代码块 / 引用）：同一个死局、同一个键、同一套
+ * 肌肉记忆，所以两条串在一个绑定里——同一个键在两个扩展里各绑一次的话，谁赢取决于注册
+ * 顺序，那是查不动的东西。
  */
 export const TableKeys = Extension.create({
   name: "tableKeys",
@@ -847,7 +852,7 @@ export const TableKeys = Extension.create({
       Tab: 走((s) => moveCell(s, 1)),
       "Shift-Tab": 走((s) => moveCell(s, -1)),
       Enter: 走(enterCell),
-      ArrowDown: 走(exitTableDown),
+      ArrowDown: 走((s) => exitTableDown(s) ?? exitOpaqueDown(s)),
       /**
        * 框了多格时 `Delete` / `Backspace` 清空所选的每一格——与电子表格一致，也是用户
        * 框完最自然按下去的那一键。**没框多格就返回 false**：单格时那两键仍是删字符，

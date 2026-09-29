@@ -14,6 +14,7 @@ import {
   docToMarkdown,
   enterCell,
   exitTableDown,
+  exitOpaqueDown,
   insertSourceBlock,
   判粘贴,
   格坐标At,
@@ -627,6 +628,87 @@ describe("工具栏的移动与分隔线", () => {
     editor.view.dispatch(tr!);
     editor.view.dispatch(editor.state.tr.insertText("let a = 1;"));
     expect(docToMarkdown(editor.state.doc, doc)).toBe("```\nlet a = 1;\n```\n\n乙\n");
+    editor.destroy();
+  });
+
+  it("插入的代码块自带落脚点，而落脚点不落盘：文末也能出去", () => {
+    const { doc } = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    editor.view.dispatch(insertSourceBlock(editor.state, "code", "```\n\n```")!);
+    // 甲 | 代码块 | 空段落落脚点 | 乙 | 丙 —— 没有那个空段落时，文末的代码块只剩鼠标能出去
+    expect([...editor.state.doc.children].map((n) => n.type.name).join(","))
+      .toBe("mdParagraph,mdOpaque,mdParagraph,mdParagraph,mdParagraph");
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "甲\n\n```\n\n```\n\n乙\n\n丙\n"
+    );
+    editor.destroy();
+  });
+
+  it("代码块末尾按 ↓ 出去；不在末尾时不出去（↓ 该在块内移动）", () => {
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        { kind: "code", id: null, raw: "```\nlet a = 1\n```\n", gapBefore: "", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "paragraph", id: null, raw: "后面一段\n", gapBefore: "\n", content: "后面一段", level: null, checked: null, fields: [], children: [] },
+      ],
+    };
+    const editor = createTestEditor(d);
+    const 块 = editor.state.doc.child(0);
+    // 不在最后一行：第一行行中（代码块最后一行是闭合围栏，写代码时人总在它上面）
+    editor.view.dispatch(
+      editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(4))),
+    );
+    expect(exitOpaqueDown(editor.state)).toBeNull();
+    // 在闭合围栏那一行的**行中**（不是行尾）按 ↓ 也要出去：判据是"最后一行"，
+    // 要求越过围栏才算末尾等于没有出口
+    editor.view.dispatch(
+      editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(18))),
+    );
+    expect(exitOpaqueDown(editor.state)).not.toBeNull();
+    // 在块末：出去，光标落到下一块
+    editor.view.dispatch(
+      editor.state.tr.setSelection(
+        TextSelection.near(editor.state.doc.resolve(块.nodeSize - 1)),
+      ),
+    );
+    const tr = exitOpaqueDown(editor.state);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(editor.state.selection.$from.depth).toBe(1);
+    expect(editor.state.doc.child(editor.state.selection.$from.index(0)).type.name).toBe(
+      "mdParagraph"
+    );
+    // 出去这一下不改文件一个字节
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "```\nlet a = 1\n```\n\n后面一段\n"
+    );
+    editor.destroy();
+  });
+
+  it("代码块是最后一块时按 ↓：补出落脚点放进去，文件仍不多一个字节", () => {
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        { kind: "code", id: null, raw: "```\ncode()\n```\n", gapBefore: "", content: "", level: null, checked: null, fields: [], children: [] },
+      ],
+    };
+    const editor = createTestEditor(d);
+    const 块 = editor.state.doc.child(0);
+    editor.view.dispatch(
+      editor.state.tr.setSelection(
+        TextSelection.near(editor.state.doc.resolve(块.nodeSize - 1)),
+      ),
+    );
+    const tr = exitOpaqueDown(editor.state);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(editor.state.doc.childCount).toBe(2);
+    editor.view.dispatch(editor.state.tr.insertText("OUT"));
+    // 这正是真机复现过的死局：没有出口时 "OUT" 落进了围栏里面
+    expect(docToMarkdown(editor.state.doc, d)).toBe("```\ncode()\n```\n\nOUT\n");
     editor.destroy();
   });
 

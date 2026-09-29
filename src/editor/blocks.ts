@@ -549,7 +549,13 @@ function sourceBlock(state: EditorState, kind: string, source: string, gap: stri
   }
   const opaque = state.schema.nodes.mdOpaque;
   if (!opaque) throw new Error("schema 里没有 mdOpaque 节点");
-  return [opaque.create(账本, state.schema.text(source))];
+  const 块 = opaque.create(账本, state.schema.text(source));
+  /**
+   * 与表格同一条规矩：插进来的块下面留一个空段落**落脚点**（空段落不落盘，一个字节都不多）。
+   * 不留的话，"在文末插一个代码块"就只剩鼠标能出去——而代码块的出口本来就设计成 `↓`。
+   */
+  const 尾 = 落脚点(state.schema);
+  return 尾 ? [块, 尾] : [块];
 }
 
 /**
@@ -1137,11 +1143,17 @@ function 末行全空(表: PmNode): boolean {
  * 下面已经有块就落进那块；没有就现补一个空段落——**补出来的段落不落盘**，
  * 所以"在文末的表格里按一下 ↓"不会碰用户文件的任何一个字节。
  */
-function 送出表下(tr: Transaction, 表起点: number): Transaction | null {
-  const 表 = tr.doc.nodeAt(表起点);
+/**
+ * 把光标送到**这一块**下面（后面没有块就补一个空段落落脚点）。
+ *
+ * 表格与不透明块共用它——两类的死局是同一种：块在文末时下面没有可去的地方，
+ * 键盘出口也就不存在（2026-09-29 用户报的表格那一版，代码块是同一版）。
+ */
+function 送出块下(tr: Transaction, 块起点: number): Transaction | null {
+  const 块 = tr.doc.nodeAt(块起点);
   const 段型 = tr.doc.type.schema.nodes.mdParagraph;
-  if (!表 || !段型) return null;
-  const 后 = 表起点 + 表.nodeSize;
+  if (!块 || !段型) return null;
+  const 后 = 块起点 + 块.nodeSize;
   if (!tr.doc.nodeAt(后)) {
     const 尾 = 落脚点(tr.doc.type.schema);
     if (!尾) return null;
@@ -1156,7 +1168,29 @@ function 送出表下(tr: Transaction, 表起点: number): Transaction | null {
 export function exitTableDown(state: EditorState): Transaction | null {
   const 位 = cellAt(state);
   if (!位 || 位.行 !== 位.行数 - 1) return null;
-  return 送出表下(state.tr, 位.表);
+  return 送出块下(state.tr, 位.表);
+}
+
+/**
+ * 光标在**不透明块的最后一行**按 `↓`：离开这块。代码块 / 引用 / 围栏这类块的出口。
+ *
+ * 判据是"在最后一行"而不是"在内容末尾"——代码块的最后一行永远是那道闭合围栏，
+ * 要求光标越过它才按得出去，等于没有出口（写代码时人总在围栏上面）。与表格
+ * "最后一行按 `↓`"同一条判据、同一个键。
+ *
+ * 不在最后一行时交回 PM：那里 `↓` 该在块内下移一行。`Enter` 也永远不换块——
+ * 代码块里回车就是换行，拆出来的两半围栏 `serializeNode` 不认。
+ */
+export function exitOpaqueDown(state: EditorState): Transaction | null {
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  const 起点 = $from.before(1);
+  const 块 = state.doc.nodeAt(起点);
+  if (!块 || 块.type.name !== "mdOpaque") return null;
+  if ($from.parent !== 块) return null;
+  // 后面还有换行 = 不在最后一行
+  if (块.textContent.slice($from.parentOffset).includes("\n")) return null;
+  return 送出块下(state.tr, 起点);
 }
 
 /**
@@ -1180,7 +1214,7 @@ export function enterCell(state: EditorState): Transaction | null {
       });
       if (删 >= 0) tr.delete(删, 删 + 表.child(位.行)!.nodeSize);
     }
-    return 送出表下(tr, 位.表);
+    return 送出块下(tr, 位.表);
   }
   return 走到格(state, (位.行 + 1) * 位.列数 + 位.列);
 }
