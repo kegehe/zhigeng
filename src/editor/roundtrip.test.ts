@@ -1506,6 +1506,40 @@ describe("表格网格化的字节判据", () => {
     二.destroy();
   });
 
+  it("末行不带换行的文件：插入结构块要补出空行，且不许改掉文件的结尾习惯", () => {
+    // 复查查出来的破坏：未改动的块原样回写（不补 eol），在它后面插一块时只给一个 "\n"，
+    // 于是 `末段\n---` 被内核读成 setext 二级标题、`末段\n| 列 |…` 把整张表吞进段落。
+    // 而表格后面那个不落盘的落脚点又会让"最后一个 child"判据失效、凭空多一个结尾换行。
+    const 不结尾: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("前一段\n", "", "前一段"), 段("末段", "\n", "末段")],
+    };
+    const e = createTestEditor(不结尾);
+    e.view.dispatch(e.state.tr.setSelection(TextSelection.atEnd(e.state.doc)));
+
+    const 表 = insertSourceBlock(e.state, "table", "| 列 | 列 |\n| --- | --- |\n|  |  |");
+    expect(表).not.toBeNull();
+    const 出表 = docToMarkdown(表!.doc, 不结尾);
+    expect(出表).toBe("前一段\n\n末段\n\n| 列 | 列 |\n| --- | --- |\n|  |  |");
+    expect(出表.endsWith("\n")).toBe(false);
+
+    const 线 = insertSourceBlock(e.state, "divider", "---");
+    expect(线).not.toBeNull();
+    const 出线 = docToMarkdown(线!.doc, 不结尾);
+    expect(出线).toBe("前一段\n\n末段\n\n---");
+    // 以换行结尾的文件不受这条影响：该保留的换行还在
+    e.destroy();
+    const 规矩 = 表doc(规范表);
+    const 二 = createTestEditor(规矩);
+    二.view.dispatch(二.state.tr.setSelection(TextSelection.atEnd(二.state.doc)));
+    const 二表 = insertSourceBlock(二.state, "table", "| A |\n| --- |\n| 1 |");
+    expect(docToMarkdown(二表!.doc, 规矩)).toBe(
+      "前一段\n\n" + 规范表 + "\n| A |\n| --- |\n| 1 |\n",
+    );
+    二.destroy();
+  });
+
   it("两张相邻且源文本相同的表：改第一张不许重写第二张", () => {
     // 复查查出来的字节级缺陷。账本守卫的判据是"相邻两块 mdRaw 相同 ⇒ 拆块产物，清掉后一块"，
     // 它的前提是"重新序列化等于原字节"。表格是唯一不满足这个前提的块（产的是规范形），

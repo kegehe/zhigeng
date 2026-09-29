@@ -629,8 +629,13 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     // 内容，给它一个空行等于在开头凭空多一行（有 front-matter 时那个空行倒是必须）；
     // ② 回车拆在段首，前一半是空块、被下面那条规则整个跳过，此时"第二块"其实是第一
     // 个落笔的块，按 index 判就会给它补出前导空行。
-    const gap =
+    let gap =
       raw.length > 0 ? String(a.mdGap ?? "") : continuesList || !out ? "" : "\n";
+    // **新块的 gap 语义是"与上一块之间空一整行"**，而"上一块写完了"隐含着一件事：它得先
+    // 把自己的行终止。文件最后一行的 `raw` 本来不带换行（未改动的块原样回写、不补 eol），
+    // 在它后面插一块时只给一个 "\n" 就变成 `末段\n---` —— 内核把它读成 setext 二级标题，
+    // 插一张表则整张表被吞进上一段（2026-09-29 复查实测）。所以这里按 `out` 实际结尾补。
+    if (gap === "\n" && out && !out.endsWith("\n")) gap = "\n\n";
     const eol = index === doc.childCount - 1 && !srcEndsNewline ? "" : "\n";
     const 正文 = unchanged ? raw : serializeNode(node) + eol;
     // **重新产出后是空白的块不落任何字节**：Markdown 里没有"空段落"这个东西，写出来就是
@@ -642,7 +647,12 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     out += gap + 正文;
     prev = { kind, depth };
   });
-  return out + head.trailingGap;
+  // **源文件结尾有没有换行，是它的习惯，不由我们改**。`eol` 那条判据看的是"最后一个 child"，
+  // 而表格后面那个落脚点**故意不落盘**——它一存在，真正的最后一块就不再是最后一个 child，
+  // 于是本来不带结尾换行的文件会被补出一个 `\n`（2026-09-29 复查实测）。收尾统一削掉。
+  let 尾 = out + head.trailingGap;
+  if (!srcEndsNewline && 尾.endsWith("\n")) 尾 = 尾.slice(0, -1);
+  return 尾;
 }
 
 /**
@@ -902,12 +912,6 @@ function 送出表下(tr: Transaction, 表起点: number): Transaction | null {
     tr.insert(后, 尾);
   }
   return tr.setSelection(TextSelection.near(tr.doc.resolve(后 + 1))).scrollIntoView();
-}
-
-/** 光标从格子里直接到表格下方（工具栏与键都走这一条，别各写一份落点） */
-export function exitTableBelow(state: EditorState): Transaction | null {
-  const 位 = cellAt(state);
-  return 位 ? 送出表下(state.tr, 位.表) : null;
 }
 
 /**
