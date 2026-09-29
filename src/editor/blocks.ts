@@ -288,8 +288,20 @@ export const BLOCK_TYPES: { id: BlockTypeId; 标签: string }[] = [
 export const INSERTABLE: { kind: string; 标签: string; 源文本: string }[] = [
   { kind: "divider", 标签: "分隔线", 源文本: "---" },
   { kind: "quote", 标签: "引用", 源文本: "> " },
+  { kind: "code", 标签: "代码块", 源文本: "```\n\n```" },
   { kind: "table", 标签: "表格", 源文本: "| 列 | 列 |\n| --- | --- |\n|  |  |" },
 ];
+
+/**
+ * 插完代码块之后光标该落在**两道围栏之间**。
+ *
+ * 落在块外（PM 的默认行为：选区留在插入点之前），用户第一次打字就会把 ` ``` `
+ * 当正文改，产出一份"看着是代码块、其实围栏被打断"的东西。表格不需要这条：
+ * 它是网格，落点天然是某一格，用户必须点一下才知道自己在哪格。
+ */
+export function 代码落点(块起点: number): number {
+  return 块起点 + 1 + "```\n".length;
+}
 
 /**
  * 把块改成目标类型需要的节点类型与属性补丁。**返回 null 表示不用改或不能改**——
@@ -466,9 +478,10 @@ export function insertSourceBlock(
   const start = $from.before(1);
   const node = state.doc.nodeAt(start);
   if (!node) return null;
-  return state.tr
-    .insert(start + node.nodeSize, sourceBlock(state, kind, source, "\n"))
-    .scrollIntoView();
+  const 块起点 = start + node.nodeSize;
+  const tr = state.tr.insert(块起点, sourceBlock(state, kind, source, "\n"));
+  if (kind === "code") tr.setSelection(TextSelection.near(tr.doc.resolve(代码落点(块起点))));
+  return tr.scrollIntoView();
 }
 
 /**
@@ -489,7 +502,9 @@ export function replaceBlockWithSource(
   const node = state.doc.nodeAt(start);
   if (!opaque || !node) return null;
   const gap = String(node.attrs.mdGap ?? "\n");
-  return state.tr.replaceWith(start, start + node.nodeSize, sourceBlock(state, kind, source, gap));
+  const tr = state.tr.replaceWith(start, start + node.nodeSize, sourceBlock(state, kind, source, gap));
+  if (kind === "code") tr.setSelection(TextSelection.near(tr.doc.resolve(代码落点(start))));
+  return tr;
 }
 
 /** 新建块的账本：没有源切片可回，所以 `mdRaw` 空、签名空（必被重新序列化） */

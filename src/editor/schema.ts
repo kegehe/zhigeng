@@ -10,6 +10,7 @@ import {
   moveCell,
   moveCurrentBlock,
   numberedMarker,
+  replaceBlockWithSource,
   判粘贴,
   填充所选,
   清场所选,
@@ -780,6 +781,18 @@ export const BlockTools = Extension.create({
               const node = view.state.doc.nodeAt(start);
               if (!node) return false;
               const 前缀 = node.textBetween(0, from - start - 1, undefined, "￼");
+              /**
+               * ` ``` ` + 空格 → 代码块。它**不走 `applyBlockType`**：块类型下拉里那十种都是
+               * `serializeNode` 产得出的行内形状，而代码块是不透明块（正文就是它自己的源文本），
+               * 语义是"整块换成一段源文本"，与斜杠菜单点「代码块」同一个函数——两条路必须
+               * 产出同一份字节，否则一边绿一边坏。
+               */
+              if (前缀 === "```") {
+                const 换 = replaceBlockWithSource(view.state, start, "code", "```\n\n```");
+                if (!换) return false;
+                view.dispatch(换.scrollIntoView());
+                return true;
+              }
               const target = prefixOf(前缀);
               if (!target) return false;
               // 与斜杠菜单、测试走同一个函数：三处各写一份 setNodeMarkup 的话，

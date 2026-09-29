@@ -579,19 +579,78 @@ describe("工具栏的移动与分隔线", () => {
     const 期望: Record<string, string> = {
       divider: "甲\n\n---\n\n乙\n\n丙\n",
       quote: "甲\n\n> \n\n乙\n\n丙\n",
+      code: "甲\n\n```\n\n```\n\n乙\n\n丙\n",
       table: "甲\n\n| 列 | 列 |\n| --- | --- |\n|  |  |\n\n乙\n\n丙\n",
     };
-    for (const kind of ["divider", "quote", "table"]) {
+    for (const kind of ["divider", "quote", "code", "table"]) {
       const editor = createTestEditor(doc);
       editor.commands.setTextSelection(2); // 光标在"甲"
       const tr = insertSourceBlock(editor.state, kind, 骨架(kind));
       expect(tr, kind).not.toBeNull();
       editor.view.dispatch(tr!);
-      // 三种都要自带一个空行：紧贴上一行的 `---` 会被读成 setext 标题下划线，
-      // 表格与引用的首行同理会并进上一段
+      // 四种都要自带一个空行：紧贴上一行的 `---` 会被读成 setext 标题下划线，
+      // 表格、引用与围栏的首行同理会并进上一段
       expect(docToMarkdown(editor.state.doc, doc), kind).toBe(期望[kind]);
       editor.destroy();
     }
+  });
+
+  it("插入代码块：光标落在两道围栏之间，第一次打字打的是代码", () => {
+    const { doc } = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    const tr = insertSourceBlock(editor.state, "code", "```\n\n```");
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    // 落点在围栏外时，用户第一次打字会把 ` ``` ` 当正文改——产出一份"看着是代码块、
+    // 其实围栏被打断"的东西，而这一步界面上完全看不出来
+    editor.view.dispatch(editor.state.tr.insertText("let a = 1;"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "甲\n\n```\nlet a = 1;\n```\n\n乙\n\n丙\n"
+    );
+    editor.destroy();
+  });
+
+  it("斜杠菜单选代码块也是整块替换：不留 /，光标在围栏里", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        { kind: "paragraph", id: null, raw: "/\n", gapBefore: "", content: "/", level: null, checked: null, fields: [], children: [] },
+        { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, fields: [], children: [] },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    const 骨架 = INSERTABLE.find((b) => b.kind === "code")!.源文本;
+    const tr = replaceBlockWithSource(editor.state, 0, "code", 骨架);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    editor.view.dispatch(editor.state.tr.insertText("let a = 1;"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("```\nlet a = 1;\n```\n\n乙\n");
+    editor.destroy();
+  });
+
+  it("行首 ``` + 空格 → 代码块，与斜杠菜单产出同一份字节", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        { kind: "paragraph", id: null, raw: "```\n", gapBefore: "", content: "```", level: null, checked: null, fields: [], children: [] },
+        { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, fields: [], children: [] },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(4); // 三个反引号之后
+    const 接了 = editor.view.someProp("handleTextInput", (f) =>
+      // 第 5 个参数是 CompositionTransaction（浏览器组合输入才给），测试里用不到，
+      // 但签名要求它是个函数
+      f(editor.view, 4, 4, " ", () => editor.state.tr)
+    );
+    expect(接了).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("```\n\n```\n\n乙\n");
+    editor.view.dispatch(editor.state.tr.insertText("let a = 1;"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("```\nlet a = 1;\n```\n\n乙\n");
+    editor.destroy();
   });
 
   it("斜杠菜单选结构块是整块替换：不留下那个 /，也不留空段落", () => {
