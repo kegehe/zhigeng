@@ -947,7 +947,7 @@ function 改格们(
   表起点: number,
   矩: 矩形,
   改: (格: PmNode, 行: number, 列: number, 左上格: PmNode, 是左上: boolean) => PmNode,
-  改对齐?: (对齐们: Align[]) => Align[],
+  改对齐?: (对齐们: Align[], 夹住后: 矩形) => Align[],
 ): Transaction | null {
   const 表 = state.doc.nodeAt(表起点);
   const 格型 = state.schema.nodes.mdTableCell;
@@ -972,7 +972,7 @@ function 改格们(
     行们.push(行.copy(Fragment.from(格们)));
   });
   const 原对齐 = (表.attrs.mdAligns as Align[]) ?? [];
-  const 对齐们 = 改对齐 ? 改对齐(原对齐) : 原对齐;
+  const 对齐们 = 改对齐 ? 改对齐(原对齐, 夹后) : 原对齐;
   if (改对齐 && 对齐们.join("\u0000") !== 原对齐.join("\u0000")) 动过 = true;
   if (!动过) return null;
   const 新表 = 表.type.create({ ...表.attrs, mdAligns: 对齐们 }, Fragment.from(行们));
@@ -1023,12 +1023,17 @@ export function 对所齐所选(
     表起点,
     矩,
     (格) => (String(格.attrs.align ?? "") === 对 ? 格 : 格型.create({ ...格.attrs, align: 对 }, 格.content)),
-    (原) => {
+    (原, 夹) => {
       const 新 = [...原];
       // 补到**列数**而不是 c1：分隔行的长度由 mdAligns 算，短于表头就是那张 02 里
       // 明令不许产出的"分隔行比表头短"的表。与单列那版 `setAlign` 同一条规矩。
       while (新.length < 列数) 新.push("" as Align);
-      for (let c = 矩.c0; c <= 矩.c1; c++) 新[c] = 对;
+      /**
+       * 用 `改格们` **夹住后**的矩形，不用传进来的 `矩`：越界的 `矩.c1` 会把 mdAligns 写得
+       * 比表头长，分隔行跟着变长，内核就不再认它是表（真测过：三列的表产出五段分隔行）。
+       * 格子那一路本来就夹了，只有对齐这一路漏了。
+       */
+      for (let c = 夹.c0; c <= 夹.c1; c++) 新[c] = 对;
       return 新;
     },
   );

@@ -656,17 +656,27 @@ describe("工具栏的移动与分隔线", () => {
     };
     const editor = createTestEditor(d);
     const 块 = editor.state.doc.child(0);
-    // 不在最后一行：第一行行中（代码块最后一行是闭合围栏，写代码时人总在它上面）
-    editor.view.dispatch(
-      editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(4))),
-    );
-    expect(exitOpaqueDown(editor.state)).toBeNull();
-    // 在闭合围栏那一行的**行中**（不是行尾）按 ↓ 也要出去：判据是"最后一行"，
-    // 要求越过围栏才算末尾等于没有出口
-    editor.view.dispatch(
-      editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(18))),
-    );
-    expect(exitOpaqueDown(editor.state)).not.toBeNull();
+    /**
+     * 逐位置判"在不在最后一行"，别只测两个点。源文本是 `"```"` `"\n"` `"let a = 1"` `"\n"`
+     * `"```"` = 17 个字符，顶层第一块从位置 1 起，所以**绝对位置 = 1 + 行内偏移**。
+     *
+     * 第 15 那一条是这次修改存在的理由：**闭合围栏那一行的行首**就得能出去。按"内容末尾"判
+     * 它还不算末尾，而写代码的人手就停在这个位置——真机上就是那里按 ↓ 没反应。
+     * 上一版把"围栏行中"写成 `resolve(18)`，而 `块.nodeSize - 1` 也等于 18，两条断言其实是
+     * 同一个位置，等于没测到判据本身。
+     */
+    for (const [位, 该出去] of [
+      [3, false], // 第一行行中 → ↓ 该在块内下移一行
+      [14, false], // 第二行行末（还没跨过那个换行）
+      [15, true], // 第三行行首：围栏还没开始，但已经在最后一行
+      [16, true], // 围栏行中
+      [18, true], // 块末
+    ] as [number, boolean][]) {
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(位)))
+      );
+      expect([位, exitOpaqueDown(editor.state) !== null]).toEqual([位, 该出去]);
+    }
     // 在块末：出去，光标落到下一块
     editor.view.dispatch(
       editor.state.tr.setSelection(
@@ -926,6 +936,21 @@ describe("回车拆段不许把原块的账本留给新块", () => {
     const editor = createTestEditor(doc);
     // 作者留了两个空行。整树替换（载入 / 打签名）里出现的相同源切片是文件本来的样子，
     // 照"拆块产物"去清账本，就会把这两个空行改没——那是另一种改用户内容
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    /**
+     * 载入之后**只动一下光标**同样不许改。上一版只钉了"载入那一刻"，而 PM 对每一次 apply
+     * 都会跑账本守卫，纯光标移动也算一次——不挡就会在这里清掉用户根本没碰过的第二段的账本，
+     * 而那笔补出来的事务是 `docChanged` 的：`onUpdate` 跟着响，这篇就被标成未保存，字节却一个
+     * 没变（探针实测：`mdRaw` 从 `"甲\n"` 变成 `""`）。界面后果是角标从此下不来，而 `unsaved`
+     * 还挡着外部改动重载——Obsidian 改这篇永远看不见。
+     */
+    let update次数 = 0;
+    editor.on("update", () => update次数++);
+    editor.view.dispatch(
+      editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(1)))
+    );
+    expect(editor.state.doc.child(1).attrs.mdRaw).toBe("甲\n");
+    expect(update次数).toBe(0);
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
@@ -1891,6 +1916,31 @@ describe("矩形选区的批量动作：只动所选格，其余逐字节不动"
       "center",
       "center",
       "",
+    ]);
+    editor.destroy();
+  });
+
+  it("矩形越出表头时只改夹住的那几列：分隔行绝不能比表头长", () => {
+    /**
+     * 越界矩形在真机上**造得出来**：Shift 点扩选区时抄了另一张表的锚点（锚是表内坐标，
+     * 五列的表里的第 5 列喂给只有三列的表就越界）。那条路已经堵了，这里钉第二道：
+     * 对齐这一路自己必须夹住。分隔行写出 5 段而表头 3 段，内核就不再认它是表——
+     * 整块降级成不透明块，用户的表格从网格里消失。
+     */
+    const d = 表doc(三列);
+    const editor = createTestEditor(d);
+    框住(editor, { r0: 1, r1: 2, c0: 0, c1: 4 }, 3);
+    const tr = 批量(editor.state, (s, 表, 矩) => 对所齐所选(s, 表, 矩, "center"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe(
+      "前一段\n\n| A | B | C |\n| :---: | :---: | :---: |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n"
+    );
+    expect(parseTable(出.slice(出.indexOf("| A")))!.aligns).toEqual([
+      "center",
+      "center",
+      "center",
     ]);
     editor.destroy();
   });

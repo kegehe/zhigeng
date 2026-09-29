@@ -31,6 +31,14 @@ fn tree_file(vault: &Vault) -> PathBuf {
     vault.meta_dir().join("tree.toml")
 }
 
+/// 存坏档副本用的批次名。必须每次都不重复：连着坏两次，第二次不该覆盖第一次的遗言。
+fn 批次() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 /// 归一父路径：反斜杠换正斜杠、去首尾斜杠。
 /// 前端从 `rel` 切出来的路径在 Windows 上可能是反斜杠形式，两边统一一次，
 /// 否则同一个目录会存成两条互不相认的序。
@@ -45,9 +53,19 @@ fn check(order: &TreeOrder) -> Result<()> {
     if parent.split('/').any(|seg| seg == "..") {
         return Err(Error::Invalid(format!("父路径越出库根: {}", order.parent)));
     }
+    if parent.chars().any(|c| c.is_control()) {
+        return Err(Error::Invalid("父路径不能带控制字符".into()));
+    }
     for n in &order.names {
         if n.trim().is_empty() || n.contains('/') || n.contains('\\') {
             return Err(Error::Invalid(format!("同级条目名不能带路径分隔符: {n}")));
+        }
+        // 控制字符写进 TOML 基础字符串就是**整份文件非法**：`quoted` 只转义 `" \ \n \t`，
+        // `\r`、ESC、NUL 是原样推出去的，下次读回来直接是"坏档"，所有层的顺序一起没。
+        // 这些字符在 Windows 的文件名里本就不允许，从界面走不进来——但 `parent`/`names`
+        // 是前端传上来的字符串，这道关口不该假设调用方诚实。
+        if n.chars().any(|c| c.is_control()) {
+            return Err(Error::Invalid(format!("同级条目名不能带控制字符: {n}")));
         }
     }
     Ok(())
@@ -60,13 +78,21 @@ fn check(order: &TreeOrder) -> Result<()> {
 ///   调用方下一步可能就是保存，那会把一份只是暂时读不动的好档覆盖掉。
 pub fn load(vault: &Vault) -> Result<Vec<TreeOrder>> {
     use serde::de::IntoDeserializer;
-    let path = tree_file(vault);
-    let doc = read_doc(&path)?;
+    let doc = match 读(&tree_file(vault))? {
+        读回::是表(t) => t,
+        // 没有这个文件 / 坏档：都按"没排过序"处理，侧栏不能起不来
+        _ => toml::Table::new(),
+    };
     let mut out = Vec::new();
     if let Some(toml::Value::Array(rows)) = doc.get("order") {
         for row in rows {
             // 单条读不回来不影响别的条目：坏的那条按"没排过序"处理
-            if let Ok(o) = TreeOrder::deserialize(row.clone().into_deserializer()) {
+            if let Ok(mut o) = TreeOrder::deserialize(row.clone().into_deserializer()) {
+                // 归一在这里做完：前端拿 `parent` 做**相等比较**（`App.tsx` 的 `存过`、
+                // `tree.ts` 的 `合并层`），而排序那条路是归一过的。手改出一个 `notes/` 或
+                // `notes\工作`，不归一就会出现"屏幕上算同一层、写回时算两层"——拖走一篇时
+                // 源层不被清理，同一层越攒越多条。
+                o.parent = norm_parent(&o.parent);
                 out.push(o);
             }
         }
@@ -74,11 +100,20 @@ pub fn load(vault: &Vault) -> Result<Vec<TreeOrder>> {
     Ok(out)
 }
 
+/// 文件读回来的三种样子。
+enum 读回 {
+    /// 还没有这个文件（用户没拖过）
+    没有,
+    /// 有文件，但整篇解析不出一个表：里面**可能还留着别的层**
+    坏档(String),
+    是表(toml::Table),
+}
+
 /// 读回顶层表。见 [`load`] 里那三分。
-fn read_doc(path: &std::path::Path) -> Result<toml::Table> {
+fn 读(path: &std::path::Path) -> Result<读回> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(toml::Table::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(读回::没有),
         Err(e) => {
             return Err(Error::Io {
                 path: path.display().to_string(),
@@ -89,9 +124,9 @@ fn read_doc(path: &std::path::Path) -> Result<toml::Table> {
     // 与 config.toml 同一条教训：必须 `from_str` 整篇文档，`parse::<Value>()` 认的是
     // 单个值，带 `[表]` / `[[数组]]` 头的正常文件会被判成坏档。
     match toml::from_str::<toml::Value>(&text) {
-        Ok(toml::Value::Table(t)) => Ok(t),
-        // 坏档，或顶层不是表：没有可保留的东西，按空表继续
-        _ => Ok(toml::Table::new()),
+        Ok(toml::Value::Table(t)) => Ok(读回::是表(t)),
+        // 坏档：把原文留着，写的那一侧决定怎么保住它
+        _ => Ok(读回::坏档(text)),
     }
 }
 
@@ -102,10 +137,21 @@ pub fn save(vault: &Vault, orders: &[TreeOrder]) -> Result<()> {
         check(o)?;
     }
     // 先读回来再改：这份文件理论上只有自己一个写者，但"读—改—写"这条纪律与
-    // config.toml 保持一致，将来别的模块往里塞东西不会静默丢。
+    // config.toml 保持一致，别的模块往**顶层**塞的键不会被这次保存丢掉
+    // （`[[order]]` 里多出来的键会没，见 `render` 的说明）。
     // 读不出来的 IO 错误在这里同样照报——覆盖一份只是暂时读不动的好档是不可接受的。
     let path = tree_file(vault);
-    let mut doc = read_doc(&path)?;
+    let mut doc = match 读(&path)? {
+        读回::是表(t) => t,
+        读回::没有 => toml::Table::new(),
+        // 坏档：读不回来的那份里**可能还留着别的层**（人手改出一个错字，其余全是好的）。
+        // 按空表直接写回去，就是把用户排好的顺序静默抹了——所以先把原文存进
+        // `.note/conflicts/`，再继续。坏档不锁死拖拽（有测试钉这条），但不许白丢。
+        读回::坏档(原文) => {
+            vault.keep_conflict(&format!("tree.toml.{}", 批次()), 原文.as_bytes())?;
+            toml::Table::new()
+        }
+    };
 
     let existing: Vec<toml::Value> = match doc.get("order").and_then(|v| v.as_array()) {
         Some(a) => a.clone(),
@@ -190,6 +236,9 @@ fn quoted(s: &str) -> String {
 /// `order = [{ parent = "…" }]` 的内联形式，人读不动，也不好手改。
 /// 别的键（不是我们写的）交给 `toml::to_string` 原样搬出去，且必须放在最前面——
 /// TOML 里裸键不能出现在表头之后。
+///
+/// 说得准一点：保住的是**顶层**的别的键。`[[order]]` 里多出来的键、以及文件里的注释，
+/// 在这次重写里会没（`toml::Value` 不携带它们）。要紧的东西别往这两个字段里塞。
 fn render(table: &toml::Table) -> String {
     let mut out = String::from(
         "# 侧栏目录树的自定义顺序。每个 [[order]] 是一个父目录，names 从上到下。\n\
@@ -361,5 +410,55 @@ mod tests {
         let vault = Vault::open(dir.path()).unwrap();
         save(&vault, &[一层("notes", &["他说\"好\".md"])]).unwrap();
         assert_eq!(载入(&vault)[0].names[0], "他说\"好\".md");
+    }
+
+    #[test]
+    fn 控制字符不许写出去() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        // `quoted` 只转义 `" \ \n \t`，`\r` 会原样推进基础字符串里 = 整份文件非法 TOML，
+        // 下次读回来是坏档，所有层的顺序一起没
+        assert!(save(&vault, &[一层("notes", &["甲\r.md"])]).is_err());
+        assert!(save(&vault, &[一层("no\u{0000}tes", &["甲.md"])]).is_err());
+        assert!(!tree_file(&vault).exists(), "拒掉就不能留下文件");
+    }
+
+    #[test]
+    fn 坏档里剩下的层会被存进冲突目录再重写() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        std::fs::create_dir_all(vault.meta_dir()).unwrap();
+        // 第一层是好的，第二层写崩了：TOML 整篇读不回来，于是"按空表写回去"会把好的那层抹了
+        let 遗言 = "[[order]]\nparent = \"notes\"\nnames = [\"甲.md\"]\n\n[[order]]\nparent = \"inbox\"\nnames = [\n";
+        std::fs::write(tree_file(&vault), 遗言).unwrap();
+        assert!(载入(&vault).is_empty(), "坏档按没排过序处理");
+        save(&vault, &[一层("项目", &["乙.md"])]).unwrap();
+        let 全 = 载入(&vault);
+        assert_eq!(全.len(), 1);
+        assert_eq!(全[0].parent, "项目");
+        let 存住的: Vec<String> = std::fs::read_dir(vault.meta_dir().join("conflicts"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|名| 名.starts_with("tree.toml"))
+            .collect();
+        assert_eq!(存住的.len(), 1, "坏档原文得留一份可查的副本：{存住的:?}");
+        let 文本 = std::fs::read(vault.meta_dir().join("conflicts").join(&存住的[0])).unwrap();
+        assert_eq!(文本, 遗言.as_bytes(), "副本必须逐字节等于当时那份");
+    }
+
+    #[test]
+    fn 读回来的父路径是归一过的() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        std::fs::create_dir_all(vault.meta_dir()).unwrap();
+        // 人写文件时容易多一个尾斜杠、或者用反斜杠；前端拿这些字符串做相等比较，不归一
+        // 就会出现"屏幕上算同一层、写回时算两层"
+        std::fs::write(
+            tree_file(&vault),
+            "[[order]]\nparent = \"notes/\"\nnames = [\"甲.md\"]\n",
+        )
+        .unwrap();
+        assert_eq!(载入(&vault)[0].parent, "notes");
     }
 }

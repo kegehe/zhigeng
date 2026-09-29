@@ -477,6 +477,14 @@ export const MdLink = Mark.create({
 export const LedgerGuard = () =>
   new Plugin({
     appendTransaction: (steps, old, state) => {
+      /**
+       * **只在真的改了文档的事务上跑**。PM 对每一次 apply 都会叫这条守卫，纯光标移动也算一次
+       * ——不挡就会在"只是点了下正文"时改掉用户没碰过的块的账本（文件里相邻两块源切片相同就中招，
+       * `甲\n\n甲` 这种），而那笔补出来的事务是 `docChanged` 的：`onUpdate` 跟着响，这篇就被标成
+       * 未保存，字节却一个没变。真测过（探针：动一下光标 `mdRaw` 从 `"甲\n"` 变成 `""`）。
+       */
+      if (!steps.some((tr) => tr.docChanged)) return undefined;
+
       const 整树替换 = steps.some((tr) =>
         tr.steps.some((s) => {
           const { from, to } = s as unknown as { from?: number; to?: number };

@@ -180,9 +180,21 @@ export function BlockEditor({
       if (ev.button !== 0 || !editor.isEditable) return;
       const 起 = 格在(ev.clientX, ev.clientY);
       if (!起) return;
-      const 锚 = ev.shiftKey ? (选区of(view.state)?.锚 ?? 起) : 起;
+      /**
+       * Shift 点扩选区。**锚点只认同一张表**：`锚` 是表内坐标（行, 列），拿 A 表的第 4 行第 5 列
+       * 去框只有 3 列的 B 表，会框出一片 B 表里根本不存在的格子——工具栏与 `Delete` 照它落盘，
+       * 于是"在 B 表里 Shift 点一下"变成了删 B 表的行。拖动那条路本来就判了 `到.表 !== 起.表`，
+       * Shift 这条路是漏的。
+       */
+      const 上次 = 选区of(view.state);
+      const 锚 = ev.shiftKey && 上次 && 上次.表 === 起.表 ? 上次.锚 : 起;
       if (ev.shiftKey) {
-        view.dispatch(改选区(view.state, 起.表, 归一(锚, 起)));
+        const 矩 = 归一(锚, 起);
+        // 与拖动那条路同一条规矩：**单格不算矩形**，只留锚点。否则跨表 Shift 点
+        // （锚被换成点击格自己）会让那一格凭空多一圈框，而它只是有光标
+        view.dispatch(
+          改选区(view.state, 起.表, 矩.r0 === 矩.r1 && 矩.c0 === 矩.c1 ? null : 矩)
+        );
         ev.preventDefault();
         return;
       }

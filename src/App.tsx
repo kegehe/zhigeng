@@ -105,9 +105,13 @@ export function App() {
    *
    * 用"最后一次拖拽结束的时间戳"而不是布尔标记 + `setTimeout(0)`：真机照过那条时序不稳，
    * 定时器可能在 click 派发之前就跑完了，于是那一下折叠还是漏了进去。
+   *
+   * **只吞被拖的那一行**：按在 A 行、松在 B 行时浏览器把 click 发给两行的共同祖先，
+   * B 行的 onClick 本来就不会跑。整棵树一起吞会吃掉"拖完立刻点开另一篇"的那一下（要点两次）。
    */
-  const 拖刚结束 = useRef(0);
-  const 刚拖过 = () => performance.now() - 拖刚结束.current < 300;
+  const 刚拖过的行 = useRef<{ 键: string; 刻: number }>({ 键: "", 刻: 0 });
+  const 刚拖过 = (键: string) =>
+    键 === 刚拖过的行.current.键 && performance.now() - 刚拖过的行.current.刻 < 300;
   const navRef = useRef<HTMLElement | null>(null);
   const [hits, setHits] = useState<Awaited<ReturnType<typeof api.searchKeyword>>>([]);
   const [error, setError] = useState<string | null>(null);
@@ -372,27 +376,50 @@ export function App() {
    * 验证不了的交互不该上生产。
    */
   const onRowDown = (e: ReactPointerEvent, 被拖: 拖行) => {
-    if (e.button !== 0 || searching) return; // 搜索态是平铺命中，没有层级可拖
+    if (e.button !== 0 || searching || !e.isPrimary) return; // 搜索态是平铺命中，没有层级可拖
+    const 手 = e.pointerId;
     const 起 = { x: e.clientX, y: e.clientY };
     let 动过 = false;
+    const 收 = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", 取消);
+    };
     const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== 手) return;
       if (!动过) {
         if (Math.abs(ev.clientY - 起.y) < 5 && Math.abs(ev.clientX - 起.x) < 5) return;
         动过 = true;
       }
       设拖(落点在此刻(被拖, ev.clientX, ev.clientY));
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+    const up = (ev: PointerEvent) => {
+      if (ev.pointerId !== 手) return;
+      收();
       const 当前 = dragRef.current;
       设拖(null);
       if (!动过) return;
-      拖刚结束.current = performance.now();
-      if (当前?.落) void 落子(被拖, 当前.落);
+      刚拖过的行.current = { 键: 被拖.键, 刻: performance.now() };
+      /**
+       * 走 ref 拿**当下**那份 `落子`。按下到松手之间列表可能已经刷过一轮（索引事件、折叠、
+       * 上一次落子的乐观更新），用按下那一刻的闭包就是拿旧树、旧顺序算整层序列——
+       * 连着拖两次时，第一次刚写下去的序会被第二次用旧快照算出来的那份盖掉。
+       */
+      if (当前?.落) void 落子用.current(被拖, 当前.落);
+    };
+    /**
+     * 触摸与笔会被浏览器抢去滚动（`nav` 是 `overflow-y-auto` 且没写 `touch-action`），
+     * 那种手势只有 `pointercancel`、没有 `pointerup`。不接就等于拖拽粘住：指示线跟着手指跑，
+     * 而下一次按下会再挂一对监听——一次手势落两次子、搬两次文件。编辑器那边同一套判据。
+     */
+    const 取消 = (ev: PointerEvent) => {
+      if (ev.pointerId !== 手) return;
+      收();
+      设拖(null);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", 取消);
   };
 
   /** 落子。跨层那一跳先移动文件再改顺序：顺序里不该出现盘上还没有的路径 */
@@ -404,6 +431,22 @@ export function App() {
     if (!作) return;
     const 层们 = 作.类型 === "移动" ? 作.层 : [作.层];
     if (作.类型 === "移动") {
+      /**
+       * 拖的正是眼前这篇、而且手上还有没落盘的改动：**先存回原路径再搬**。
+       * 自动保存的定时器揣着旧 rel，移动之后它一触发就在原目录又写出一份——磁盘上没这个
+       * 文件时后端是放行的（`save_note_write`：新建的文件没有旧版本可比对），于是一份笔记
+       * 变两份、内容还不一样。顺带把待触发的定时器撤掉，别让它在 await 期间抢一次。
+       */
+      if (selected?.rel === 被拖.自身) {
+        if (dirty && !(await persist())) {
+          setFlash("这篇还没存下来——先处理冲突提示");
+          return;
+        }
+        if (saveTimer.current !== null) {
+          window.clearTimeout(saveTimer.current);
+          saveTimer.current = null;
+        }
+      }
       try {
         await api.noteMove(被拖.自身, 作.新路径);
       } catch (err) {
@@ -412,9 +455,8 @@ export function App() {
       }
       revealPath(作.新路径); // 拖进折叠着的目录，就得让它当场露出来
       /**
-       * 拖的正是眼前开着的这篇：编辑器还指着**旧路径**，用户接着打一个字就会把文件
-       * 在原目录重新写出来——一份笔记变两份，且两份内容还不一样。侧栏「归档」那个
-       * 按钮走的是 `afterChange(新路径)`，拖拽必须同一处理。
+       * 编辑器仍指着**旧路径**，得跟着搬过去：侧栏「归档」那个按钮走的就是
+       * `afterChange(新路径)`，拖拽要同一处理，不然接着打的字还是往旧 rel 上写。
        */
       if (selected?.rel === 被拖.自身) await afterChange(作.新路径);
     }
@@ -431,6 +473,11 @@ export function App() {
         .catch(() => setOrder([]));
     }
   };
+  /** 每渲染同步一次，让 `up` 拿到的是读着最新 tree / order / selected / dirty 的那一份 */
+  const 落子用 = useRef(落子);
+  useEffect(() => {
+    落子用.current = 落子;
+  });
 
   /**
    * 把当前草稿写盘。自动保存、Ctrl+S、失焦、切笔记前都走这一个入口。
@@ -442,7 +489,19 @@ export function App() {
     if (mode === "view") return true;
     // 行内模式现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）
     const md = mode === "inline" && editApi.current ? editApi.current() : draft;
-    if (!selected || md === savedDraft) return true;
+    if (!selected) return true;
+    if (md === savedDraft) {
+      /**
+       * 要写的字节与盘上那份一模一样 = **没有东西要存**，把状态归零。不归零就出不来：
+       * `dirty` 判的是 `inlineRev > 0 || draft !== savedDraft`，走到这条分支说明只剩
+       * `inlineRev` 在响，而它清不掉。真测过两例——文末的代码块按 `↓` 会补一个**不落盘**的
+       * 空段落、纯光标移动会被账本守卫改一下邻居块的属性，两例字节都没变。
+       * 卡住的不只是角标：`unsaved` 还挡着外部改动重载（Obsidian / 同步盘改这篇永远看不见）。
+       */
+      setInlineRev(0);
+      setSaveState("clean");
+      return true;
+    }
     setSaveState("saving");
     try {
       const h = await api.saveNote(selected.rel, md, force ? undefined : baseHash);
@@ -981,7 +1040,7 @@ export function App() {
                         <button
                           key={信.键}
                           onClick={() => {
-                            if (刚拖过()) return;
+                            if (刚拖过(信.键)) return;
                             toggleDir(b.path);
                           }}
                           onPointerDown={(e) => onRowDown(e, 信)}
@@ -1013,7 +1072,7 @@ export function App() {
                       <button
                         key={信.键}
                         onClick={() => {
-                          if (刚拖过()) return;
+                          if (刚拖过(信.键)) return;
                           void openNote(b.rel, b.title);
                         }}
                         onPointerDown={(e) => onRowDown(e, 信)}
