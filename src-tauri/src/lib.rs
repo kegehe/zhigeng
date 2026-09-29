@@ -316,6 +316,26 @@ fn list_notes(state: State<'_, Shared>, limit: Option<usize>) -> Result<NoteList
     })
 }
 
+/// 侧栏自定义顺序。读命令，但走的是文件而不是索引，所以库里没索引也照样返回空表。
+#[tauri::command]
+fn tree_order(state: State<'_, Shared>) -> Result<Vec<note_core::tree_order::TreeOrder>, String> {
+    with_hub(&state, |h| h.tree_order())
+}
+
+/// 一次可以交下好几层（把一篇拖进别的目录，源层与目标层都变了）。
+///
+/// 走 `with_hub_write` 那把主锁**不是为了碰 SQLite**（它一个字节都不写库），是为了
+/// 串行化"读—改—写"：命令跑在线程池上，两次快速连拖若并发，后写的会把前一次那层
+/// 覆盖回它自己读到的旧状态。锁的持有时长就是一个小文件的 fsync（实测同类写 2–6ms），
+/// 远在 G6 的 8ms 之内。
+#[tauri::command]
+fn tree_order_save(
+    state: State<'_, Shared>,
+    orders: Vec<note_core::tree_order::TreeOrder>,
+) -> Result<(), String> {
+    with_hub_write(&state, |h| h.save_tree_order(&orders)).map_err(|e| e.message)
+}
+
 #[tauri::command]
 fn read_note(state: State<'_, Shared>, rel: String) -> Result<NoteDetail, String> {
     with_hub(&state, |h| h.read_note(&rel))
@@ -567,6 +587,8 @@ pub fn run() {
             capture_text,
             hide_capture,
             list_notes,
+            tree_order,
+            tree_order_save,
             read_note,
             read_raw,
             note_edit_doc,

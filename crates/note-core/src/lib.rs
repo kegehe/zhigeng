@@ -11,6 +11,7 @@ pub mod meta;
 pub mod schema;
 pub mod service;
 pub mod snapshot;
+pub mod tree_order;
 pub mod vault;
 pub mod watch;
 

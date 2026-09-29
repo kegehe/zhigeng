@@ -8,6 +8,7 @@ import type {
   ListNotes,
   LinkPanel,
   NoteSource,
+  SiblingOrder,
   SnapshotRow,
   TrashRow,
 } from "./types";
@@ -57,6 +58,12 @@ export const api = {
   noteRename: (rel: string, newStem: string) =>
     invoke<string>("note_rename", { rel, newStem }),
   noteMove: (rel: string, newRel: string) => invoke<void>("note_move", { rel, newRel }),
+  /**
+   * 侧栏自定义顺序。读的是 `.note/tree.toml` 而不是索引，所以库里一篇没有也返回空表。
+   * 保存交的是**整层的全序列**（一次拖拽最多涉及两层），不碰 SQLite、不触发重索引。
+   */
+  treeOrder: () => invoke<SiblingOrder[]>("tree_order"),
+  treeOrderSave: (orders: SiblingOrder[]) => invoke<void>("tree_order_save", { orders }),
   noteTrash: (rel: string) => invoke<void>("note_trash", { rel }),
   listTrash: () => invoke<TrashRow[]>("list_trash"),
   noteRestore: (batch: string, rel: string) =>

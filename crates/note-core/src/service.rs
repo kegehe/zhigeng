@@ -516,6 +516,19 @@ impl Hub {
         })
     }
 
+    /// 侧栏目录树的自定义顺序（`<Vault>/.note/tree.toml`）。
+    ///
+    /// 两个方向都不碰 SQLite：顺序既不是笔记内容，也不是可再生索引，而是第三类
+    /// （[02] §`.note/` 两分层里的不可丢层）。所以读它不需要索引在，写它不会让任何
+    /// 一篇重解析——一次拖拽只落一个小文件，这是它能压在 G6 的 8ms 里的原因。
+    pub fn tree_order(&self) -> Result<Vec<crate::tree_order::TreeOrder>> {
+        crate::tree_order::load(&self.vault)
+    }
+
+    pub fn save_tree_order(&self, orders: &[crate::tree_order::TreeOrder]) -> Result<()> {
+        crate::tree_order::save(&self.vault, orders)
+    }
+
     pub fn read_note(&self, rel: &str) -> Result<NoteDetail> {
         let (title, blocks) = self.index.note_blocks(rel)?;
         Ok(NoteDetail {

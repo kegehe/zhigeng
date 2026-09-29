@@ -5,13 +5,24 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri } from "./ipc/commands";
-import { buildTree, dirsOf, flatten } from "./ui/tree";
+import {
+  buildTree,
+  dirsOf,
+  flatten,
+  parentOf,
+  层名,
+  层内名字,
+  合并层,
+  type Branch,
+} from "./ui/tree";
+import { 判落点, 算动作, type 行 as 拖行, type 落点 } from "./ui/dragdrop";
 import { LinkPanelView } from "./ui/Links";
 import { CommandPalette } from "./ui/CommandPalette";
 import type { PaletteItem } from "./ui/palette";
@@ -22,6 +33,7 @@ import type {
   ImportReport,
   LinkPanel,
   ListNotes,
+  SiblingOrder,
   SnapshotRow,
   TrashRow,
 } from "./ipc/types";
@@ -80,6 +92,23 @@ export function App() {
   const [query, setQuery] = useState("");
   /** 侧栏目录树折叠了哪些目录。记路径不记显示名（显示名会随顶层标签变） */
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  /** 侧栏自定义顺序（`.note/tree.toml`）。空表 = 谁都没拖过，一切按默认规则 */
+  const [order, setOrder] = useState<SiblingOrder[]>([]);
+  /**
+   * 正在拖的行、当前落点、指示线位置。`线顶` 用的是 nav 的**内容坐标**——
+   * 线要跟着滚动内容走，拿视口坐标画会在滚动时飘掉。
+   */
+  const [drag, setDrag] = useState<{ 被拖: 拖行; 落: 落点; 线顶: number | null } | null>(null);
+  const dragRef = useRef<{ 被拖: 拖行; 落: 落点; 线顶: number | null } | null>(null);
+  /**
+   * 拖完那一下浏览器还会补一个 click，不拦就会顺手折叠目录 / 打开笔记。
+   *
+   * 用"最后一次拖拽结束的时间戳"而不是布尔标记 + `setTimeout(0)`：真机照过那条时序不稳，
+   * 定时器可能在 click 派发之前就跑完了，于是那一下折叠还是漏了进去。
+   */
+  const 拖刚结束 = useRef(0);
+  const 刚拖过 = () => performance.now() - 拖刚结束.current < 300;
+  const navRef = useRef<HTMLElement | null>(null);
   const [hits, setHits] = useState<Awaited<ReturnType<typeof api.searchKeyword>>>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -148,6 +177,21 @@ export function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  /**
+   * 自定义顺序**跟着库读一次**，不跟着 refresh 走。
+   *
+   * refresh 由 `note://indexed` 驱动（每存一篇都来一趟），而刚乐观更新的新序可能还没
+   * 落进 tree.toml——跟着刷就会把界面打回旧序，用户看到的是"拖完自己又弹回去"。
+   */
+  useEffect(() => {
+    const 库 = info?.vaultPath;
+    if (!库 || !inTauri()) return;
+    void api
+      .treeOrder()
+      .then(setOrder)
+      .catch(() => setOrder([]));
+  }, [info?.vaultPath]);
 
   /**
    * 反链面板的读命令。**不挡正文**：单独一趟，晚一点到就晚一点到。
@@ -253,7 +297,7 @@ export function App() {
    * 目录树。搜索态**仍然是平铺命中**——命中带的是相关度，按目录分组会把"最像的那篇"
    * 埋进某个折叠目录里，那是把搜索变差。
    */
-  const tree = useMemo(() => buildTree(list), [list]);
+  const tree = useMemo(() => buildTree(list, order), [list, order]);
   const sidebarRows = useMemo(() => flatten(tree, collapsed), [tree, collapsed]);
   const toggleDir = (path: string) =>
     setCollapsed((c) => {
@@ -271,6 +315,116 @@ export function App() {
       for (const p of chain) next.delete(p);
       return next;
     });
+
+  /**
+   * 一行 → 拖拽眼里的样子。数据全挂在 `data-*` 上、判落点时从 DOM 现读，
+   * 因为"指针现在在哪一行"这件事只有渲染出来的东西说得准，再养一份状态就是第二真相。
+   */
+  const 行信息 = (b: Branch): 拖行 => {
+    const 自身 = b.kind === "dir" ? b.path : b.rel;
+    return {
+      键: (b.kind === "dir" ? "d:" : "n:") + 自身,
+      父: parentOf(自身),
+      名: 层名(b),
+      是目录: b.kind === "dir",
+      自身,
+    };
+  };
+  const 行of = (el: Element | null | undefined): 拖行 | null => {
+    if (!(el instanceof HTMLElement)) return null;
+    const 键 = el.dataset.treeKey;
+    if (键 === undefined) return null;
+    return {
+      键,
+      父: el.dataset.treeParent ?? "",
+      名: el.dataset.treeName ?? "",
+      是目录: el.dataset.treeDir === "1",
+      自身: el.dataset.treeSelf ?? "",
+    };
+  };
+
+  /** 此刻指针下的落点。判据本体在 `ui/dragdrop.ts`（那里测得到，这里只负责量像素） */
+  const 落点在此刻 = (被拖: 拖行, x: number, y: number) => {
+    const nav = navRef.current;
+    const el = document.elementFromPoint(x, y)?.closest("[data-tree-key]");
+    const 命中 = 行of(el);
+    if (!nav || !el || !命中) return { 被拖, 落: null as 落点, 线顶: null };
+    const r = el.getBoundingClientRect();
+    const 落 = 判落点(被拖, 命中, 行of(el.nextElementSibling), y - r.top, r.height);
+    const 原点 = nav.getBoundingClientRect().top - nav.scrollTop;
+    const 线顶 =
+      !落 || 落.kind === "into"
+        ? null
+        : (落.前 === 命中.名 ? r.top : r.bottom) - 原点;
+    return { 被拖, 落, 线顶 };
+  };
+
+  const 设拖 = (v: { 被拖: 拖行; 落: 落点; 线顶: number | null } | null) => {
+    dragRef.current = v;
+    setDrag(v);
+  };
+
+  /**
+   * 树行按下：挪动超过 5px 算拖拽，否则算点击打开。
+   *
+   * 与编辑器手柄同一套判据，也同一个理由——**用 pointer 事件而不是 HTML5 拖放**：
+   * `dragstart` 那一套在真机验证里根本触发不了（CDP 只能发普通鼠标事件），
+   * 验证不了的交互不该上生产。
+   */
+  const onRowDown = (e: ReactPointerEvent, 被拖: 拖行) => {
+    if (e.button !== 0 || searching) return; // 搜索态是平铺命中，没有层级可拖
+    const 起 = { x: e.clientX, y: e.clientY };
+    let 动过 = false;
+    const move = (ev: PointerEvent) => {
+      if (!动过) {
+        if (Math.abs(ev.clientY - 起.y) < 5 && Math.abs(ev.clientX - 起.x) < 5) return;
+        动过 = true;
+      }
+      设拖(落点在此刻(被拖, ev.clientX, ev.clientY));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const 当前 = dragRef.current;
+      设拖(null);
+      if (!动过) return;
+      拖刚结束.current = performance.now();
+      if (当前?.落) void 落子(被拖, 当前.落);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  /** 落子。跨层那一跳先移动文件再改顺序：顺序里不该出现盘上还没有的路径 */
+  const 落子 = async (被拖: 拖行, 落: 落点) => {
+    const 作 = 算动作(被拖, 落, (父) => ({
+      序列: 层内名字(tree, 父),
+      存过: order.some((条) => 条.parent === 父),
+    }));
+    if (!作) return;
+    const 层们 = 作.类型 === "移动" ? 作.层 : [作.层];
+    if (作.类型 === "移动") {
+      try {
+        await api.noteMove(被拖.自身, 作.新路径);
+      } catch (err) {
+        setError(describeError(err).message);
+        return;
+      }
+      revealPath(作.新路径); // 拖进折叠着的目录，就得让它当场露出来
+    }
+    // 先按新序重画再写盘：G7 要"任何动作 100ms 内有反馈"，而落盘是另一趟往返
+    setOrder((旧) => 合并层(旧, 层们));
+    try {
+      await api.treeOrderSave(层们);
+    } catch (err) {
+      setError(describeError(err).message);
+      // 没写进去就别让界面停在盘上没有的那个顺序上：从盘上读回来
+      void api
+        .treeOrder()
+        .then(setOrder)
+        .catch(() => setOrder([]));
+    }
+  };
 
   /**
    * 把当前草稿写盘。自动保存、Ctrl+S、失焦、切笔记前都走这一个入口。
@@ -774,7 +928,12 @@ export function App() {
                 />
               </div>
             ) : null}
-            <nav className="min-h-0 flex-1 overflow-y-auto pb-4">
+            <nav ref={navRef} className="relative min-h-0 flex-1 overflow-y-auto pb-4">
+              {/* 落位线。必须 pointer-events:none，否则它会吃掉 elementFromPoint，
+                  指针一压到线上就量不到真正的行 */}
+              {drag?.线顶 != null ? (
+                <div className="tree-drop" style={{ top: drag.线顶 }} aria-hidden="true" />
+              ) : null}
               {(searching ? rows : sidebarRows).length === 0 ? (
                 <div className="px-4 py-6 text-center text-sm text-fg-disabled">
                   {searching ? "没有匹配的笔记" : notes ? "这个 Vault 还没有笔记" : "加载中"}
@@ -809,13 +968,28 @@ export function App() {
                     const pad = { paddingInlineStart: `calc(0.75rem + ${b.depth} * var(--space-4))` };
                     if (b.kind === "dir") {
                       const folded = collapsed.has(b.path);
+                      const 信 = 行信息(b);
+                      const 落 = drag?.落;
+                      const 移入 = !!落 && 落.kind === "into" && 落.目录 === b.path;
                       return (
                         <button
-                          key={"d:" + b.path}
-                          onClick={() => toggleDir(b.path)}
+                          key={信.键}
+                          onClick={() => {
+                            if (刚拖过()) return;
+                            toggleDir(b.path);
+                          }}
+                          onPointerDown={(e) => onRowDown(e, 信)}
+                          data-tree-key={信.键}
+                          data-tree-parent={信.父}
+                          data-tree-name={信.名}
+                          data-tree-dir="1"
+                          data-tree-self={信.自身}
                           aria-expanded={!folded}
                           style={pad}
-                          className="flex w-full items-baseline gap-1.5 px-3 py-1.5 text-left text-sm text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover"
+                          className={
+                            "flex w-full cursor-grab items-baseline gap-1.5 px-3 py-1.5 text-left text-sm text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover" +
+                            (移入 ? " tree-into" : "")
+                          }
                         >
                           <span className="w-3 shrink-0 font-mono text-xs text-fg-disabled">
                             {folded ? "▸" : "▾"}
@@ -828,13 +1002,23 @@ export function App() {
                       );
                     }
                     const active = selected?.rel === b.rel;
+                    const 信 = 行信息(b);
                     return (
                       <button
-                        key={"n:" + b.rel}
-                        onClick={() => void openNote(b.rel, b.title)}
+                        key={信.键}
+                        onClick={() => {
+                          if (刚拖过()) return;
+                          void openNote(b.rel, b.title);
+                        }}
+                        onPointerDown={(e) => onRowDown(e, 信)}
+                        data-tree-key={信.键}
+                        data-tree-parent={信.父}
+                        data-tree-name={信.名}
+                        data-tree-dir="0"
+                        data-tree-self={信.自身}
                         style={pad}
                         className={
-                          "flex w-full items-baseline gap-1.5 px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) " +
+                          "flex w-full cursor-grab items-baseline gap-1.5 px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) " +
                           (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
                         }
                       >

@@ -1,3 +1,9 @@
+/**
+ * 侧栏某一层的自定义顺序。盘上是 `<Vault>/.note/tree.toml`，
+ * 属 [02] §`.note/` 两分层里的不可丢层——重建索引不会把它冲掉。
+ */
+export type SiblingOrder = { parent: string; names: string[] };
+
 export type ListNotes = {
   notes: {
     rel: string;

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildTree, flatten, dirsOf, type Branch, type DirBranch } from "./tree";
+import {
+  buildTree,
+  flatten,
+  dirsOf,
+  层内名字,
+  合并层,
+  type Branch,
+  type DirBranch,
+} from "./tree";
 
 /** 侧栏目录树是纯函数：给 rel 序列，出来的次序 / 深度 / 折叠行为都得钉住 */
 const 篇 = (rel: string, updatedMs: number, title = "") => ({ rel, title, updatedMs });
@@ -114,8 +122,86 @@ describe("折叠与展平", () => {
   });
 });
 
-describe("dirsOf", () => {
-  it("某篇所在的整条目录链（用于把它的路径展开出来）", () => {
+describe("自定义顺序（.note/tree.toml 那一套）", () => {
+  const 行们 = () => [
+    篇("notes/甲.md", 10),
+    篇("notes/乙.md", 20),
+    篇("notes/丙.md", 30),
+    篇("notes/工作/一.md", 40),
+    篇("inbox/丁.md", 50),
+  ];
+
+  it("不传顺序时与默认规则一模一样（回归的底线）", () => {
+    expect(形状(buildTree(行们()))).toEqual([
+      "笔记(4)",
+      "  工作(1)",
+      "    一@40",
+      "  丙@30",
+      "  乙@20",
+      "  甲@10",
+      "收件箱(1)",
+      "  丁@50",
+    ]);
+  });
+
+  it("排过的按排的顺序，没排过的跟在后面", () => {
+    const 树 = buildTree(行们(), [{ parent: "notes", names: ["甲.md", "丙.md"] }]);
+    expect(层内名字(树, "notes")).toEqual(["甲.md", "丙.md", "工作", "乙.md"]);
+  });
+
+  it("排过的笔记可以越过没排过的目录——用户拖了就该压过默认那条界", () => {
+    const 树 = buildTree(行们(), [{ parent: "notes", names: ["甲.md"] }]);
+    expect(形状(树).slice(1, 5)).toEqual(["  甲@10", "  工作(1)", "    一@40", "  丙@30"]);
+  });
+
+  it("顶层拖过之后 pinned 三条退成默认序而不是铁序", () => {
+    const 树 = buildTree(行们(), [{ parent: "", names: ["inbox", "notes"] }]);
+    expect(树.map(标签)).toEqual(["收件箱(1)", "笔记(4)"]);
+  });
+
+  it("库里没有的名字留在文件里也不占位（改名拖剩的旧条目）", () => {
+    const 树 = buildTree(行们(), [
+      { parent: "notes", names: ["已删.md", "丙.md", "甲.md"] },
+    ]);
+    expect(层内名字(树, "notes")).toEqual(["丙.md", "甲.md", "工作", "乙.md"]);
+  });
+
+  it("反斜杠的 parent 与正斜杠认成同一层", () => {
+    const 树 = buildTree([篇("notes/工作/一.md", 1), 篇("notes/工作/二.md", 2)], [
+      { parent: "notes\\工作", names: ["二.md", "一.md"] },
+    ]);
+    expect(形状(树)).toEqual(["笔记(2)", "  工作(2)", "    二@2", "    一@1"]);
+  });
+
+  it("层内名字取不到那一层时给空数组，不炸", () => {
+    const 树 = buildTree(行们());
+    expect(层内名字(树, "不存在")).toEqual([]);
+    expect(层内名字(树, "")).toEqual(["notes", "inbox"]);
+  });
+
+  it("同一层手改存重了，以第一条为准（与 Rust 侧合并重复的规矩一致）", () => {
+    const 树 = buildTree(行们(), [
+      { parent: "notes", names: ["丙.md"] },
+      { parent: "notes", names: ["甲.md"] },
+    ]);
+    expect(层内名字(树, "notes")).toEqual(["丙.md", "工作", "乙.md", "甲.md"]);
+  });
+
+  it("合并层按父路径整条替换，空序列把那条删掉（与 Rust 侧同一条语义）", () => {
+    const 现状 = [
+      { parent: "notes", names: ["甲.md"] },
+      { parent: "inbox", names: ["丁.md"] },
+    ];
+    expect(
+      合并层(现状, [
+        { parent: "notes", names: ["乙.md", "甲.md"] },
+        { parent: "inbox", names: [] },
+      ])
+    ).toEqual([{ parent: "notes", names: ["乙.md", "甲.md"] }]);
+  });
+});
+
+describe("dirsOf", () => {  it("某篇所在的整条目录链（用于把它的路径展开出来）", () => {
     expect(dirsOf("notes/ai-native/子层/深一层.md")).toEqual([
       "notes",
       "notes/ai-native",
