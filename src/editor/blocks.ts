@@ -1,5 +1,10 @@
 import type { JSONContent } from "@tiptap/core";
-import { Fragment, Node as PmNodeModel, type Node as PmNode } from "@tiptap/pm/model";
+import {
+  Fragment,
+  Node as PmNodeModel,
+  type Node as PmNode,
+  type Schema,
+} from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
@@ -500,17 +505,34 @@ function 新块账本(gap: string) {
   };
 }
 
-function sourceBlock(state: EditorState, kind: string, source: string, gap: string): PmNode {
+/**
+ * 表格与空段落下面那个"落脚点"。
+ *
+ * 为什么必须有：以表格结尾的文档没有地方放光标——格子里装不下换行（GFM 的换行就是行结束），
+ * `Tab` / `Enter` 在末格只会一路加行，于是"表格下面写点东西"这件事**没有任何出路**
+ * （2026-09-29 用户报的，真机与 jsdom 双层复现过）。空段落在 `docToMarkdown` 里
+ * 不落任何字节（"重新产出后是空白的块不落任何字节"那条），所以加它**不改文件一个字**。
+ */
+function 落脚点(schema: Schema): PmNode | null {
+  const 段型 = schema.nodes.mdParagraph;
+  return 段型 ? 段型.create(新块账本("\n")) : null;
+}
+
+function sourceBlock(state: EditorState, kind: string, source: string, gap: string): PmNode[] {
   const 账本 = { ...新块账本(gap), mdKind: kind };
   // 工具栏插入的表格骨架直接建成网格：插完就能在格子里打字，
   // 而不是先看到三行 `|` 再被要求"点出去才变回表格"
   if (kind === "table" && state.schema.nodes.mdTable) {
     const t = parseTable(source + "\n");
-    if (t) return PmNodeModel.fromJSON(state.schema, tableJson(t, 账本) as never);
+    if (t) {
+      const 表 = PmNodeModel.fromJSON(state.schema, tableJson(t, 账本) as never);
+      const 尾 = 落脚点(state.schema);
+      return 尾 ? [表, 尾] : [表];
+    }
   }
   const opaque = state.schema.nodes.mdOpaque;
   if (!opaque) throw new Error("schema 里没有 mdOpaque 节点");
-  return opaque.create(账本, state.schema.text(source));
+  return [opaque.create(账本, state.schema.text(source))];
 }
 
 /**
@@ -532,7 +554,9 @@ export function pasteGrid(state: EditorState, text: string): Transaction | null 
   if (!结构) return null;
   const 账本 = { ...新块账本(String(块.attrs.mdGap ?? "\n")), mdKind: "table" };
   const 节点 = PmNodeModel.fromJSON(state.schema, tableJson(结构, 账本) as never);
-  const tr = state.tr.replaceWith(起点, 起点 + 块.nodeSize, 节点);
+  // 与插入同一条规矩：表格后面留一个落脚点（空段落不落盘），否则粘在文末就出不去
+  const 尾 = 落脚点(state.schema);
+  const tr = state.tr.replaceWith(起点, 起点 + 块.nodeSize, 尾 ? [节点, 尾] : [节点]);
   // 粘完直接把光标放进第一格：用户的下一件事是打字，不是再点一下
   const 首 = 第n格(节点, 起点, 0);
   return 首 === null ? tr : tr.setSelection(TextSelection.near(tr.doc.resolve(首 + 1)));
@@ -855,9 +879,69 @@ export function moveCell(state: EditorState, delta: 1 | -1): Transaction | null 
   return 走到格(state, n);
 }
 
+/** 末行整行是空的（表头行不算"空行"，它是 GFM 的必需行） */
+function 末行全空(表: PmNode): boolean {
+  const 末 = 表.lastChild;
+  return !!末 && 末.children.every((c) => !c.textContent.trim());
+}
+
+/**
+ * 把光标送出表格下方。`tr` 是已经改过这张表的事务（也可以是新开的）。
+ *
+ * 下面已经有块就落进那块；没有就现补一个空段落——**补出来的段落不落盘**，
+ * 所以"在文末的表格里按一下 ↓"不会碰用户文件的任何一个字节。
+ */
+function 送出表下(tr: Transaction, 表起点: number): Transaction | null {
+  const 表 = tr.doc.nodeAt(表起点);
+  const 段型 = tr.doc.type.schema.nodes.mdParagraph;
+  if (!表 || !段型) return null;
+  const 后 = 表起点 + 表.nodeSize;
+  if (!tr.doc.nodeAt(后)) {
+    const 尾 = 落脚点(tr.doc.type.schema);
+    if (!尾) return null;
+    tr.insert(后, 尾);
+  }
+  return tr.setSelection(TextSelection.near(tr.doc.resolve(后 + 1))).scrollIntoView();
+}
+
+/** 光标从格子里直接到表格下方（工具栏与键都走这一条，别各写一份落点） */
+export function exitTableBelow(state: EditorState): Transaction | null {
+  const 位 = cellAt(state);
+  return 位 ? 送出表下(state.tr, 位.表) : null;
+}
+
+/**
+ * 最后一行按 `↓`：离开表格。别的行交回 PM——那里 ↓ 该在格子内移动，不该跳出去。
+ */
+export function exitTableDown(state: EditorState): Transaction | null {
+  const 位 = cellAt(state);
+  if (!位 || 位.行 !== 位.行数 - 1) return null;
+  return 送出表下(state.tr, 位.表);
+}
+
+/**
+ * 格子里按 `Enter`。
+ *
+ * 三条分支，前两条是原样（Notion 的肌肉记忆，文档与测试都钉着）：非末行 → 下一行同一列；
+ * 末行且那一行有内容 → 加一行。**末行整行是空的 → 删掉那个空行并送出表格**——
+ * 这是"再按一次就出去"，也是表格在文档末尾时唯一的自然出口。空行没有内容，删掉不丢数据；
+ * 只剩表头时不删（GFM 的表必须有表头行），只把人送出去。
+ */
 export function enterCell(state: EditorState): Transaction | null {
   const 位 = cellAt(state);
   if (!位) return null;
+  const 表 = state.doc.nodeAt(位.表);
+  if (表 && 位.行 === 位.行数 - 1 && 末行全空(表)) {
+    const tr = state.tr;
+    if (位.行数 > 1) {
+      let 删 = -1;
+      表.forEach((行, o, i) => {
+        if (i === 位.行) 删 = 位.表 + 1 + o;
+      });
+      if (删 >= 0) tr.delete(删, 删 + 表.child(位.行)!.nodeSize);
+    }
+    return 送出表下(tr, 位.表);
+  }
   return 走到格(state, (位.行 + 1) * 位.列数 + 位.列);
 }
 

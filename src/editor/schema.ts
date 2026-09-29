@@ -6,6 +6,7 @@ import { history, redo, undo } from "@tiptap/pm/history";
 import {
   applyBlockType,
   enterCell,
+  exitTableDown,
   moveCell,
   moveCurrentBlock,
   numberedMarker,
@@ -808,10 +809,12 @@ export const BlockTools = Extension.create({
 });
 
 /**
- * 表格里的键。`Tab` / `Shift+Tab` 走格，`Enter` 到下一行同一列（末行则加一行）。
+ * 表格里的键。`Tab` / `Shift+Tab` 走格，`Enter` 到下一行同一列（末行则加一行），
+ * `ArrowDown` 在最后一行把人送出表格。
  *
- * 这三条必须**在键位层面**接管：`Tab` 默认会跳出编辑器（焦点跑到工具栏上），
- * `Enter` 默认会拆块——拆出来的两半表格 `serializeNode` 根本不认。
+ * 这四条必须**在键位层面**接管：`Tab` 默认会跳出编辑器（焦点跑到工具栏上），
+ * `Enter` 默认会拆块——拆出来的两半表格 `serializeNode` 根本不认；而 `ArrowDown` 不接的话，
+ * 表格是文档最后一块时用户**没有任何出路**（2026-09-29 用户报的死局，见 `enterCell` 那条）。
  */
 export const TableKeys = Extension.create({
   name: "tableKeys",
@@ -828,6 +831,7 @@ export const TableKeys = Extension.create({
       Tab: 走((s) => moveCell(s, 1)),
       "Shift-Tab": 走((s) => moveCell(s, -1)),
       Enter: 走(enterCell),
+      ArrowDown: 走(exitTableDown),
     };
   },
 });

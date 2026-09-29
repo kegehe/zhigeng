@@ -11,6 +11,7 @@ import {
   cellAt,
   docToMarkdown,
   enterCell,
+  exitTableDown,
   insertSourceBlock,
   判粘贴,
   INSERTABLE,
@@ -1407,6 +1408,102 @@ describe("表格网格化的字节判据", () => {
     if (空判.做 === "摊平" && 空判.文) editor.view.dispatch(editor.state.tr.insertText(空判.文));
     expect(editor.state.doc).toBe(落字后);
     editor.destroy();
+  });
+
+  it("表格是文档最后一块时：↓ 现补一个落脚点，而文件逐字节不变", () => {
+    // 用户报的死局：格子里装不下换行、Tab/Enter 只会一路加行，表格在文末就出不去。
+    // 出口补的是空段落——`docToMarkdown` 不写空白的块，所以这一条判据是"字节一个字不许变"
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 3); // 末行末格（那一行有内容，不与"空行退出"混在一起）
+    const tr = exitTableDown(editor.state);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const $后 = editor.state.selection.$from;
+    expect($后.depth).toBe(1);
+    expect($后.parent.type.name).toBe("mdParagraph");
+    expect([...editor.state.doc.children].map((n) => n.type.name)).toEqual([
+      "mdParagraph",
+      "mdTable",
+      "mdParagraph",
+    ]);
+    expect(docToMarkdown(editor.state.doc, d)).toBe("前一段\n\n" + 规范表);
+    editor.destroy();
+  });
+
+  it("非末行按 ↓ 不归我们（交回 PM，格子内该能移动）", () => {
+    const d = 表doc(规范表);
+    const editor = createTestEditor(d);
+    进格(editor, 0); // 表头行
+    expect(exitTableDown(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
+  it("末行整行是空的：Enter 删掉那个空行并把人送出去", () => {
+    const 源 = "| A | B |\n| --- | --- |\n| 1 | 2 |\n|  |  |\n";
+    const d = 表doc(源);
+    const editor = createTestEditor(d);
+    进格(editor, 4); // 空末行的第一格（3 行 × 2 列 → 索引 0..5）
+    const tr = enterCell(editor.state);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(editor.state.selection.$from.depth).toBe(1);
+    // 空行没了：产出回到两行的表，重新解析仍认它
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+    expect(parseTable(出.slice(出.indexOf("| A")))!.rows.length).toBe(2);
+    editor.destroy();
+  });
+
+  it("整张表只剩一行（连表头都是空的）时 Enter 只送人出去，不删表头", () => {
+    // GFM 的表必须有表头行：这一行删掉产出的就不是表了，所以"空行退出"在这里只出不删
+    const d = 表doc("|  |  |\n| --- | --- |\n");
+    const editor = createTestEditor(d);
+    进格(editor, 1);
+    const tr = enterCell(editor.state);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(editor.state.selection.$from.depth).toBe(1);
+    expect(docToMarkdown(editor.state.doc, d)).toBe("前一段\n\n|  |  |\n| --- | --- |\n");
+    editor.destroy();
+  });
+
+  it("插入与粘贴表格都自带落脚点，且都不多出字节", () => {
+    const 骨架 = "| 列 | 列 |\n| --- | --- |\n|  |  |";
+    const 一份: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("前一段\n", "", "前一段")],
+    };
+    const editor = createTestEditor(一份);
+    进块(editor, 0);
+    const tr = insertSourceBlock(editor.state, "table", 骨架);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect([...editor.state.doc.children].map((n) => n.type.name)).toEqual([
+      "mdParagraph",
+      "mdTable",
+      "mdParagraph",
+    ]);
+    // 落脚点不落盘：产出正好是"前一段 + 一张表"，末尾不多一个空行
+    expect(docToMarkdown(editor.state.doc, 一份)).toBe("前一段\n\n" + 骨架 + "\n");
+    editor.destroy();
+
+    const 二份: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("前一段\n", "", "前一段"), 段("\n", "\n", "")],
+    };
+    const 二 = createTestEditor(二份);
+    进块(二, 1);
+    二.view.dispatch(pasteGrid(二.state, "| A | B |\n| --- | --- |\n| 1 | 2 |\n")!);
+    expect([...二.state.doc.children].map((n) => n.type.name)).toEqual([
+      "mdParagraph",
+      "mdTable",
+      "mdParagraph",
+    ]);
+    expect(docToMarkdown(二.state.doc, 二份)).toBe("前一段\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+    二.destroy();
   });
 
   it("两张相邻且源文本相同的表：改第一张不许重写第二张", () => {
