@@ -260,6 +260,8 @@ fn show_capture(app: &AppHandle) -> tauri::Result<()> {
         .title("速记")
         .inner_size(620.0, 172.0)
         .decorations(false)
+        // 无边框窗口只有保留系统边框区，Win11 才会画圆角与投影（与主窗口同档）
+        .shadow(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
