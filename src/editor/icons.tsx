@@ -61,6 +61,8 @@ function 画(横竖: ReactNode, 记号: "加" | "减") {
     return (
       <svg
         viewBox="0 0 24 24"
+        width={24}
+        height={24}
         fill="none"
         stroke="currentColor"
         strokeWidth={2}

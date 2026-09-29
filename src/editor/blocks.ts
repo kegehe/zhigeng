@@ -610,6 +610,29 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
   // 源文本末尾没有换行时不能凭空补一个（md-kernel 的 `render_block` 同一条规矩）
   const last = head.blocks[head.blocks.length - 1];
   const srcEndsNewline = head.trailingGap.endsWith("\n") || Boolean(last?.raw.endsWith("\n"));
+  /**
+   * **最后"会写出字节"的那一块**——不是"最后一个 child"。
+   *
+   * 两者会不一样，因为有的块一个字节都不写：回车拆出来的空块、表格后面那个落脚点。
+   * 拿"最后一个 child"判结尾换行，就会让落脚点把文件的结尾习惯改掉（表格不再是最后一个
+   * child → 被补一个 `\n`），而"从结尾削掉一个 `\n`"那种补法又会伤到未改动的块——它的
+   * `raw` 本来就带着自己的换行（2026-09-29 复查实测：删掉末块后 `a\n` 被写成 `a`）。
+   */
+  const 会写字节 = (n: PmNode): boolean => {
+    const a = n.attrs as Record<string, unknown>;
+    const raw = typeof a.mdRaw === "string" ? a.mdRaw : "";
+    // 未改动的块连空白都原样回写（raw 是文件本来的字节）
+    if (raw.length > 0 && sigOf(n) === String(a.mdSig ?? "")) return true;
+    return serializeNode(n).trim() !== "";
+  };
+  let 最后写出 = -1;
+  for (let i = doc.childCount - 1; i >= 0; i--) {
+    const n = doc.child(i);
+    if (n && 会写字节(n)) {
+      最后写出 = i;
+      break;
+    }
+  }
   doc.forEach((node, _offset, index) => {
     const a = node.attrs as Record<string, unknown>;
     const raw = typeof a.mdRaw === "string" ? a.mdRaw : "";
@@ -636,7 +659,7 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     // 在它后面插一块时只给一个 "\n" 就变成 `末段\n---` —— 内核把它读成 setext 二级标题，
     // 插一张表则整张表被吞进上一段（2026-09-29 复查实测）。所以这里按 `out` 实际结尾补。
     if (gap === "\n" && out && !out.endsWith("\n")) gap = "\n\n";
-    const eol = index === doc.childCount - 1 && !srcEndsNewline ? "" : "\n";
+    const eol = index === 最后写出 && !srcEndsNewline ? "" : "\n";
     const 正文 = unchanged ? raw : serializeNode(node) + eol;
     // **重新产出后是空白的块不落任何字节**：Markdown 里没有"空段落"这个东西，写出来就是
     // 文件里凭空多出的空行（回车一次 → `---\n\n\n\n第一段`）。回车拆出来的那一半在用户
@@ -647,12 +670,7 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     out += gap + 正文;
     prev = { kind, depth };
   });
-  // **源文件结尾有没有换行，是它的习惯，不由我们改**。`eol` 那条判据看的是"最后一个 child"，
-  // 而表格后面那个落脚点**故意不落盘**——它一存在，真正的最后一块就不再是最后一个 child，
-  // 于是本来不带结尾换行的文件会被补出一个 `\n`（2026-09-29 复查实测）。收尾统一削掉。
-  let 尾 = out + head.trailingGap;
-  if (!srcEndsNewline && 尾.endsWith("\n")) 尾 = 尾.slice(0, -1);
-  return 尾;
+  return out + head.trailingGap;
 }
 
 /**

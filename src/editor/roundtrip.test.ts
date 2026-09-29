@@ -1540,6 +1540,28 @@ describe("表格网格化的字节判据", () => {
     二.destroy();
   });
 
+  it("不以换行结尾的文件：删掉最后一块，不许改动前面那块自带的换行", () => {
+    // 上一轮那条"从结尾削掉一个 \n"的补法就是死在这里：判据看的是最后一个 child，
+    // 而未改动的块连自己的换行都是文件本来的字节。现在 eol 看"最后写出的块"
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [段("a\n", "", "a"), 段("b", "\n", "b")], // 文件的最后一行不带换行
+    };
+    const e = createTestEditor(d);
+    expect(docToMarkdown(e.state.doc, d)).toBe("a\n\nb");
+    const 末 = e.state.doc.childCount - 1;
+    let 起 = 0;
+    let i = 0;
+    e.state.doc.forEach((n, off) => {
+      if (i++ === 末) 起 = off;
+    });
+    e.view.dispatch(e.state.tr.delete(起, 起 + e.state.doc.child(末).nodeSize));
+    // 剩下的那块是"未改动"的，它的 raw 自带换行 —— 必须原样回写
+    expect(docToMarkdown(e.state.doc, d)).toBe("a\n");
+    e.destroy();
+  });
+
   it("两张相邻且源文本相同的表：改第一张不许重写第二张", () => {
     // 复查查出来的字节级缺陷。账本守卫的判据是"相邻两块 mdRaw 相同 ⇒ 拆块产物，清掉后一块"，
     // 它的前提是"重新序列化等于原字节"。表格是唯一不满足这个前提的块（产的是规范形），
