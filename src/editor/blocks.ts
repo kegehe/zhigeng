@@ -995,6 +995,7 @@ export function 对所齐所选(
   对: Align,
 ): Transaction | null {
   const 格型 = state.schema.nodes.mdTableCell;
+  const 列数 = state.doc.nodeAt(表起点)?.child(0)?.childCount ?? 0;
   if (!格型) return null;
   return 改格们(
     state,
@@ -1003,7 +1004,9 @@ export function 对所齐所选(
     (格) => (String(格.attrs.align ?? "") === 对 ? 格 : 格型.create({ ...格.attrs, align: 对 }, 格.content)),
     (原) => {
       const 新 = [...原];
-      while (新.length <= 矩.c1) 新.push("" as Align);
+      // 补到**列数**而不是 c1：分隔行的长度由 mdAligns 算，短于表头就是那张 02 里
+      // 明令不许产出的"分隔行比表头短"的表。与单列那版 `setAlign` 同一条规矩。
+      while (新.length < 列数) 新.push("" as Align);
       for (let c = 矩.c0; c <= 矩.c1; c++) 新[c] = 对;
       return 新;
     },

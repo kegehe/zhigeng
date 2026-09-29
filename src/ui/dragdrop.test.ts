@@ -152,6 +152,18 @@ describe("算动作", () => {
     ]);
   });
 
+  it("拖进 views/ 不给落点：那里按目录判成视图定义，笔记会当场换物种", () => {
+    const 被拖 = 笔记行("notes/甲.md");
+    expect(判落点(被拖, 目录行("views/日报"), null, 20, 高)).toBeNull();
+    expect(判落点(被拖, 目录行("views"), null, 20, 高)).toBeNull();
+    // 从 views 里拖出来是允许的（那是回到普通笔记）
+    expect(判落点(笔记行("views/日报/周一.md"), 笔记行("notes/乙.md"), null, 5, 高)).toEqual({
+      kind: "gap",
+      父: "notes",
+      前: "乙.md",
+    });
+  });
+
   it("落点为 null 就没有动作", () => {
     expect(算动作(笔记行("notes/甲.md"), null, 读层)).toBeNull();
   });

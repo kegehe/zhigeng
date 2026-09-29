@@ -118,7 +118,7 @@ export function 算动作(
   return { 类型: "移动", 新路径: 拼路径(落.父, 被拖.名), 层: 层们 };
 }
 
-/** 三条"看起来能拖、其实什么都没变" */
+/** 三条"看起来能拖、其实什么都没变"，外加一条"拖进去会换了物种" */
 function 合法(被拖: 行, 落: 落点): 落点 {
   if (!落) return null;
   if (被拖.是目录) {
@@ -126,9 +126,21 @@ function 合法(被拖: 行, 落: 落点): 落点 {
     if (落.kind === "into" || 落.父 !== 被拖.父) return null;
     return 落.前 === 被拖.名 ? null : 落;
   }
+  const 目标父 = 落.kind === "into" ? 落.目录 : 落.父;
+  if (是视图层(目标父)) return null;
   if (落.kind === "into") return 落.目录 === 被拖.父 ? null : 落;
   return 落.前 === 被拖.名 ? null : 落;
 }
+
+/**
+ * 与 `crates/note-core/src/vault.rs` 的 `VIEWS_DIR` 对齐；改那边要改这里。
+ *
+ * 视图定义文件不是普通笔记：`kind_of_rel` 按目录判 `note_kind='view'`，一篇笔记被拖进
+ * `views/` 就**当场变成视图定义**——从列表与搜索里消失，而它的正文一个字节都没改。
+ * 这种"换个位置就换物种"的事不该由一次拖拽触发，所以直接不给落点。
+ */
+const 视图目录 = "views";
+const 是视图层 = (父: string) => 父 === 视图目录 || 父.startsWith(`${视图目录}/`);
 
 const 去掉 = (现状: readonly string[], 名: string) => 现状.filter((n) => n !== 名);
 
