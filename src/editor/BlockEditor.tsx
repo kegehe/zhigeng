@@ -11,9 +11,12 @@ import {
   moveBlock,
   replaceBlockWithSource,
   stampSignatures,
+  格坐标At,
   type BlockTypeId,
   type EditDoc,
 } from "./blocks";
+import { 归一 } from "./tableSelect";
+import { 改选区, 定锚点, 矩形of, 选区of } from "./tableSelectPlugin";
 import { mdExtensions } from "./schema";
 import { 工具图标, type 图标名 } from "./icons";
 import { LinkEditor, Toolbar } from "./Toolbar";
@@ -146,6 +149,105 @@ export function BlockEditor({
   }, [editor]);
 
   /**
+   * 格子里按下鼠标：定锚点；拖过别的格子（或 Shift 点另一格）扩成矩形选区。
+   *
+   * 三条判据：
+   * - **pointer 事件而不是 HTML5 拖放**：与块手柄、目录树同一条理由——真机验证只能发
+   *   普通鼠标事件，`dragstart` 触发不了，验证不了的交互不该上生产。
+   * - **移动超过 5px 才算拖**：否则"在格子里点个光标"会变成"框住一片"，而后者会抢走
+   *   `Backspace` 的语义（多格时它是清空整片）。
+   * - **只发 meta 事务**：脏标记挂在 `onUpdate`（只在文档变了时触发），选区发文档事务
+   *   等于"拖一下鼠标就把笔记标成待保存"。
+   */
+  useEffect(() => {
+    if (!editor) return;
+    const view = editor.view;
+    const 格在 = (x: number, y: number) => {
+      const at = view.posAtCoords({ left: x, top: y });
+      if (!at) return null;
+      return (
+        格坐标At(view.state, at.pos) ??
+        (at.inside > 0 ? 格坐标At(view.state, at.inside) : null)
+      );
+    };
+    /**
+     * 原生拖拽必须挡掉：格子里是文字，按下再移动会被浏览器判成"拖这段文字"，
+     * `dragstart` 一触发 pointermove 流就断了——真机上表现为框到一半冻住，
+     * 用户以为选了四格，实际落盘只改两格。这种"少改"比不改更难发现。
+     */
+    const 拖格中 = { 是: false };
+    const onDown = (ev: PointerEvent) => {
+      if (ev.button !== 0 || !editor.isEditable) return;
+      const 起 = 格在(ev.clientX, ev.clientY);
+      if (!起) return;
+      const 锚 = ev.shiftKey ? (选区of(view.state)?.锚 ?? 起) : 起;
+      if (ev.shiftKey) {
+        view.dispatch(改选区(view.state, 起.表, 归一(锚, 起)));
+        ev.preventDefault();
+        return;
+      }
+      view.dispatch(定锚点(view.state, 起.表, 起));
+      const 手 = { x: ev.clientX, y: ev.clientY };
+      let 动过 = false;
+      拖格中.是 = true;
+      const 落到 = (e2: PointerEvent) => {
+        const 到 = 格在(e2.clientX, e2.clientY);
+        // 拖出这张表（或拖到表外的空白）就不改：留着上一次的范围比乱跳好
+        if (!到 || 到.表 !== 起.表) return;
+        const 矩 = 归一(锚, 到);
+        // 拖回锚点那一格 = 没有矩形。留着单格矩形会让 Backspace 变成"清空整格"
+        view.dispatch(改选区(view.state, 起.表, 矩.r0 === 矩.r1 && 矩.c0 === 矩.c1 ? null : 矩));
+        /**
+         * 每一拍都清一次原生选区：只在跨过阈值那一下清不够——PM 会把浏览器选区同步回来，
+         * 真机上表现为"格子已经框住，格子里的数字还挂着两层蓝"。
+         */
+        window.getSelection()?.removeAllRanges();
+      };
+      const move = (e2: PointerEvent) => {
+        if (!动过) {
+          if (Math.abs(e2.clientY - 手.y) < 5 && Math.abs(e2.clientX - 手.x) < 5) return;
+          动过 = true;
+          /**
+           * 一确认是拖选就关掉正文的 `user-select`：浏览器会跟着鼠标扩选原生文字选区并
+           * `scrollIntoView`，格子会在光标底下跑。清选区这件事交给 `落到`（每一拍都清）。
+           */
+          view.dom.setAttribute("data-md-drag", "");
+        }
+        落到(e2);
+        e2.preventDefault();
+      };
+      const up = (e2: PointerEvent) => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+        拖格中.是 = false;
+        view.dom.removeAttribute("data-md-drag");
+        /**
+         * 松手这一下也落一次：CDP 连发时最后一拍 `pointermove` 可能被合掉，只靠 move
+         * 会让用户框到的比鼠标停下的少几格，而批量动作是按框到的落盘的。
+         */
+        if (动过) 落到(e2);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    };
+    const dom = editor.view.dom;
+    const onDragStart = (ev: Event) => {
+      if (拖格中.是) ev.preventDefault();
+    };
+    dom.addEventListener("dragstart", onDragStart);
+    dom.addEventListener("pointerdown", onDown);
+    return () => {
+      拖格中.是 = false;
+      dom.removeAttribute("data-md-drag");
+      dom.removeEventListener("pointerdown", onDown);
+      dom.removeEventListener("dragstart", onDragStart);
+    };
+
+  }, [editor]);
+
+  /**
    * 选中文字 → 气泡工具条；插件抛的 `md-slash` DOM 事件 → 块菜单。
    *
    * 两个浮层**都不写文档**：气泡只读选区，斜杠只读 DOM 事件。走"发事务"那条路会经
@@ -162,7 +264,11 @@ export function BlockEditor({
     const syncSel = () => {
       const { from, empty } = editor.state.selection;
       const host = wrap.current?.getBoundingClientRect();
-      const rect = empty || !editor.isEditable ? null : anchorRect();
+      /**
+       * 框了格子就不出选区气泡：那时"选中"的是几**格**，不是几个字，
+       * 气泡上的加粗/行内码对着整片格子没有一致的含义（真机上拖完会看见它挂在表右侧）。
+       */
+      const rect = empty || !editor.isEditable || 矩形of(editor.state) ? null : anchorRect();
       if (!host || !rect) {
         setSel(null);
         return;
@@ -189,12 +295,22 @@ export function BlockEditor({
     };
     editor.on("selectionUpdate", syncSel);
     editor.on("update", closeSlash);
+    /**
+     * 拖格子的那几拍不一定有 `selectionUpdate`（PM 选区可以一直不变，变的是我们的矩形），
+     * 所以补一条事务订阅。带判据订阅是必须的：不判就每击一次键都多跑一次 `anchorRect`
+     * （读 window 选区 + 量矩形），那条是花在打字路径上的。
+     */
+    const onTr = () => {
+      if (矩形of(editor.state)) syncSel();
+    };
+    editor.on("transaction", onTr);
     const hostEl = wrap.current;
     hostEl?.addEventListener("md-slash", onSlash);
     window.addEventListener("scroll", syncSel, true);
     return () => {
       editor.off("selectionUpdate", syncSel);
       editor.off("update", closeSlash);
+      editor.off("transaction", onTr);
       hostEl?.removeEventListener("md-slash", onSlash);
       window.removeEventListener("scroll", syncSel, true);
     };

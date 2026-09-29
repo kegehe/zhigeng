@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import type { Editor } from "@tiptap/core";
-import { TextSelection } from "@tiptap/pm/state";
+import { TextSelection, type EditorState } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
 import { 分派岛上鼠标 } from "./schema";
 import { parseTable } from "./table";
+import { 单格, 归一, type 矩形 } from "./tableSelect";
+import { 改选区, 批量 } from "./tableSelectPlugin";
 import {
   addColumn,
   applyBlockType,
@@ -14,6 +16,7 @@ import {
   exitTableDown,
   insertSourceBlock,
   判粘贴,
+  格坐标At,
   INSERTABLE,
   moveCell,
   replaceBlockWithSource,
@@ -23,6 +26,11 @@ import {
   reassemble,
   removeColumn,
   removeRow,
+  对所齐所选,
+  填充所选,
+  删所选列,
+  删所选行,
+  清场所选,
   setAlign,
   type BlockTypeId,
   type EditDoc,
@@ -1623,6 +1631,176 @@ describe("表格网格化的字节判据", () => {
     const tr = applyBlockType(editor.state, 表起点(editor), "paragraph");
     expect(tr).toBeNull();
     expect(docToMarkdown(editor.state.doc, d)).toBe(前);
+    editor.destroy();
+  });
+});
+
+const 三列 = "| A | B | C |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n";
+
+describe("矩形选区的批量动作：只动所选格，其余逐字节不动", () => {
+  /** 框住第 r0..r1 行、c0..c1 列，并把光标放进左上那一格（与真机拖完的状态一致） */
+  function 框住(editor: Editor, 矩: 矩形, 锚n: number) {
+    进格(editor, 锚n);
+    editor.view.dispatch(改选区(editor.state, 表起点(editor), 矩));
+  }
+
+  it("清空所选：四格空了，表头与没选中的那列仍是原样", () => {
+    const d = 表doc(三列);
+    const editor = createTestEditor(d);
+    框住(editor, 归一({ 行: 1, 列: 0 }, { 行: 2, 列: 1 }), 3);
+    const tr = 批量(editor.state, 清场所选);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| A | B | C |\n| --- | --- | --- |\n|  |  | 3 |\n|  |  | 6 |\n"
+    );
+    editor.destroy();
+  });
+
+  it("填充：抄的是矩形左上角那一格，不是光标停着的那一格", () => {
+    const d = 表doc(三列);
+    const editor = createTestEditor(d);
+    // 从右下往左上框（锚点仍是左上 (1,1)="2"），光标最后停在 (2,2)="6"
+    框住(editor, 归一({ 行: 2, 列: 2 }, { 行: 1, 列: 1 }), 8);
+    editor.view.dispatch(批量(editor.state, 填充所选)!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| A | B | C |\n| --- | --- | --- |\n| 1 | 2 | 2 |\n| 4 | 2 | 2 |\n"
+    );
+    editor.destroy();
+  });
+
+  it("填充带着 mark 走：抄过去的是加粗的甲，不是一串星号", () => {
+    const d = 表doc("| A | B |\n| --- | --- |\n| **甲** |  |\n");
+    const editor = createTestEditor(d);
+    框住(editor, 归一({ 行: 1, 列: 0 }, { 行: 1, 列: 1 }), 2);
+    editor.view.dispatch(批量(editor.state, 填充所选)!);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("前一段\n\n| A | B |\n| --- | --- |\n| **甲** | **甲** |\n");
+    // 屏幕上那一格得真是加粗的，而不是把 `**` 当字面文字塞进去
+    const 格们 = [...editor.view.dom.querySelectorAll("[data-md-cell]")];
+    expect(格们[3]?.querySelector("strong")).not.toBeNull();
+    editor.destroy();
+  });
+
+  it("单格不算批量：否则 Backspace 会把「只是光标停在那儿」的一格清空", () => {
+    const d = 表doc(三列);
+    const editor = createTestEditor(d);
+    框住(editor, 单格({ 行: 1, 列: 1 }), 4);
+    expect(批量(editor.state, 清场所选)).toBeNull();
+    editor.destroy();
+  });
+
+  it("连点两次清空：第二次不发事务、不标脏、不重写字节", () => {
+    const d = 表doc(三列);
+    const editor = createTestEditor(d);
+    框住(editor, 归一({ 行: 1, 列: 0 }, { 行: 2, 列: 1 }), 3);
+    const 第一次 = 批量(editor.state, 清场所选);
+    expect(第一次).not.toBeNull();
+    editor.view.dispatch(第一次!);
+    // 清空那笔事务把选区交掉了（文档变了），重新框同一片再点一次
+    框住(editor, 归一({ 行: 1, 列: 0 }, { 行: 2, 列: 1 }), 3);
+    expect(批量(editor.state, 清场所选)).toBeNull();
+    editor.destroy();
+  });
+
+  it("删所选行：覆盖两行就一起走，表头行永不删", () => {
+    const d = 表doc(三列);
+    const editor = createTestEditor(d);
+    框住(editor, 归一({ 行: 1, 列: 1 }, { 行: 2, 列: 2 }), 4);
+    editor.view.dispatch(批量(editor.state, 删所选行)!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| A | B | C |\n| --- | --- | --- |\n"
+    );
+    const 只表头 = createTestEditor(表doc(三列));
+    框住(只表头, 归一({ 行: 0, 列: 0 }, { 行: 0, 列: 1 }), 0);
+    expect(批量(只表头.state, 删所选行)).toBeNull();
+    expect(只表头.state.doc.nodeAt(表起点(只表头))!.childCount).toBe(3);
+    只表头.destroy();
+    editor.destroy();
+  });
+
+  it("删所选列：每行都少这几格，分隔行的位次跟着削", () => {
+    const d = 表doc(三列);
+    const editor = createTestEditor(d);
+    框住(editor, 归一({ 行: 1, 列: 0 }, { 行: 2, 列: 1 }), 3);
+    editor.view.dispatch(批量(editor.state, 删所选列)!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "前一段\n\n| C |\n| --- |\n| 3 |\n| 6 |\n"
+    );
+    editor.destroy();
+  });
+
+  it("整张表都是列时删列给 null：空表不是表", () => {
+    const editor = createTestEditor(表doc(三列));
+    框住(editor, 归一({ 行: 1, 列: 0 }, { 行: 2, 列: 2 }), 3);
+    expect(批量(editor.state, 删所选列)).toBeNull();
+    editor.destroy();
+  });
+
+  it("逐列设对齐：所选覆盖几列就改几列，`mdAligns` 与每格属性一起变", () => {
+    const d = 表doc(三列);
+    const editor = createTestEditor(d);
+    框住(editor, 归一({ 行: 1, 列: 0 }, { 行: 2, 列: 1 }), 3);
+    editor.view.dispatch(批量(editor.state, (s, 表, 矩) => 对所齐所选(s, 表, 矩, "center"))!);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe(
+      "前一段\n\n| A | B | C |\n| :---: | :---: | --- |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n"
+    );
+    expect(parseTable(出.slice(出.indexOf("| A")))!.aligns).toEqual([
+      "center",
+      "center",
+      "",
+    ]);
+    editor.destroy();
+  });
+
+  it("批量只重写动过的那张表：旁边那张连分隔行的不规则写法都原样", () => {
+    const 异形 = "| A | B | C |\n|:-----|:---:|-----:|\n| 1 | 2 | 3 |\n";
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        段("前一段\n", "", "前一段"),
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+      ],
+    };
+    for (const 做 of [
+      (s: EditorState, 表: number, 矩: 矩形) => 清场所选(s, 表, 矩),
+      (s: EditorState, 表: number, 矩: 矩形) => 填充所选(s, 表, 矩),
+      (s: EditorState, 表: number, 矩: 矩形) => 对所齐所选(s, 表, 矩, "left"),
+      (s: EditorState, 表: number, 矩: 矩形) => 删所选行(s, 表, 矩),
+      (s: EditorState, 表: number, 矩: 矩形) => 删所选列(s, 表, 矩),
+    ]) {
+      const editor = createTestEditor(d);
+      框住(editor, 归一({ 行: 1, 列: 0 }, { 行: 1, 列: 1 }), 3);
+      const tr = 批量(editor.state, 做);
+      expect(tr).not.toBeNull();
+      editor.view.dispatch(tr!);
+      expect(docToMarkdown(editor.state.doc, d).split(异形).length - 1).toBe(1);
+      editor.destroy();
+    }
+  });
+});
+
+describe("文档位置 → 格子坐标：真机拖选的第一跳，之前被 jsdom 测试整个绕过", () => {
+  it("格子内部与格子之前（边线上）两种位置都认得，行列算得对", () => {
+    const editor = createTestEditor(表doc(三列));
+    const 表 = 表起点(editor);
+    for (let n = 0; n < 9; n++) {
+      const 起 = 格起点(editor, n);
+      const 期望 = { 表, 行: Math.floor(n / 3), 列: n % 3 };
+      expect(格坐标At(editor.state, 起 + 1)).toEqual(期望); // 落在格子的文字里
+      expect(格坐标At(editor.state, 起)).toEqual(期望); // 落在格子的边线 / 内边距上
+    }
+    editor.destroy();
+  });
+
+  it("表外的位置、以及行末之外都给 null", () => {
+    const editor = createTestEditor(表doc(三列));
+    expect(格坐标At(editor.state, 1)).toBeNull(); // 前面那个段落里
+    const 表 = editor.state.doc.nodeAt(表起点(editor))!;
+    expect(格坐标At(editor.state, 表起点(editor) + 表.nodeSize - 1)).toBeNull(); // 末行行末之外
     editor.destroy();
   });
 });

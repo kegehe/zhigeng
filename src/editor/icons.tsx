@@ -45,6 +45,8 @@ export type 图标名 =
   | "alignCenter"
   | "alignRight"
   | "alignNone"
+  | "cellsClear"
+  | "cellsFill"
   | "up"
   | "down"
   | "undo"
@@ -92,6 +94,42 @@ const 两竖 = (
   </>
 );
 
+/** 2×2 的格子。批量那两枚共用它：认得出"这是表格"，就不用再看第二遍 */
+const 四格 = (
+  <>
+    <path d="M3.5 4.5h12v11h-12z" />
+    <path d="M9.5 4.5v11" />
+    <path d="M3.5 9.5h12" />
+  </>
+);
+
+/**
+ * 填充：左上那格是实的，箭头朝下——"把这一格抄进其余格"。
+ *
+ * 不复用 `画()`：那套带的是加减记号，放在这儿会被读成"加一格/减一格"，而这一枚不动形状。
+ */
+function 图标填充(p: LucideProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={24}
+      height={24}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...p}
+    >
+      {四格}
+      <path d="M4.7 5.7h3.6v3.6H4.7z" fill="currentColor" stroke="none" />
+      <path d="M19.5 7.5v9" />
+      <path d="M17 14.2l2.5 2.6 2.5-2.6" />
+    </svg>
+  );
+}
+
 export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   bold: Bold,
   italic: Italic,
@@ -112,6 +150,8 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   // 「取消对齐」是"这一列不留 `:`"，不是"清除格式"，所以不复用那个图标：
   // 一条斜杠划过的形状说的是"这里没有设定"，两个语义各占一枚才不打架。
   alignNone: Ban,
+  cellsClear: 画(四格, "减"),
+  cellsFill: 图标填充,
   up: MoveUp,
   down: MoveDown,
   undo: Undo2,

@@ -11,8 +11,11 @@ import {
   moveCurrentBlock,
   numberedMarker,
   判粘贴,
+  填充所选,
+  清场所选,
   type BlockTypeId,
 } from "./blocks";
+import { 批量, TableSelect } from "./tableSelectPlugin";
 import { mightRender, renderOpaque } from "./render";
 
 /**
@@ -832,6 +835,15 @@ export const TableKeys = Extension.create({
       "Shift-Tab": 走((s) => moveCell(s, -1)),
       Enter: 走(enterCell),
       ArrowDown: 走(exitTableDown),
+      /**
+       * 框了多格时 `Delete` / `Backspace` 清空所选的每一格——与电子表格一致，也是用户
+       * 框完最自然按下去的那一键。**没框多格就返回 false**：单格时那两键仍是删字符，
+       * 抢过来就把"在格子里打字"打坏了。
+       */
+      Delete: 走((s) => 批量(s, 清场所选)),
+      Backspace: 走((s) => 批量(s, 清场所选)),
+      // 填充 = 把左上那格抄进其余格（电子表格的 Ctrl+D）
+      "Ctrl-d": 走((s) => 批量(s, 填充所选)),
     };
   },
 });
@@ -884,6 +896,7 @@ export const mdExtensions = [
   BlockKeys,
   TableKeys,
   TablePaste,
+  TableSelect,
   FocusIndicator,
   OpaqueFace,
   History,

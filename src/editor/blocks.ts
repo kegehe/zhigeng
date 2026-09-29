@@ -3,6 +3,7 @@ import {
   Fragment,
   Node as PmNodeModel,
   type Node as PmNode,
+  type ResolvedPos,
   type Schema,
 } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
@@ -10,6 +11,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
 import { inlineToJson, serializeInline } from "./inline";
 import { parseGrid, parseTable, serializeTable, type Align } from "./table";
+import { 含, 夹住, 覆盖列, type 矩形 } from "./tableSelect";
 
 export type { EditBlock, EditDoc };
 
@@ -869,6 +871,204 @@ export function setAlign(
   const 新表 = 表.type.create({ ...表.attrs, mdAligns: aligns }, Fragment.from(行们));
   const tr = state.tr.replaceWith(表起点, 表起点 + 表.nodeSize, 新表);
   return 回到格(tr, 表起点, 位.行, 位.列);
+}
+
+/**
+ * 某个文档位置落在表的哪一格（不在格子里给 null）。
+ *
+ * 与 `cellAt()` 同一套坐标，但**不读选区**——拖选时指针所在处还没有选区，只有坐标。
+ * 从给定位置往上找 `mdTableCell`，而不是假定深度固定：`posAtCoords` / `posAtDOM` 给的
+ * 位置深浅不一（空格子里那一下可能落在格子内、也可能落在格子前），按节点名找最稳。
+ */
+export function 格坐标At(
+  state: EditorState,
+  pos: number
+): { 表: number; 行: number; 列: number } | null {
+  let $p: ResolvedPos | null = null;
+  try {
+    $p = state.doc.resolve(pos);
+  } catch {
+    return null;
+  }
+  // 格子在 depth 3（doc → mdTable → mdTableRow → mdTableCell），所以表那一层是 `d-2`：
+  // 按 `d-1` 取到的是**行**，`nodeAt` 出来不是 mdTable，判据当场落空——真机上就是这么静默
+  // 拖不动的，jsdom 那批测试直接喂 `改选区` 绕过了这一层。
+  for (let d = $p.depth; d >= 3; d--) {
+    if ($p.node(d).type.name !== "mdTableCell") continue;
+    const 表起点 = $p.before(d - 2);
+    if (state.doc.nodeAt(表起点)?.type.name !== "mdTable") return null;
+    return { 表: 表起点, 行: $p.index(d - 2), 列: $p.index(d - 1) };
+  }
+  /**
+   * 落在格子的边线/内边距上时，PM 给的位置在**行里、那一格之前**（深度只到行）。
+   * 这一档也要认出来，否则"沿着表格边缘拖"会一路丢坐标，选区拖到第二格就断了。
+   */
+  for (let d = $p.depth; d >= 2; d--) {
+    if ($p.node(d).type.name !== "mdTableRow") continue;
+    const 列 = $p.index(d);
+    if (列 >= $p.node(d).childCount) return null; // 行末之外：不属于任何一格
+    const 表起点 = $p.before(d - 1);
+    if (state.doc.nodeAt(表起点)?.type.name !== "mdTable") return null;
+    return { 表: 表起点, 行: $p.index(d - 1), 列 };
+  }
+  return null;
+}
+
+/**
+ * 批量改矩形里的格子。清空 / 填充 / 对齐三种动作共用这一条通路——各写一份"重建整张表"
+ * 迟早出现只改格子不改 `mdAligns` 那种分叉（屏幕上居中、文件里写 `---`）。
+ *
+ * `改` 收到的是**原表**里的左上格，所以"填充"抄的是动手之前的内容，不会抄到自己刚写的
+ * 那份上。什么都没变就返回 null：连点两次"清空"不该把笔记标成待保存。
+ */
+function 改格们(
+  state: EditorState,
+  表起点: number,
+  矩: 矩形,
+  改: (格: PmNode, 行: number, 列: number, 左上格: PmNode, 是左上: boolean) => PmNode,
+  改对齐?: (对齐们: Align[]) => Align[],
+): Transaction | null {
+  const 表 = state.doc.nodeAt(表起点);
+  const 格型 = state.schema.nodes.mdTableCell;
+  if (!表 || 表.type.name !== "mdTable" || !格型) return null;
+  const 夹后 = 夹住(矩, 表.childCount, 表.child(0)?.childCount ?? 0);
+  if (!夹后) return null;
+  const 左上格 = 表.child(夹后.r0)?.child(夹后.c0);
+  if (!左上格) return null;
+  let 动过 = false;
+  const 行们: PmNode[] = [];
+  表.forEach((行, _行偏, 行号) => {
+    const 格们: PmNode[] = [];
+    行.forEach((格, _格偏, 列号) => {
+      if (!含(夹后, { 行: 行号, 列: 列号 })) {
+        格们.push(格);
+        return;
+      }
+      const 新格 = 改(格, 行号, 列号, 左上格, 行号 === 夹后.r0 && 列号 === 夹后.c0);
+      if (新格 !== 格) 动过 = true;
+      格们.push(新格);
+    });
+    行们.push(行.copy(Fragment.from(格们)));
+  });
+  const 原对齐 = (表.attrs.mdAligns as Align[]) ?? [];
+  const 对齐们 = 改对齐 ? 改对齐(原对齐) : 原对齐;
+  if (改对齐 && 对齐们.join("\u0000") !== 原对齐.join("\u0000")) 动过 = true;
+  if (!动过) return null;
+  const 新表 = 表.type.create({ ...表.attrs, mdAligns: 对齐们 }, Fragment.from(行们));
+  const tr = state.tr.replaceWith(表起点, 表起点 + 表.nodeSize, 新表);
+  return 回到格(tr, 表起点, 夹后.r0, 夹后.c0);
+}
+
+/** 清空所选的每一格（含左上格）。内容与形状都不动——GFM 的格子本来就没有换行 */
+export function 清场所选(
+  state: EditorState,
+  表起点: number,
+  矩: 矩形,
+): Transaction | null {
+  const 格型 = state.schema.nodes.mdTableCell;
+  if (!格型) return null;
+  return 改格们(state, 表起点, 矩, (格) => (格.childCount ? 格型.create(格.attrs) : 格));
+}
+
+/** 填充：把矩形左上角那一格抄进其余格（表格里 `Ctrl+D` 的位置） */
+export function 填充所选(
+  state: EditorState,
+  表起点: number,
+  矩: 矩形,
+): Transaction | null {
+  const 格型 = state.schema.nodes.mdTableCell;
+  if (!格型) return null;
+  return 改格们(
+    state,
+    表起点,
+    矩,
+    (格, _行, _列, 左上格, 是左上) =>
+      是左上 || 格.eq(左上格) ? 格 : 格型.create(格.attrs, 左上格.content),
+  );
+}
+
+/** 设所选覆盖到的**每一列**的对齐。单列那版是 `setAlign`，两条共用同一份 `mdAligns` 规矩 */
+export function 对所齐所选(
+  state: EditorState,
+  表起点: number,
+  矩: 矩形,
+  对: Align,
+): Transaction | null {
+  const 格型 = state.schema.nodes.mdTableCell;
+  if (!格型) return null;
+  return 改格们(
+    state,
+    表起点,
+    矩,
+    (格) => (String(格.attrs.align ?? "") === 对 ? 格 : 格型.create({ ...格.attrs, align: 对 }, 格.content)),
+    (原) => {
+      const 新 = [...原];
+      while (新.length <= 矩.c1) 新.push("" as Align);
+      for (let c = 矩.c0; c <= 矩.c1; c++) 新[c] = 对;
+      return 新;
+    },
+  );
+}
+
+/**
+ * 删掉矩形覆盖到的每一行。**表头行（第 0 行）永不删**：GFM 的表格必须有表头，
+ * 删掉了产出的那份连分隔行都不成形。全落在表头上时返回 null。
+ */
+export function 删所选行(
+  state: EditorState,
+  表起点: number,
+  矩: 矩形,
+): Transaction | null {
+  const 表 = state.doc.nodeAt(表起点);
+  if (!表 || 表.type.name !== "mdTable") return null;
+  const 夹后 = 夹住(矩, 表.childCount, 表.child(0)?.childCount ?? 0);
+  if (!夹后) return null;
+  const 删的 = new Set<number>();
+  for (let r = Math.max(1, 夹后.r0); r <= 夹后.r1; r++) 删的.add(r);
+  const 剩 = 表.childCount - 删的.size;
+  if (删的.size === 0 || 剩 < 1) return null;
+  const 行们: PmNode[] = [];
+  表.forEach((行, _偏, i) => {
+    if (!删的.has(i)) 行们.push(行);
+  });
+  const tr = state.tr.replaceWith(
+    表起点,
+    表起点 + 表.nodeSize,
+    表.type.create(表.attrs, Fragment.from(行们)),
+  );
+  return 回到格(tr, 表起点, Math.min(夹后.r0, 剩 - 1), 夹后.c0);
+}
+
+/** 删掉矩形覆盖到的每一列：每行都少这几格，`mdAligns` 的同位次一起削掉 */
+export function 删所选列(
+  state: EditorState,
+  表起点: number,
+  矩: 矩形,
+): Transaction | null {
+  const 表 = state.doc.nodeAt(表起点);
+  if (!表 || 表.type.name !== "mdTable") return null;
+  const 夹后 = 夹住(矩, 表.childCount, 表.child(0)?.childCount ?? 0);
+  if (!夹后) return null;
+  const 删的 = new Set(覆盖列(夹后));
+  const 列数 = 表.child(0)?.childCount ?? 0;
+  if (列数 - 删的.size < 1) return null;
+  const 行们: PmNode[] = [];
+  表.forEach((行) => {
+    const 格们: PmNode[] = [];
+    行.forEach((格, _偏, j) => {
+      if (!删的.has(j)) 格们.push(格);
+    });
+    行们.push(行.copy(Fragment.from(格们)));
+  });
+  const 对齐们 = ((表.attrs.mdAligns as Align[]) ?? []).filter((_a, i) => !删的.has(i));
+  const tr = state.tr.replaceWith(
+    表起点,
+    表起点 + 表.nodeSize,
+    表.type.create({ ...表.attrs, mdAligns: 对齐们 }, Fragment.from(行们)),
+  );
+  let 留 = 0;
+  for (let c = 0; c < 列数; c++) if (c < 夹后.c0 && !删的.has(c)) 留++;
+  return 回到格(tr, 表起点, 夹后.r0, 留);
 }
 
 /**

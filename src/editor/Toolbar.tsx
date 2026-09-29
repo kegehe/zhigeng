@@ -14,8 +14,14 @@ import {
   setAlign,
   BLOCK_TYPES,
   tableAt,
+  对所齐所选,
+  填充所选,
+  删所选列,
+  删所选行,
+  清场所选,
   type BlockTypeId,
 } from "./blocks";
+import { 批量, 矩形of } from "./tableSelectPlugin";
 import type { Align } from "./table";
 import { 工具图标, type 图标名 } from "./icons";
 
@@ -38,9 +44,24 @@ export function Toolbar({ editor }: { editor: Editor }) {
     const on = () => bump((n) => n + 1);
     editor.on("selectionUpdate", on);
     editor.on("update", on);
+    /**
+     * 矩形选区走的是**只带 meta 的事务**（不动文档，所以不触发 `selectionUpdate`），
+     * 只能挂 `transaction`。但这条每击一次键都会来——不比对就 `setState`，等于把 G6 的
+     * 预算花在打字路径上多渲染一次工具栏，所以只在矩形真的变了时才重渲染。
+     */
+    let 键 = "";
+    const 同步矩形 = () => {
+      const 矩 = 矩形of(editor.state);
+      const 新 = 矩 ? `${矩.r0},${矩.c0},${矩.r1},${矩.c1}` : "";
+      if (新 === 键) return;
+      键 = 新;
+      bump((n) => n + 1);
+    };
+    editor.on("transaction", 同步矩形);
     return () => {
       editor.off("selectionUpdate", on);
       editor.off("update", on);
+      editor.off("transaction", 同步矩形);
     };
   }, [editor]);
 
@@ -58,6 +79,9 @@ export function Toolbar({ editor }: { editor: Editor }) {
   // 光标在某张表里：这时工具栏该给的是"行列与对齐"这一组，不是块类型下拉
   const 表起点 = tableAt(editor.state);
   const 格 = cellAt(editor.state);
+  /** 框了多格就换批量那一档：单格的"加一行/删这列"与批量的"删所选行"不是一回事 */
+  const 矩 = 矩形of(editor.state);
+  const 列数 = 表起点 === null ? 0 : (editor.state.doc.nodeAt(表起点)?.child(0)?.childCount ?? 0);
   const 当前对齐: string = 格
     ? String(
         editor.state.doc.nodeAt(表起点 ?? -1)?.child(格.行)?.child(格.列)?.attrs.align ?? "",
@@ -73,6 +97,11 @@ export function Toolbar({ editor }: { editor: Editor }) {
     if (表起点 === null) return;
     const tr = setAlign(editor.state, 表起点, 对);
     // 已经是这一档时 setAlign 给 null：同一列连点两次"居中"不该把这篇标成待保存
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+  };
+  /** 批量动作。判据（有没有框多格）在 `批量` 里，这里不重复判一次 */
+  const 走批量 = (做: Parameters<typeof 批量>[1]) => {
+    const tr = 批量(editor.state, 做);
     if (tr) editor.view.dispatch(tr.scrollIntoView());
   };
 
@@ -192,7 +221,49 @@ export function Toolbar({ editor }: { editor: Editor }) {
           !$from.depth,
         ),
       )}
-      {表起点 !== null ? (
+      {表起点 !== null && 矩 ? (
+        <>
+          <span className="hint" aria-hidden="true">
+            {`已选 ${((矩.r1 - 矩.r0 + 1) * (矩.c1 - 矩.c0 + 1)).toString()} 格`}
+          </span>
+          {btn("cells-clear", "清空所选的每一格（Delete）", "cellsClear", () =>
+            走批量(清场所选)
+          )}
+          {btn("cells-fill", "把左上那一格抄进其余格（Ctrl+D）", "cellsFill", () =>
+            走批量(填充所选)
+          )}
+          {btn(
+            "cells-row-",
+            "删掉所选覆盖的每一行（表头行不给删）",
+            "rowRemove",
+            () => 走批量(删所选行),
+            false,
+            矩.r1 === 0,
+          )}
+          {btn(
+            "cells-col-",
+            矩.c0 === 0 && 矩.c1 >= 列数 - 1 ? "整张表都是列，删不动" : "删掉所选覆盖的每一列",
+            "colRemove",
+            () => 走批量(删所选列),
+            false,
+            矩.c0 === 0 && 矩.c1 >= 列数 - 1,
+          )}
+          {/* 对齐是**列**的属性，所以按覆盖到的每一列逐列生效（分隔行与格子一起改，同 setAlign） */}
+          {btn("cal-l", "所选各列靠左（产出 `:---`）", "alignLeft", () =>
+            走批量((s, 表, 矩) => 对所齐所选(s, 表, 矩, "left"))
+          )}
+          {btn("cal-c", "所选各列居中（产出 `:---:`）", "alignCenter", () =>
+            走批量((s, 表, 矩) => 对所齐所选(s, 表, 矩, "center"))
+          )}
+          {btn("cal-r", "所选各列靠右（产出 `---:`）", "alignRight", () =>
+            走批量((s, 表, 矩) => 对所齐所选(s, 表, 矩, "right"))
+          )}
+          {btn("cal-x", "取消所选各列的对齐（产出 `---`）", "alignNone", () =>
+            走批量((s, 表, 矩) => 对所齐所选(s, 表, 矩, ""))
+          )}
+        </>
+      ) : null}
+      {表起点 !== null && !矩 ? (
         <>
           {btn("row", "在下面加一行（末格按 Tab 也可以）", "rowAdd", () => 改表(addRow))}
           {btn(
