@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { 匹配, type Matchable } from "./palette";
+import { 补新建, 匹配, type Matchable, type PaletteItem } from "./palette";
 
 /** 命令面板的排序是"打字 → 出结果"这件事的全部，只能钉在测试里 */
 const 项 = (label: string, hint?: string): Matchable & { id: string } => ({ id: label, label, hint });
@@ -53,5 +53,33 @@ describe("命令面板匹配", () => {
   it("同分保持原序（稳定）", () => {
     const 同 = [项("甲一"), 项("乙一"), 项("丙一")];
     expect(匹配("一", 同).map((c) => c.label)).toEqual(["甲一", "乙一", "丙一"]);
+  });
+});
+
+describe("补新建：打字没找到才给的那一条", () => {
+  const 命令 = (label: string): PaletteItem => ({ id: label, group: "笔记", label, run: () => {} });
+
+  it("有任意命中就不给「新建」——哪怕只是前缀命中", () => {
+    const 列 = [命令("性能复测样本（临时）")];
+    const 建: string[] = [];
+    // 从前查的是"全等标题"，于是打前缀时新建照样冒出来，还 unshift 到第 0 行
+    expect(补新建(列, "性能复测", (t) => 建.push(t))).toBe(列);
+    expect(建).toEqual([]);
+  });
+
+  it("一条命中都没有才给，且是唯一一条；run 建的就是打进去的词", () => {
+    const 建: string[] = [];
+    const 出 = 补新建([], "全新的一篇", (t) => 建.push(t));
+    expect(出.map((i) => i.id)).toEqual(["新建"]);
+    expect(出[0]!.label).toBe("新建笔记「全新的一篇」");
+    出[0]!.run();
+    expect(建).toEqual(["全新的一篇"]);
+  });
+
+  it("空查询、没给新建回调：都不给这一条", () => {
+    const 建 = (t: string) => t;
+    expect(补新建([], "", 建)).toEqual([]);
+    expect(补新建([], "   ", 建)).toEqual([]);
+    expect(补新建([], "某", undefined)).toEqual([]);
   });
 });

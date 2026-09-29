@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { 匹配, type PaletteItem } from "./palette";
+import { 补新建, 匹配, type PaletteItem } from "./palette";
 
 /**
  * 命令面板：`Ctrl+K` 唤起，一次输入同时解决"跳到哪篇"和"做个动作"。
@@ -33,21 +33,14 @@ export function CommandPalette({
 }: {
   标题: string;
   items: PaletteItem[];
-  /** 给了就在列表顶上多一条"新建笔记「输入的内容」"——打字没找到就是要建 */
+  /** 给了就多了"打字没找到→建一篇"这条路：**只在一条命中都没有时**出现（判据在 `补新建`） */
   新建?: (标题: string) => void;
   onClose: () => void;
 }) {
   const [q, setQ] = useState("");
   const [选, set选] = useState(0);
   const 表 = useRef<HTMLDivElement>(null);
-  const 出 = useMemo(() => {
-    const 列 = 匹配(q, items, 20);
-    const 词 = q.trim();
-    if (新建 && 词 && !items.some((i) => i.label === 词)) {
-      列.unshift({ id: "新建", group: "新建", label: `新建笔记「${词}」`, run: () => 新建(词) });
-    }
-    return 列;
-  }, [q, items, 新建]);
+  const 出 = useMemo(() => 补新建(匹配(q, items, 20), q, 新建), [q, items, 新建]);
   // 打字之后原来的第 3 条可能已经不是第 3 条了，越界就贴到末尾
   const 中 = Math.min(选, Math.max(0, 出.length - 1));
 
