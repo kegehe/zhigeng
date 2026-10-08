@@ -145,13 +145,68 @@ export function 着色(
 ): DocumentFragment | null {
   if (!语言 || !代码.trim()) return null;
   if (代码.length > 最长) return null;
-  let 值: string;
+  const 区间 = 分段(语言, 代码);
+  if (!区间) return null;
+  const 片 = d.createDocumentFragment();
+  搬进(new DOMParser().parseFromString(区间.html, "text/html").body, 片, d);
+  return 片;
+}
+
+export type 着色区间 = { 起: number; 止: number; 类: string };
+
+/**
+ * 代码里每一段"该上色的文字"在**原文里的偏移**。装饰器要的是这个，不是节点：
+ * ProseMirror 的可编辑那一面由 PM 自己拼 DOM，我们只能给它 `Decoration.inline`。
+ *
+ * 顺带一条安全事实：这条路上 hljs 的 HTML 只被读成"偏移 + 类名"，**永远不进 DOM**，
+ * 所以它连注入元素的机会都没有——最坏是类名奇怪，而类名过 `是着色类` 的白名单。
+ * 认不出语言 / 空 / 超长都给空表（= 不着色，不是画错）。
+ */
+export function 着色区间(语言: string | null, 代码: string): 着色区间[] {
+  return (语言 && 代码.trim() && 代码.length <= 最长 && 分段(语言, 代码)?.区间) || [];
+}
+
+/** 缓存：一次按键只重新分词被改到的那一块。上限是防着一篇里滚过几百个代码块把内存吃掉 */
+const 缓存 = new Map<string, { html: string; 区间: 着色区间[] }>();
+const 缓存上限 = 200;
+
+/** 分一次词，HTML 与偏移一起出（两条路共用同一次分词，两边才不会分叉） */
+function 分段(语言: string, 代码: string): { html: string; 区间: 着色区间[] } | null {
+  const 键 = 语言 + "\u0000" + 代码;
+  const 中 = 缓存.get(键);
+  if (中) return 中;
+  let 出: { html: string; 区间: 着色区间[] };
   try {
-    值 = hljs.highlight(代码, { language: 语言, ignoreIllegals: true }).value;
+    const r = hljs.highlight(代码, { language: 语言, ignoreIllegals: true });
+    出 = { html: r.value, 区间: 区间of(r.value) };
   } catch {
     return null;
   }
-  const 片 = d.createDocumentFragment();
-  搬进(new DOMParser().parseFromString(值, "text/html").body, 片, d);
-  return 片;
+  if (缓存.size >= 缓存上限) 缓存.delete(缓存.keys().next().value as string);
+  缓存.set(键, 出);
+  return 出;
+}
+
+/** 把 hljs 的 HTML 走一遍，累计出每段带类文字的原文偏移 */
+function 区间of(html: string): 着色区间[] {
+  const 果: 着色区间[] = [];
+  let 偏 = 0;
+  const 走 = (父: Node, 承类: string) => {
+    for (const 子 of Array.from(父.childNodes)) {
+      if (子.nodeType === Node.TEXT_NODE) {
+        const 文 = 子.textContent ?? "";
+        if (文 && 承类) 果.push({ 起: 偏, 止: 偏 + 文.length, 类: 承类 });
+        偏 += 文.length;
+        continue;
+      }
+      const 元 = 子 as HTMLElement;
+      if (元.tagName !== "SPAN" || !是着色类(元.className)) {
+        偏 += 子.textContent?.length ?? 0;
+        continue;
+      }
+      走(元, 承类 ? 承类 + " " + 元.className : 元.className);
+    }
+  };
+  走(new DOMParser().parseFromString(html, "text/html").body, "");
+  return 果;
 }

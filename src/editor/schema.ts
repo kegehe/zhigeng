@@ -1,6 +1,7 @@
 import { Extension, Mark, Node, type Attributes, type Editor } from "@tiptap/core";
-import type { Node as PmNode } from "@tiptap/pm/model";
-import { Plugin, TextSelection, type Transaction, type EditorState } from "@tiptap/pm/state";
+import type { Node as PmNode, Schema } from "@tiptap/pm/model";
+import { Plugin, PluginKey, TextSelection, type Transaction, type EditorState } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { EditorView, NodeView, ViewMutationRecord } from "@tiptap/pm/view";
 import { history, redo, undo } from "@tiptap/pm/history";
 import {
@@ -19,6 +20,8 @@ import {
   type BlockTypeId,
 } from "./blocks";
 import { 批量, TableSelect } from "./tableSelectPlugin";
+import { 围栏行of } from "./fence";
+import { 语言of, 着色区间 } from "./highlight";
 import { mightRender, renderOpaque } from "./render";
 
 /**
@@ -198,10 +201,12 @@ export function 分派岛上鼠标(ev: Event): 岛上鼠标 {
 class OpaqueView implements NodeView {
   dom: HTMLDivElement;
   contentDOM: HTMLElement;
-  readonly host: HTMLDivElement;
+  /** 代码块走围栏账本时**没有宿主**（单面，见构造器），其余两副面孔的类型才有 */
+  readonly host: HTMLDivElement | null;
   private kind = "raw";
   private 正文 = "";
   private 待重算 = true;
+  private 单面 = false;
 
   constructor(
     node: PmNode,
@@ -236,11 +241,26 @@ class OpaqueView implements NodeView {
     const code = document.createElement("code");
     pre.append(code);
 
+    /**
+     * **代码块（走围栏账本的那种）只有一面**：围栏不在正文里，可编辑的那一面画出来就是
+     * 渲染好的那份（着色由 `CodeHighlight` 装饰、语言牌由 CSS 从 `data-md-lang` 画），
+     * 所以点进去与退出来是同一批 DOM——用户要的"样式不变"到这儿才真的成立。
+     * 没闭栏的代码块与引用 / Callout / 公式那些仍然两副面孔：它们的"显示形"要剥掉
+     * 正文里真实存在的字节，改一处就对不上一次。
+     */
+    this.单面 = this.kind === "code" && Boolean(node.attrs.mdFenceOpen) && Boolean(node.attrs.mdFenceClose);
+    if (this.单面) {
+      dom.dataset["mdCode"] = "";
+      const 语 = 围栏行of(String(node.attrs.mdFenceOpen))?.语言 ?? "";
+      if (语) dom.setAttribute("data-md-lang", 语);
+    }
+
     // 宿主排在源文本**前面**：PM 的 `localPosFromDOM` 按"点击的元素在 contentDOM 之前还是
     // 之后"决定落点，排在前面才拿到块首，点一下就是"从这块的开头改源码"。
-    dom.append(host, pre);
+    if (!this.单面) dom.append(host);
+    dom.append(pre);
     this.dom = dom;
-    this.host = host;
+    this.host = this.单面 ? null : host;
     this.contentDOM = code;
     渲染实例.set(dom, this);
     this.补渲染();
@@ -248,17 +268,22 @@ class OpaqueView implements NodeView {
 
   /** 只在脏了的时候重画：一次焦点转移不该重排没动过的块 */
   补渲染(): void {
-    if (!this.待重算) return;
+    if (this.单面 || !this.待重算) return;
     this.待重算 = false;
     const 画 = mightRender(this.kind) ? renderOpaque(this.kind, this.正文, document) : null;
     // 画不出来（HTML、未识别语法、带子项的列表项）就别藏源文本：
     // 把内容收进一个空宿主里，等于在界面上吃掉这一块。
     this.dom.dataset["mdView"] = 画 ? "on" : "none";
-    this.host.replaceChildren(画 ?? document.createTextNode(""));
+    this.host?.replaceChildren(画 ?? document.createTextNode(""));
   }
 
   update(node: PmNode): boolean {
     const kind = String(node.attrs.mdKind ?? "raw");
+    // 单面 / 两面是 **DOM 形状**的差别（有没有宿主），不是属性差别——交给 PM 重建视图，
+    // 在这儿将就就会留下"点进去没有可编辑面"或"两面重叠"的怪状态
+    const 该单面 =
+      kind === "code" && Boolean(node.attrs.mdFenceOpen) && Boolean(node.attrs.mdFenceClose);
+    if (该单面 !== this.单面) return false;
     if (kind !== this.kind) {
       this.kind = kind;
       this.dom.setAttribute("data-md-raw", kind);
@@ -293,7 +318,7 @@ class OpaqueView implements NodeView {
    */
   stopEvent(ev: Event): boolean {
     const 目标 = ev.target as Element | null;
-    if (!目标 || !this.host.contains(目标)) return false;
+    if (!目标 || !this.host?.contains(目标)) return false;
     if (目标.closest(".cal-head")) {
       if (ev.type === "mousedown") {
         const box = 目标.closest<HTMLElement>(".callout");
@@ -708,6 +733,138 @@ export const FocusIndicator = Extension.create({
 });
 
 /**
+ * 代码块的语法着色**装饰**（docs/03 §代码块的着色）。
+ *
+ * 为什么走装饰而不是 NodeView 自己画：可编辑那一面的 DOM 归 ProseMirror，我们只能递给它
+ * `Decoration.inline`。这也让"点进去"与"退出来"是**同一批 span**——代码块从此不再有
+ * 两副面孔，聚焦那一刻样式不会变（用户要的正是这个）。
+ *
+ * **只装饰视口附近**（ADR-004 §大文档策略里那条"可视区之外不挂 Decoration"）。
+ * 真机量过不限视口的版本：30 个 30 行代码块的极端文档上，中位数没变（PM 重排本来就
+ * 6.6ms），但 p95 从 10.6 顶到 16ms、最差一帧从 26ms 顶到 112ms——那是一次按键要重建
+ * 三千多个装饰。收口之后装饰数量由屏幕高度决定，与文档规模脱钩。
+ *
+ * 视口未知（jsdom、以及插件刚建好还没测过）时**全部装饰**：宁可第一次装载贵一点，
+ * 也不要"第一帧没颜色、下一帧才跳出来"那种闪烁。分词结果按 `(语言, 正文)` 缓存，
+ * 一次按键只重新分词被改到的那一块。着色永远不改文档——它只加 `class`。
+ */
+const 视口键 = new PluginKey<[number, number][]>("mdCodeViewport");
+let 视口: [number, number][] = [];
+/** 上下各多带一屏的余量，滚动时不会立刻露出没上色的边（按字符估，够粗） */
+const 余量 = 4000;
+/**
+ * 装载那一刻还不知道视口，先按"文档开头一屏"算。
+ *
+ * 不选"全装饰"：真机量过，30 个 30 行代码块的文档上那一次要 110ms 左右，正好砸在打开
+ * 笔记的第一帧之后。也不选"先不装饰、等上报再补"：那样滚动到过的位置会有一帧没颜色。
+ * 开头一屏是"打开时看得见的那部分"的过估计，屏幕外的等第一次滚动上报。
+ */
+const 首屏 = 12000;
+
+export const CodeHighlight = Extension.create({
+  name: "codeHighlight",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        state: {
+          init: (_c, cfg) => {
+            视口 = [[0, 首屏]];
+            return 着色装饰(cfg.doc, cfg.schema);
+          },
+          apply: (tr, 旧, _前, 后) => {
+            const 新 = tr.getMeta(视口键);
+            const 换了 = 新 !== undefined && 新 !== 视口;
+            if (新) 视口 = 新;
+            if (!tr.docChanged && !换了) return 旧;
+            return 着色装饰(后.doc, 后.schema, 视口);
+          },
+        },
+        props: {
+          decorations(state) {
+            return (this as { getState(state: EditorState): DecorationSet | null }).getState(state);
+          },
+        },
+        view: (view) => {
+          let 排 = 0;
+          const 报 = () => {
+            排 = 0;
+            视口 = 视口of(view);
+            view.dispatch(view.state.tr.setMeta(视口键, 视口));
+          };
+          const 节流 = () => {
+            if (!排) 排 = requestAnimationFrame(报);
+          };
+          节流();
+          window.addEventListener("scroll", 节流, { capture: true, passive: true });
+          window.addEventListener("resize", 节流);
+          return {
+            destroy: () => {
+              window.removeEventListener("scroll", 节流, { capture: true });
+              window.removeEventListener("resize", 节流);
+              if (排) cancelAnimationFrame(排);
+            },
+          };
+        },
+      }),
+    ];
+  },
+});
+
+/**
+ * 编辑器此刻在屏幕上的那一段文档位置。
+ *
+ * PM 的 `visibleRanges` 是内部实现（1.42 的类型里没有），所以用公开 API 自己量一次：
+ * 拿编辑器矩形与视口的交集，取上下两条边各 `posAtCoords` 一下。**只要是个粗界**——
+ * 下面还有 4000 字的余量兜着，差一点不会露白。
+ * 没有布局的环境（jsdom）矩形全是 0 → 返回空表 = "不知道" → 调用方回落到全装饰。
+ */
+function 视口of(view: EditorView): [number, number][] {
+  const r = view.dom.getBoundingClientRect();
+  const 顶 = Math.max(r.top, 0);
+  const 底 = Math.min(r.bottom, window.innerHeight || 0);
+  if (底 - 顶 <= 0 || r.width <= 0) return [];
+  const x = r.left + Math.min(8, r.width / 2);
+  const 上 = view.posAtCoords({ left: x, top: 顶 + 1 });
+  const 下 = view.posAtCoords({ left: x, top: 底 - 1 });
+  if (!上 || !下) return [];
+  return [[Math.min(上.pos, 下.pos), Math.max(上.pos, 下.pos)]];
+}
+
+/** 落在视口（含余量）里的位置才上色 */
+function 看得见(起: number, 止: number): boolean {
+  if (!视口.length) return true;
+  return 视口.some(([a, b]) => 止 >= a - 余量 && 起 <= b + 余量);
+}
+
+function 着色装饰(doc: PmNode, schema: Schema, 限: [number, number][] = 视口): DecorationSet {
+  if (!schema.spec.nodes.get("mdOpaque")) return DecorationSet.empty;
+  const 备份 = 视口;
+  视口 = 限;
+  const 出: Decoration[] = [];
+  try {
+    doc.forEach((块, off) => {
+      if (块.type.name !== "mdOpaque") return;
+      const a = 块.attrs as Record<string, unknown>;
+      // 只覆盖走了围栏账本的那批：正文就是纯代码。没闭栏的围栏不接管（那条路上正文里
+      // 本来就带着 ```，给它上色会把围栏当代码关键字）
+      if (!a.mdFenceOpen || !a.mdFenceClose) return;
+      if (!看得见(off, off + 块.nodeSize)) return;
+      const 语 = 语言of(围栏行of(String(a.mdFenceOpen))?.语言 ?? "");
+      const 文 = 块.textContent;
+      if (!语 || !文) return;
+      for (const 段 of 着色区间(语, 文)) {
+        // 缓存与文档对不上时宁可少画：越界的位置会让 PM 直接抛，一抛整篇画不出来
+        if (段.止 > 文.length || 段.起 >= 段.止) continue;
+        出.push(Decoration.inline(off + 1 + 段.起, off + 1 + 段.止, { class: 段.类 }));
+      }
+    });
+    return DecorationSet.create(doc, 出);
+  } finally {
+    视口 = 备份;
+  }
+}
+
+/**
  * 焦点决定不透明块显示哪一副面孔：选区碰到的块是源文本形，其余是显示形。
  *
  * 三条口径：
@@ -942,6 +1099,7 @@ export const mdExtensions = [
   TableKeys,
   TablePaste,
   TableSelect,
+  CodeHighlight,
   FocusIndicator,
   OpaqueFace,
   History,

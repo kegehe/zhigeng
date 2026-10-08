@@ -364,6 +364,42 @@
     font-size: var(--text-xs);
   }
   /*
+   * 代码块**只有一面**（docs/03 §代码块的着色、§块渲染）：走围栏账本的那种，可编辑的那一面
+   * 就是渲染好的那一张卡片——所以这里把上面 `.codeblock` 那套盒子原样搬到 wrapper 上，
+   * 语言牌由 `::before` 从 `data-md-lang` 画（账本里那行开栏的 info 首词，不是正文的一部分）。
+   *
+   * 两条不能省：`.md-src` 的边框/底色/内边距要清掉（否则卡片里套一张"源码条"），
+   * 以及下面未分层那一段要管换行——`prosemirror-view` 的 `.ProseMirror pre` 未分层，
+   * 分层规则压不住它。
+   */
+  .block-editor .md-opaque[data-md-code] {
+    margin: 0 0 var(--gap-para);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--bg-sunken);
+  }
+  .block-editor .md-opaque[data-md-code][data-md-lang]::before {
+    content: attr(data-md-lang);
+    display: block;
+    margin-bottom: var(--space-1);
+    color: var(--text-disabled);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+  .block-editor .md-opaque[data-md-code] .md-src {
+    margin: 0;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: none;
+    color: inherit; /* 源文本形那套"沉底灰"是给"你在改文件"这件事用的，这里不该有 */
+  }
+  .block-editor .md-opaque[data-md-code] .md-src code {
+    font-family: var(--font-mono);
+    font-size: var(--text-mono);
+    line-height: var(--leading-body);
+  }
+  /*
    * 代码着色的类 → 语义映射（docs/03 §块渲染）。
    *
    * 颜色一律走 tokens.css 的 `--code-*`：护栏禁字面量颜色，而双主题本来就该由 token 承担，
@@ -372,62 +408,62 @@
    *
    * 认不出的类不着色（保持正文色）：**着色层永远不许成为内容缺失的原因**。
    */
-  .block-editor .md-view .codeblock .hljs-comment,
-  .block-editor .md-view .codeblock .hljs-quote {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-comment,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-quote {
     color: var(--code-com);
     font-style: italic;
   }
-  .block-editor .md-view .codeblock .hljs-doctag,
-  .block-editor .md-view .codeblock .hljs-keyword,
-  .block-editor .md-view .codeblock .hljs-formula,
-  .block-editor .md-view .codeblock .hljs-selector-tag {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-doctag,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-keyword,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-formula,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-selector-tag {
     color: var(--code-key);
   }
-  .block-editor .md-view .codeblock .hljs-section,
-  .block-editor .md-view .codeblock .hljs-emphasis,
-  .block-editor .md-view .codeblock .hljs-subst,
-  .block-editor .md-view .codeblock .hljs-strong,
-  .block-editor .md-view .codeblock .hljs-literal,
-  .block-editor .md-view .codeblock .hljs-type,
-  .block-editor .md-view .codeblock .hljs-name,
-  .block-editor .md-view .codeblock .hljs-tag {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-section,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-emphasis,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-subst,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-strong,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-literal,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-type,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-name,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-tag {
     color: var(--code-tag);
   }
-  .block-editor .md-view .codeblock .hljs-variable,
-  .block-editor .md-view .codeblock .hljs-template-variable,
-  .block-editor .md-view .codeblock .hljs-class .hljs-title,
-  .block-editor .md-view .codeblock .hljs-attr,
-  .block-editor .md-view .codeblock .hljs-property,
-  .block-editor .md-view .codeblock .hljs-attribute,
-  .block-editor .md-view .codeblock .hljs-params {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-variable,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-template-variable,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-class .hljs-title,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-attr,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-property,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-attribute,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-params {
     color: var(--code-var);
   }
-  .block-editor .md-view .codeblock .hljs-regexp,
-  .block-editor .md-view .codeblock .hljs-link {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-regexp,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-link {
     color: var(--code-type);
   }
-  .block-editor .md-view .codeblock .hljs-string,
-  .block-editor .md-view .codeblock .hljs-char.escape_ {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-string,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-char.escape_ {
     color: var(--code-str);
   }
-  .block-editor .md-view .codeblock .hljs-symbol,
-  .block-editor .md-view .codeblock .hljs-bullet,
-  .block-editor .md-view .codeblock .hljs-number {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-symbol,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-bullet,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-number {
     color: var(--code-num);
   }
-  .block-editor .md-view .codeblock .hljs-built_in,
-  .block-editor .md-view .codeblock .hljs-title.class.inherited,
-  .block-editor .md-view .codeblock .hljs-title.class_,
-  .block-editor .md-view .codeblock .hljs-title {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-built_in,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-title.class.inherited,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-title.class_,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-title {
     color: var(--code-fn);
   }
-  .block-editor .md-view .codeblock .hljs-addition {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-addition {
     color: var(--success);
   }
-  .block-editor .md-view .codeblock .hljs-deletion {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-deletion {
     color: var(--danger);
   }
-  .block-editor .md-view .codeblock .hljs-meta {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-meta {
     color: var(--code-com);
   }
   /* 公式只剥围栏、居中排。没有 TeX 渲染器，画成公式是另一档活（docs/02 未列它） */
@@ -784,10 +820,11 @@
    它是**未分层**的，而级联里未分层赢过所有 `@layer`——所以写在 `@layer components` 里的覆盖
    再高的特异度都不生效（真机量过：计算值仍是 pre-wrap）。代码块的显示形要横向滚动，只能
    同样走未分层。放这一小段的唯一理由是"必须压住未分层的第三方声明"，别把它当逃生口。 */
-.block-editor .md-view .codeblock pre {
+.block-editor .md-view .codeblock pre,
+.block-editor .md-opaque[data-md-code] .md-src {
   /* 代码折行会把一条语句切成三行，缩进的语义当场没了（`if (a) return;` 折开像三个判断）。
-     源文本形仍然换行——那一面是在改字，横向滚动会让光标跟着跑出可视区：两副面孔口径不同
-     是有意的，别"顺手统一"。 */
+     源文本形（引用、未闭栏的围栏那些）仍然换行——那面是在改字，横向滚动会让光标跟着
+     跑出可视区：两副面孔口径不同是有意的，别"顺手统一"。 */
   white-space: pre;
   overflow-x: auto;
 }

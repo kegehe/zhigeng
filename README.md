@@ -62,7 +62,7 @@ Notion 的 zip 导入（MD/Obsidian 已可做）、导出、任何 AI 调用（M
 
 ```bash
 pnpm install
-node scripts/check.mjs          # 一条命令跑完所有门禁（125 项 Rust 测试 + clippy + tsc + 238 项 vitest + 护栏）
+node scripts/check.mjs          # 一条命令跑完所有门禁（125 项 Rust 测试 + clippy + tsc + 243 项 vitest + 护栏）
 node scripts/check.mjs --bench  # 再加性能门禁：ipc-bench / write-bench，超 8ms 即非零退出
 pnpm build                      # 前端类型检查 + 打包
 ```

@@ -1140,19 +1140,19 @@ describe("显示形切换不许碰到字节", () => {
   // 表格现在被网格节点接管了（见下面的表格用例），所以这一组"两副面孔"的测试改用代码块：
   // 代码块仍然是不透明块，两副面孔的机制在它身上和引用/公式完全一样
   it("光标进来退回源文本，交出口变回显示形", () => {
-    const { doc } = load("03-代码表格与公式");
+    const { doc } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
-    expect(码).toBeTruthy();
+    const 引 = 不透明块(editor)[0]!;
+    expect(引).toBeTruthy();
 
-    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBeUndefined();
-    expect(面孔(editor, 码.pos)!.querySelector(".codeblock")).not.toBeNull();
-    expect(面孔(editor, 码.pos)!.querySelector(".md-src")).not.toBeNull();
+    expect(面孔(editor, 引.pos)!.dataset["mdMode"]).toBeUndefined();
+    expect(面孔(editor, 引.pos)!.querySelector(".md-view > *")).not.toBeNull();
+    expect(面孔(editor, 引.pos)!.querySelector(".md-src")).not.toBeNull();
 
-    放进(editor, 码.pos);
-    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBe("source");
+    放进(editor, 引.pos);
+    expect(面孔(editor, 引.pos)!.dataset["mdMode"]).toBe("source");
     放到文末(editor);
-    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBeUndefined();
+    expect(面孔(editor, 引.pos)!.dataset["mdMode"]).toBeUndefined();
     editor.destroy();
   });
 
@@ -1169,19 +1169,16 @@ describe("显示形切换不许碰到字节", () => {
     editor.destroy();
   });
 
-  it("改了代码块的源文本，交出口之后显示形跟着变", () => {
+  it("改了源文本，交出口之后显示形跟着变", () => {
     // 重画发生在"交出焦点"那一刻，不在击键路径上。这条钉住两件事：
     // 该重画的时候真的重画了，且它读的是节点正文而不是载入时那份旧字节
-    const { doc } = load("03-代码表格与公式");
+    const { doc } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
-    放进(editor, 码.pos);
-    const 块 = editor.state.doc.nodeAt(码.pos)!;
-    // 插在开栏那一行之后：动围栏会让这块不再是合法代码块，那就测不到"重画"了
-    const 正文起 = 码.pos + 1 + 块.textContent.indexOf("\n") + 1;
-    editor.view.dispatch(editor.state.tr.insertText("改", 正文起));
+    const 引 = 不透明块(editor)[0]!;
+    放进(editor, 引.pos);
+    editor.view.dispatch(editor.state.tr.insertText("改", 引.pos + 1));
     放到文末(editor);
-    expect(面孔(editor, 码.pos)!.querySelector(".codeblock code")!.textContent).toContain("改");
+    expect(面孔(editor, 引.pos)!.querySelector(".quote")!.textContent).toContain("改");
     editor.destroy();
   });
 
@@ -1202,17 +1199,17 @@ describe("显示形切换不许碰到字节", () => {
   it("点显示形要真的把光标放进来", () => {
     // 真机抓的：Chromium 不会把插入符放进 `contenteditable=false` 的岛里，点了什么也不发生。
     // 所以这一下必须由 NodeView 自己发选区——不接管的话"点一下改源码"整条路是死的。
-    const { doc } = load("03-代码表格与公式");
+    const { doc } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
-    const 壳 = 面孔(editor, 码.pos)!;
+    const 引 = 不透明块(editor)[0]!;
+    const 壳 = 面孔(editor, 引.pos)!;
     expect(壳.dataset["mdMode"]).toBeUndefined();
     壳
       .querySelector(".md-view")!
       .dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
     expect(editor.state.selection.$from.parent.type.name).toBe("mdOpaque");
-    expect(editor.state.selection.from).toBe(码.pos + 1);
-    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBe("source");
+    expect(editor.state.selection.from).toBe(引.pos + 1);
+    expect(面孔(editor, 引.pos)!.dataset["mdMode"]).toBe("source");
     editor.destroy();
   });
 
@@ -1237,17 +1234,17 @@ describe("显示形切换不许碰到字节", () => {
     // jsdom 里没有 `elementFromPoint`，交回 PM 的 `mousedown` 会在 PM 内部抛——那是环境的
     // 限制不是产品的问题（WebView2 有这个方法）。所以这里只喂不走坐标计算的事件类型，
     // "右键那一下该交回"由上面那条判据断言，效果在真机上验。
-    const { doc, src } = load("03-代码表格与公式");
+    const { doc, src } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
-    const 宿主 = 面孔(editor, 码.pos)!.querySelector(".md-view")!;
+    const 引 = 不透明块(editor)[0]!;
+    const 宿主 = 面孔(editor, 引.pos)!.querySelector(".md-view")!;
     const 选区前 = editor.state.selection.from;
     for (const 类 of ["contextmenu", "mouseup", "click"]) {
       宿主.dispatchEvent(new MouseEvent(类, { bubbles: true, button: 2 }));
       宿主.dispatchEvent(new MouseEvent(类, { bubbles: true, button: 0 }));
     }
     expect(editor.state.selection.from).toBe(选区前);
-    expect(面孔(editor, 码.pos)!.dataset["mdMode"]).toBeUndefined();
+    expect(面孔(editor, 引.pos)!.dataset["mdMode"]).toBeUndefined();
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
@@ -1281,6 +1278,82 @@ describe("显示形切换不许碰到字节", () => {
       expect(壳.querySelector(".md-src")!.textContent!.trim(), b.kind).toBeTruthy();
     }
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+});
+
+/**
+ * 代码块**只有一面**（2026-09-30 第二步）。
+ *
+ * 用户要的是"点进去与不点进去样式一样"。围栏进了账本之后，可编辑的那一面本身就是渲染好的
+ * 那张卡片：着色由 `CodeHighlight` 的装饰给（PM 的 DOM 只能这样上色），语言牌由 CSS 从
+ * `data-md-lang` 画。所以这一组判的是"两态同一批 DOM"，以及**上色永远不许碰字节**。
+ */
+describe("代码块单面：着色与语言牌跟着编辑面走", () => {
+  const 代码块 = (editor: ReturnType<typeof createTestEditor>) =>
+    不透明块(editor).find((b) => b.kind === "code")!;
+
+  it("走围栏账本的那一块没有宿主，可编辑面里就有 hljs 的 span", () => {
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 码 = 代码块(editor);
+    const 壳 = 面孔(editor, 码.pos)!;
+    expect(壳.querySelector(".md-view"), "代码块不该再有显示形宿主").toBeNull();
+    expect(壳.querySelector(".md-src code span.hljs-keyword")).not.toBeNull();
+    expect(壳.getAttribute("data-md-lang")).toBe("rust");
+    editor.destroy();
+  });
+
+  it("聚焦前后是同一批 DOM：正文与 span 数量都不许变", () => {
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 码 = 代码块(editor);
+    const 前 = () => {
+      const 源 = 面孔(editor, 码.pos)!.querySelector(".md-src")!;
+      return [源.textContent!, 源.querySelectorAll("span").length] as const;
+    };
+    const 未聚焦 = 前();
+    expect(未聚焦[1]).toBeGreaterThan(0);
+    放进(editor, 码.pos);
+    expect(前()).toEqual(未聚焦);
+    放到文末(editor);
+    expect(前()).toEqual(未聚焦);
+    editor.destroy();
+  });
+
+  it("装饰只可能带 hljs- 开头的类，且不动一个字节", () => {
+    const { doc, src } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 码 = 代码块(editor);
+    放进(editor, 码.pos);
+    editor.view.dispatch(editor.state.tr.insertText(" // 改一行", 码.pos + 5));
+    const 类们 = new Set<string>();
+    面孔(editor, 码.pos)!
+      .querySelectorAll(".md-src span")
+      .forEach((s) => s.className.split(/\s+/).forEach((c) => 类们.add(c)));
+    for (const 类 of 类们) expect([类, 类.startsWith("hljs-")]).toEqual([类, true]);
+    // 着色是纯显示：产出的字节里不许混进任何 span / class
+    const 出 = docToMarkdown(editor.state.doc, doc);
+    expect(出).not.toContain("hljs");
+    expect(出).toContain(" // 改一行");
+    expect(docToMarkdown(editor.state.doc, { ...doc, blocks: doc.blocks })).toBe(出);
+    editor.destroy();
+    expect(src.length).toBeGreaterThan(0);
+  });
+
+  it("没闭栏的围栏仍然两副面孔（那种形状拼不回去，不能假装是代码框）", () => {
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        { kind: "code", id: null, raw: "```go\nfunc main() {\n", gapBefore: "", content: "", level: null, checked: null, fields: [], children: [] },
+      ],
+    };
+    const editor = createTestEditor(d);
+    const 壳 = 面孔(editor, 0)!;
+    expect(壳.querySelector(".md-view")).not.toBeNull();
+    expect(壳.querySelector(".md-src")!.textContent).toContain("```go");
+    expect(壳.querySelector(".md-src span"), "围栏在正文里，不上色").toBeNull();
     editor.destroy();
   });
 });
