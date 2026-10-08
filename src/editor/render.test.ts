@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { EditDoc } from "../ipc/types";
+import { 语言of } from "./highlight";
 import { mightRender, renderOpaque } from "./render";
 
 /**
@@ -123,6 +124,61 @@ describe("显示形：代码 / 表格 / 公式 / 资产", () => {
     expect(text("code", "````\n甲\n```\n````")).toBe("甲\n```");
     // 没闭栏：CommonMark 与内核都判"到文末都是代码"，那就照画
     expect(text("code", "```rs\n没有闭栏")).toBe("没有闭栏");
+  });
+
+  it("认得的语言出 span，但**文字必须逐字不变**", () => {
+    const 源 = "```js\nconst a = 1; // 注释\n```";
+    const box = r("code", 源);
+    const 码 = box?.querySelector("code");
+    expect(码?.querySelectorAll("span").length ?? 0).toBeGreaterThan(0);
+    // 着色只是加一层 span：文字与不分词时一模一样，一个字符都不许多不许少
+    expect(码?.textContent).toBe("const a = 1; // 注释");
+    // class 上带的是**用户自己写的那个词**（`js`），不是 hljs 的规范名——与语言牌同源，
+    // 两处都别替用户改口径
+    expect(码?.className).toBe("language-js");
+    expect(box?.querySelector(".lang")?.textContent).toBe("js");
+  });
+
+  it("未知语言不着色、也不许顺手猜一门：正文照旧全在", () => {
+    const 码 = r("code", "```klingon\nnuqDotlh\n```")?.querySelector("code");
+    expect(码?.querySelectorAll("span")).toHaveLength(0);
+    expect(码?.textContent).toBe("nuqDotlh");
+    expect(码?.className).toBe("");
+    // text / txt 是"我就是要纯文本"，即便 hljs 有 plaintext 方言也不着色
+    expect(r("code", "```text\nconst a = 1;\n```")?.querySelector("code")?.querySelector("span")).toBeNull();
+  });
+
+  it("代码内容长得像 HTML 也只能是文字（着色层的注入面）", () => {
+    const 源 = '```html\n<img src=x onerror=alert(1)>\n<div class="a">&amp;</div>\n```';
+    const 码 = r("code", 源)?.querySelector("code");
+    expect(码?.querySelector("img")).toBeNull();
+    expect(码?.querySelector("div")).toBeNull();
+    // highlight.js 自己会转义正文，白名单再兜一道：只可能多出 span，不可能多出别的元素
+    expect(码?.textContent).toBe('<img src=x onerror=alert(1)>\n<div class="a">&amp;</div>');
+    expect(码?.innerHTML).not.toMatch(/<(?!\/?span)/);
+  });
+
+  it("超长代码不着色：宁可平白，不可把那一拍钉住", () => {
+    const 长 = "x".repeat(20_001);
+    const 码 = r("code", "```js\n" + 长 + "\n```")?.querySelector("code");
+    expect(码?.querySelectorAll("span")).toHaveLength(0);
+    expect(码?.textContent).toBe(长);
+  });
+
+  it("info 首词 → 语言名：我们自己那张表补的是 hljs 实测不认的写法", () => {
+    expect(语言of("shell")).toBe("bash");
+    expect(语言of("htm")).toBe("xml");
+    expect(语言of("env")).toBe("ini");
+    expect(语言of("mdx")).toBe("markdown");
+    expect(语言of("csharp")).toBe("cpp");
+    // hljs 自带别名（js / rs / golang / toml / zsh）原样交给它，认得出就留着那个词
+    for (const 写 of ["js", "ts", "py", "rs", "golang", "toml", "zsh", "html", "yml"]) {
+      expect([写, 语言of(写)]).toEqual([写, 写]);
+    }
+    expect(语言of("")).toBeNull();
+    expect(语言of(undefined)).toBeNull();
+    expect(语言of("不存在的语言")).toBeNull();
+    expect(语言of("text")).toBeNull();
   });
 
   it("表格出 thead/tbody，对齐按分隔行，转义竖线不算分隔符", () => {

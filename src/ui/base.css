@@ -346,8 +346,10 @@
     background: none; /* 盒子由 .codeblock 画一次就够，别让 .prose-note pre 再套一层 */
     border: none;
     border-radius: 0;
-    white-space: pre-wrap; /* 与源文本形同一条口径：窄栏里换行，不逼人横向滚动 */
-    overflow-x: visible;
+    tab-size: 4; /* 不设就是浏览器默认 8 格：制表符对齐的代码会宽到离谱 */
+    /* 长行不折行、走横向滚动：那两条声明在文件**末尾的未分层段**里，
+       因为 prosemirror-view 自带的 `.ProseMirror pre { white-space: pre-wrap }` 未分层，
+       分层规则再高的特异度也压不住它。见那里写的原因。 */
   }
   .block-editor .md-view .codeblock code {
     font-family: var(--font-mono);
@@ -360,6 +362,73 @@
     color: var(--text-disabled);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+  }
+  /*
+   * 代码着色的类 → 语义映射（docs/03 §块渲染）。
+   *
+   * 颜色一律走 tokens.css 的 `--code-*`：护栏禁字面量颜色，而双主题本来就该由 token 承担，
+   * 这里只做"highlight.js 吐出的类名 ↔ 我们的语义"这一层翻译。类名按 hljs 11 的
+   * 规范作用域表来（`title.function_` / `built_in` 这类带下划线的变体也认）。
+   *
+   * 认不出的类不着色（保持正文色）：**着色层永远不许成为内容缺失的原因**。
+   */
+  .block-editor .md-view .codeblock .hljs-comment,
+  .block-editor .md-view .codeblock .hljs-quote {
+    color: var(--code-com);
+    font-style: italic;
+  }
+  .block-editor .md-view .codeblock .hljs-doctag,
+  .block-editor .md-view .codeblock .hljs-keyword,
+  .block-editor .md-view .codeblock .hljs-formula,
+  .block-editor .md-view .codeblock .hljs-selector-tag {
+    color: var(--code-key);
+  }
+  .block-editor .md-view .codeblock .hljs-section,
+  .block-editor .md-view .codeblock .hljs-emphasis,
+  .block-editor .md-view .codeblock .hljs-subst,
+  .block-editor .md-view .codeblock .hljs-strong,
+  .block-editor .md-view .codeblock .hljs-literal,
+  .block-editor .md-view .codeblock .hljs-type,
+  .block-editor .md-view .codeblock .hljs-name,
+  .block-editor .md-view .codeblock .hljs-tag {
+    color: var(--code-tag);
+  }
+  .block-editor .md-view .codeblock .hljs-variable,
+  .block-editor .md-view .codeblock .hljs-template-variable,
+  .block-editor .md-view .codeblock .hljs-class .hljs-title,
+  .block-editor .md-view .codeblock .hljs-attr,
+  .block-editor .md-view .codeblock .hljs-property,
+  .block-editor .md-view .codeblock .hljs-attribute,
+  .block-editor .md-view .codeblock .hljs-params {
+    color: var(--code-var);
+  }
+  .block-editor .md-view .codeblock .hljs-regexp,
+  .block-editor .md-view .codeblock .hljs-link {
+    color: var(--code-type);
+  }
+  .block-editor .md-view .codeblock .hljs-string,
+  .block-editor .md-view .codeblock .hljs-char.escape_ {
+    color: var(--code-str);
+  }
+  .block-editor .md-view .codeblock .hljs-symbol,
+  .block-editor .md-view .codeblock .hljs-bullet,
+  .block-editor .md-view .codeblock .hljs-number {
+    color: var(--code-num);
+  }
+  .block-editor .md-view .codeblock .hljs-built_in,
+  .block-editor .md-view .codeblock .hljs-title.class.inherited,
+  .block-editor .md-view .codeblock .hljs-title.class_,
+  .block-editor .md-view .codeblock .hljs-title {
+    color: var(--code-fn);
+  }
+  .block-editor .md-view .codeblock .hljs-addition {
+    color: var(--success);
+  }
+  .block-editor .md-view .codeblock .hljs-deletion {
+    color: var(--danger);
+  }
+  .block-editor .md-view .codeblock .hljs-meta {
+    color: var(--code-com);
   }
   /* 公式只剥围栏、居中排。没有 TeX 渲染器，画成公式是另一档活（docs/02 未列它） */
   .block-editor .md-view .math {
@@ -708,4 +777,17 @@
   to {
     background-position: -200% 0;
   }
+}
+
+/* ── 未分层：为了压住 prosemirror-view 自带的那张表 ─────────────────────
+   `prosemirror-view/style/prosemirror.css` 里有一条 `.ProseMirror pre { white-space: pre-wrap }`，
+   它是**未分层**的，而级联里未分层赢过所有 `@layer`——所以写在 `@layer components` 里的覆盖
+   再高的特异度都不生效（真机量过：计算值仍是 pre-wrap）。代码块的显示形要横向滚动，只能
+   同样走未分层。放这一小段的唯一理由是"必须压住未分层的第三方声明"，别把它当逃生口。 */
+.block-editor .md-view .codeblock pre {
+  /* 代码折行会把一条语句切成三行，缩进的语义当场没了（`if (a) return;` 折开像三个判断）。
+     源文本形仍然换行——那一面是在改字，横向滚动会让光标跟着跑出可视区：两副面孔口径不同
+     是有意的，别"顺手统一"。 */
+  white-space: pre;
+  overflow-x: auto;
 }

@@ -36,6 +36,16 @@
   --warning-soft: oklch(66% 0.14 78 / 0.14);
   --danger-soft: oklch(55% 0.2 25 / 0.1);
 
+  /* ---- 代码着色（亮面：饱和度压住，别和正文抢注意力）---- */
+  --code-key: oklch(48% 0.19 295);
+  --code-str: oklch(45% 0.13 152);
+  --code-num: oklch(50% 0.12 62);
+  --code-com: oklch(58% 0.012 260);
+  --code-fn: oklch(52% 0.15 248);
+  --code-type: oklch(48% 0.11 190);
+  --code-tag: oklch(50% 0.19 22);
+  --code-var: oklch(46% 0.09 320);
+
   /* ---- 线与环 ---- */
   --border-subtle: oklch(90% 0.005 260);
   --border-strong: oklch(80% 0.008 260);
@@ -123,6 +133,16 @@
   --success-soft: oklch(72% 0.12 155 / 0.14);
   --warning-soft: oklch(78% 0.12 78 / 0.16);
   --danger-soft: oklch(68% 0.16 25 / 0.14);
+
+  /* ---- 代码着色（暗面：提亮降饱和，14% 的底上比亮面需要更多明度差）---- */
+  --code-key: oklch(78% 0.14 300);
+  --code-str: oklch(82% 0.12 150);
+  --code-num: oklch(82% 0.11 72);
+  --code-com: oklch(58% 0.014 260);
+  --code-fn: oklch(80% 0.11 240);
+  --code-type: oklch(80% 0.1 186);
+  --code-tag: oklch(76% 0.15 22);
+  --code-var: oklch(82% 0.08 320);
 
   --border-subtle: oklch(26% 0.008 260);
   --border-strong: oklch(34% 0.01 260);

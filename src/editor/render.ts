@@ -1,3 +1,4 @@
+import { 着色, 语言of } from "./highlight";
 import { parseInline } from "./inline";
 // 表格的解析口径只有一份：显示形与网格编辑共用 table.ts 的那两个函数
 import { alignOf as 对齐, splitRow } from "./table";
@@ -223,8 +224,19 @@ function codeDom(d: Document, lines: string[]): HTMLElement | null {
   // 没闭栏的围栏按 CommonMark 就是"到文末都是代码"，内核也这么判，所以照画
   const box = el(d, "div", "codeblock");
   if (open.语言) box.append(el(d, "span", "lang", open.语言));
+  const 正文 = lines.slice(1, 末).join("\n");
+  const code = el(d, "code");
+  /**
+   * 能认语言就着色，认不出就一整块纯文本——**两条路的正文必须逐字相同**（着色只加 `span`）。
+   * 语言牌上面照的是开栏行里用户写的那个词，这里换成 hljs 的规范名当 class，两件事不混。
+   */
+  const 语 = 语言of(open.语言);
+  const 片 = 着色(d, 语, 正文);
+  if (语) code.className = `language-${语}`;
+  if (片) code.append(片);
+  else code.textContent = 正文;
   const pre = el(d, "pre");
-  pre.append(el(d, "code", undefined, lines.slice(1, 末).join("\n")));
+  pre.append(code);
   box.append(pre);
   return box;
 }
