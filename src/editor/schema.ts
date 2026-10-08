@@ -8,6 +8,7 @@ import {
   enterCell,
   exitTableDown,
   exitOpaqueDown,
+  带围栏,
   moveCell,
   moveCurrentBlock,
   numberedMarker,
@@ -43,6 +44,21 @@ const mdAttributes: Attributes = {
   mdFields: { default: [] as [string, string][] },
   // 载入之后由 stampSignatures 打上去。空串意味着"新块"，必定被重新序列化
   mdSig: { default: "" },
+  /**
+   * 代码块的围栏账本：开栏行与闭栏行**原样**存着（含前导缩进与 `js // 注释` 那串 info），
+   * 节点正文只装两道围栏之间的代码。于是"点进代码块"看到的和"退出来"看到的是同一份内容，
+   * 不再在 Markdown 与渲染之间跳——而保存时围栏按这两行拼回去，字节与文件本来的形状一致。
+   *
+   * 两个空串 = 这一块没走围栏账本这条路（不是代码块、或者**没有闭栏**）。没有闭栏时
+   * 绝不能接管：那等于替用户凭空造一道 ` ``` `。
+   */
+  mdFenceOpen: { default: "" },
+  mdFenceClose: { default: "" },
+  /**
+   * 围栏之间**有没有那一行**。` ``` ` 紧挨 ` ``` `（零行）与"中间一个空行"是两种字节，
+   * 而两者的正文都是空字符串——不记这一笔，用户删空代码块最后一行就会多出一个空行。
+   */
+  mdFenceBody: { default: false },
 };
 
 /** 每个 md* 属性都是编辑器的私有账本，不进 DOM；行内字段额外带一份成 `data-fields` */
@@ -194,7 +210,9 @@ class OpaqueView implements NodeView {
     private readonly 位置: () => number | undefined,
   ) {
     this.kind = String(node.attrs.mdKind ?? "raw");
-    this.正文 = node.textContent;
+    // 显示形要的是"这一块在文件里长什么样"：代码块的围栏在账本里、不在正文里，
+    // 直接拿 textContent 去画会认不出开栏而整个降级
+    this.正文 = 带围栏(node);
 
     const dom = document.createElement("div");
     dom.className = "md-opaque";
@@ -246,8 +264,9 @@ class OpaqueView implements NodeView {
       this.dom.setAttribute("data-md-raw", kind);
       this.待重算 = true;
     }
-    if (node.textContent !== this.正文) {
-      this.正文 = node.textContent;
+    const 源 = 带围栏(node);
+    if (源 !== this.正文) {
+      this.正文 = 源;
       this.待重算 = true;
     }
     return true;

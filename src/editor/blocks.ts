@@ -9,6 +9,7 @@ import {
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
+import { 拼围栏, 拆围栏 } from "./fence";
 import { inlineToJson, serializeInline } from "./inline";
 import { parseGrid, parseTable, serializeTable, type Align } from "./table";
 import { 含, 夹住, 覆盖列, type 矩形 } from "./tableSelect";
@@ -109,6 +110,26 @@ export function docToJson(doc: EditDoc): JsonNode {
     if (type === "mdOpaque") {
       // 源文本进节点正文（自带的那个换行由拼装方统一补，见 docToMarkdown）
       const text = b.raw.replace(/\n+$/, "");
+      /**
+       * 代码块走**围栏账本**：开栏行与闭栏行挪进 attrs，正文只装两道围栏之间的代码，
+       * 这样点进去编辑的就是代码本身，不会先看到一屏 Markdown。判据只有一条——
+       * **得有闭栏**。没闭栏的围栏按 CommonMark 是"到文末都是代码"，接管了就得凭空
+       * 补一道 ` ``` `，那是替用户写字节。
+       */
+      const 拆 = b.kind === "code" ? 拆围栏(text) : null;
+      if (拆?.闭) {
+        const 身 = 拆.身.join("\n");
+        return {
+          type,
+          attrs: {
+            ...attrs,
+            mdFenceOpen: 拆.开,
+            mdFenceClose: 拆.闭,
+            mdFenceBody: 拆.身.length > 0,
+          },
+          content: 身 ? [{ type: "text", text: 身 }] : [],
+        };
+      }
       return { type, attrs, content: text ? [{ type: "text", text }] : [] };
     }
     if (type === "mdTable") return tableJson(parseTable(b.raw)!, attrs);
@@ -225,11 +246,22 @@ function serializeNode(node: PmNode): string {
         anchorSuffix(a.mdId)
       );
     }
-    case "mdOpaque":
+    case "mdOpaque": {
       // 源文本块：内容就是用户的源文本，改了就原样落盘（自带换行由调用方补）
       // **不能写 `node.text`**：那是 `TextNode` 才有的字段，块节点上它是 undefined，
       // `?? ""` 会把整块吃成空字符串——用户编辑一次代码块 / 表格 / 引用，那块就没了。
-      return node.textContent;
+      const 开 = String(a.mdFenceOpen ?? "");
+      const 闭 = String(a.mdFenceClose ?? "");
+      if (!开 || !闭) return node.textContent;
+      // 围栏账本这条路：正文只装代码，两道围栏按原样拼回去。空正文要按 `mdFenceBody`
+      // 分成 `[]` 与 `[""]` 两种——` ``` 紧挨 ``` ` 与"中间一个空行"是两种字节。
+      const 身 = node.textContent
+        ? node.textContent.split("\n")
+        : a.mdFenceBody
+          ? [""]
+          : [];
+      return 拼围栏({ 开, 身, 闭 });
+    }
     case "mdTable": {
       // 结构 → GFM。列数与对齐由这张表自己带着（mdAligns），所以"加一列"必须同时
       // 改 aligns，否则产出的分隔行比表头短，重新解析就裂了
@@ -244,6 +276,22 @@ function serializeNode(node: PmNode): string {
     default:
       return serializeInline(node) + fieldSuffix(a.mdFields) + anchorSuffix(a.mdId);
   }
+}
+
+/**
+ * 这一块**在文件里长什么样**的源文本：走了围栏账本的代码块要把两道围栏拼回来，
+ * 其余不透明块就是节点正文。
+ *
+ * 显示形要的是这个，不是 `node.textContent`——后者对代码块来说只有围栏之间那段，
+ * 拿它去 `renderOpaque("code", …)` 会因为认不出开栏而整个降级。
+ */
+export function 带围栏(node: PmNode): string {
+  const a = node.attrs as Record<string, unknown>;
+  const 开 = String(a.mdFenceOpen ?? "");
+  const 闭 = String(a.mdFenceClose ?? "");
+  if (!开 || !闭) return node.textContent;
+  const 身 = node.textContent ? node.textContent.split("\n") : a.mdFenceBody ? [""] : [];
+  return 拼围栏({ 开, 身, 闭 });
 }
 
 /**
@@ -293,14 +341,15 @@ export const INSERTABLE: { kind: string; 标签: string; 源文本: string }[] =
 ];
 
 /**
- * 插完代码块之后光标该落在**两道围栏之间**。
+ * 插完代码块之后光标该落在**正文开头**。
  *
- * 落在块外（PM 的默认行为：选区留在插入点之前），用户第一次打字就会把 ` ``` `
- * 当正文改，产出一份"看着是代码块、其实围栏被打断"的东西。表格不需要这条：
- * 它是网格，落点天然是某一格，用户必须点一下才知道自己在哪格。
+ * 围栏在账本里、不在正文里，所以正文的第一个字符就是块内位置 1——不再是"跳过一道开栏"
+ * 那种算法（那是围栏还写在正文里的年代）。落在块外（PM 的默认行为：选区留在插入点之前）
+ * 时，用户第一次打字改的是围栏本身，产出一份"看着是代码块、其实围栏被打断"的东西。
+ * 表格不需要这条：它是网格，落点天然是某一格。
  */
 export function 代码落点(块起点: number): number {
-  return 块起点 + 1 + "```\n".length;
+  return 块起点 + 1;
 }
 
 /**
@@ -549,7 +598,26 @@ function sourceBlock(state: EditorState, kind: string, source: string, gap: stri
   }
   const opaque = state.schema.nodes.mdOpaque;
   if (!opaque) throw new Error("schema 里没有 mdOpaque 节点");
-  const 块 = opaque.create(账本, state.schema.text(source));
+  /**
+   * 代码块按**围栏账本**建：骨架 ` ```\n\n``` ` 拆成"开栏行 + 一个空正文 + 闭栏行"，
+   * 于是插完直接就能在框里打字，屏幕上从头到尾不出现 ` ``` `。与 `docToJson` 载入
+   * 文件时同一条路——插入的代码块与读进来的代码块必须长一样，否则"改一次才知道分叉"。
+   */
+  const 拆 = kind === "code" ? 拆围栏(source) : null;
+  // 空正文**不能建空文本节点**（PM 不允许），靠 `mdFenceBody` 记住"围栏之间有一行"
+  const 正文 = 拆 ? 拆.身.join("\n") : "";
+  const 块 =
+    拆 && 拆.闭
+      ? opaque.create(
+          {
+            ...账本,
+            mdFenceOpen: 拆.开,
+            mdFenceClose: 拆.闭,
+            mdFenceBody: 拆.身.length > 0,
+          },
+          正文 ? state.schema.text(正文) : null
+        )
+      : opaque.create(账本, state.schema.text(source));
   /**
    * 与表格同一条规矩：插进来的块下面留一个空段落**落脚点**（空段落不落盘，一个字节都不多）。
    * 不留的话，"在文末插一个代码块"就只剩鼠标能出去——而代码块的出口本来就设计成 `↓`。
@@ -1179,9 +1247,9 @@ export function exitTableDown(state: EditorState): Transaction | null {
 /**
  * 光标在**不透明块的最后一行**按 `↓`：离开这块。代码块 / 引用 / 围栏这类块的出口。
  *
- * 判据是"在最后一行"而不是"在内容末尾"——代码块的最后一行永远是那道闭合围栏，
- * 要求光标越过它才按得出去，等于没有出口（写代码时人总在围栏上面）。与表格
- * "最后一行按 `↓`"同一条判据、同一个键。
+ * 判据是"在最后一行"而不是"在内容末尾"：引用与未闭栏的围栏，最后一行后面还跟着看不见的
+ * 字节，要求光标越过它们才按得出去，等于没有出口。代码块自 2026-09-30 起围栏在账本里、
+ * 正文只剩代码，"最后一行"就是最后一行代码——同一条判据，两种形状都说得通。
  *
  * 不在最后一行时交回 PM：那里 `↓` 该在块内下移一行。`Enter` 也永远不换块——
  * 代码块里回车就是换行，拆出来的两半围栏 `serializeNode` 不认。

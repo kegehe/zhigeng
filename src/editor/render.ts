@@ -1,3 +1,4 @@
+import { 拆围栏, 围栏行of } from "./fence";
 import { 着色, 语言of } from "./highlight";
 import { parseInline } from "./inline";
 // 表格的解析口径只有一份：显示形与网格编辑共用 table.ts 的那两个函数
@@ -20,20 +21,8 @@ import { alignOf as 对齐, splitRow } from "./table";
 const ANCHOR_OWN = /^\s*\^b-[a-z0-9-]{6,}\s*$/;
 /** 贴在末行尾巴上的块 ID */
 const ANCHOR_TAIL = /\s*\^b-[a-z0-9-]{6,}\s*$/;
-const FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
-/**
- * 围栏行。info 串可以是多词（`` ```rust // 注释 ``、`` ```js showLineNumbers ``），
- * 语言只取第一个词——真机栽过：早先按"一个不带空格的词"匹配，用户往开栏行里加一句注释，
- * 整块就静默退回源文本，看着像"渲染坏了"。
- */
-function fenceOf(line: string | undefined): { 记号: string; 语言: string; 可闭栏: boolean } | null {
-  const m = FENCE.exec(line ?? "");
-  if (!m) return null;
-  const [, 记号 = "", 余 = ""] = m;
-  const 干净 = 余.trim();
-  if (记号[0] === "`" && 干净.includes("`")) return null; // 反引号围栏的 info 里不许有反引号
-  return { 记号, 语言: 干净.split(/\s+/)[0] ?? "", 可闭栏: 干净 === "" };
-}
+// 围栏的判据只有一份，在 `fence.ts`：显示形与编辑器的围栏账本必须认同一个形状，
+// 两套判据早晚分叉，而这里的分叉等于改用户的字节。
 const CALLOUT = /^\s*>\s*\[!([A-Za-z-]+)\]([+-])?\s*(.*)$/;
 const DIVIDER = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
 const QUOTE_LINE = /^\s{0,3}>/;
@@ -211,20 +200,13 @@ function tableDom(d: Document, lines: string[]): HTMLElement | null {
 
 /** 围栏代码块：开栏的 info 串第一个词是语言，闭栏必须同种字符、不短于开栏且不带 info */
 function codeDom(d: Document, lines: string[]): HTMLElement | null {
-  const open = fenceOf(lines[0]);
-  if (!open) return null;
-  let 末 = lines.length;
-  for (let i = lines.length - 1; i > 0; i--) {
-    const close = fenceOf(lines[i]);
-    if (close?.可闭栏 && close.记号[0] === open.记号[0] && close.记号.length >= open.记号.length) {
-      末 = i;
-      break;
-    }
-  }
+  const 拆 = 拆围栏(lines.join("\n"));
+  const open = 拆 && 围栏行of(拆.开);
+  if (!拆 || !open) return null;
   // 没闭栏的围栏按 CommonMark 就是"到文末都是代码"，内核也这么判，所以照画
   const box = el(d, "div", "codeblock");
   if (open.语言) box.append(el(d, "span", "lang", open.语言));
-  const 正文 = lines.slice(1, 末).join("\n");
+  const 正文 = 拆.身.join("\n");
   const code = el(d, "code");
   /**
    * 能认语言就着色，认不出就一整块纯文本——**两条路的正文必须逐字相同**（着色只加 `span`）。

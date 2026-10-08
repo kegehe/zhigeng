@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/core";
 import { TextSelection, type EditorState } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
+import { renderOpaque } from "./render";
 import { 分派岛上鼠标 } from "./schema";
 import { parseTable } from "./table";
 import { 单格, 归一, type 矩形 } from "./tableSelect";
@@ -16,6 +17,7 @@ import {
   exitTableDown,
   exitOpaqueDown,
   insertSourceBlock,
+  带围栏,
   判粘贴,
   格坐标At,
   INSERTABLE,
@@ -645,32 +647,34 @@ describe("工具栏的移动与分隔线", () => {
     editor.destroy();
   });
 
-  it("代码块末尾按 ↓ 出去；不在末尾时不出去（↓ 该在块内移动）", () => {
+  it("代码块最后一行按 ↓ 出去；不在最后一行时不出去（↓ 该在块内移动）", () => {
     const d: EditDoc = {
       frontMatter: "",
       trailingGap: "",
       blocks: [
-        { kind: "code", id: null, raw: "```\nlet a = 1\n```\n", gapBefore: "", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "code", id: null, raw: "```\nlet a = 1\nlet b = 2\n```\n", gapBefore: "", content: "", level: null, checked: null, fields: [], children: [] },
         { kind: "paragraph", id: null, raw: "后面一段\n", gapBefore: "\n", content: "后面一段", level: null, checked: null, fields: [], children: [] },
       ],
     };
     const editor = createTestEditor(d);
     const 块 = editor.state.doc.child(0);
     /**
-     * 逐位置判"在不在最后一行"，别只测两个点。源文本是 `"```"` `"\n"` `"let a = 1"` `"\n"`
-     * `"```"` = 17 个字符，顶层第一块从位置 1 起，所以**绝对位置 = 1 + 行内偏移**。
-     *
-     * 第 15 那一条是这次修改存在的理由：**闭合围栏那一行的行首**就得能出去。按"内容末尾"判
-     * 它还不算末尾，而写代码的人手就停在这个位置——真机上就是那里按 ↓ 没反应。
-     * 上一版把"围栏行中"写成 `resolve(18)`，而 `块.nodeSize - 1` 也等于 18，两条断言其实是
-     * 同一个位置，等于没测到判据本身。
+     * 围栏进了账本、正文只剩两行代码——先钉住这件事本身：节点正文里读不到 ` ``` `。
+     * "点进去看到的"与"退出来看到的"是同一份内容，这是本次修改的全部理由。
+     */
+    expect(块.textContent).toBe("let a = 1\nlet b = 2");
+    expect(块.attrs.mdFenceOpen).toBe("```");
+    expect(块.attrs.mdFenceClose).toBe("```");
+    /**
+     * 再逐位置判"在不在最后一行"。正文 19 个字符，顶层第一块从位置 1 起，所以
+     * **绝对位置 = 1 + 行内偏移**。位置 10 是第一行行末（还没跨过那个换行），
+     * 那里按 ↓ 必须在块内下移，不许跳出去。
      */
     for (const [位, 该出去] of [
-      [3, false], // 第一行行中 → ↓ 该在块内下移一行
-      [14, false], // 第二行行末（还没跨过那个换行）
-      [15, true], // 第三行行首：围栏还没开始，但已经在最后一行
-      [16, true], // 围栏行中
-      [18, true], // 块末
+      [3, false], // 第一行行中
+      [10, false], // 第一行行末
+      [11, true], // 第二行行首 = 最后一行
+      [20, true], // 块末
     ] as [number, boolean][]) {
       editor.view.dispatch(
         editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(位)))
@@ -692,7 +696,7 @@ describe("工具栏的移动与分隔线", () => {
     );
     // 出去这一下不改文件一个字节
     expect(docToMarkdown(editor.state.doc, d)).toBe(
-      "```\nlet a = 1\n```\n\n后面一段\n"
+      "```\nlet a = 1\nlet b = 2\n```\n\n后面一段\n"
     );
     editor.destroy();
   });
@@ -829,6 +833,131 @@ describe("编辑不透明块不许把整块写成空", () => {
     const out = docToMarkdown(editor.state.doc, doc);
     expect(out).toContain("引用的话啊");
     expect(out).toContain("```\nlet a = 1\n```");
+    editor.destroy();
+  });
+});
+
+/**
+ * 围栏账本（2026-09-30）。
+ *
+ * 代码块开进来编辑的是**代码本身**：开栏行与闭栏行存在 `mdFenceOpen` / `mdFenceClose`，
+ * 节点正文只装围栏之间那段，保存时拼回去。这一组判的全是字节——差一个换行就是改用户的文件。
+ */
+describe("代码块的围栏账本：编辑代码不碰围栏", () => {
+  const 码 = (raw: string, gap = ""): EditDoc["blocks"][number] => ({
+    kind: "code",
+    id: null,
+    raw,
+    gapBefore: gap,
+    content: "",
+    level: null,
+    checked: null,
+    fields: [],
+    children: [],
+  });
+  const 一段 = (raw: string, gap = "\n"): EditDoc["blocks"][number] => ({
+    kind: "paragraph",
+    id: null,
+    raw,
+    gapBefore: gap,
+    content: raw.replace(/\n+$/, ""),
+    level: null,
+    checked: null,
+    fields: [],
+    children: [],
+  });
+  const 文档 = (...blocks: EditDoc["blocks"]): EditDoc => ({
+    frontMatter: "",
+    trailingGap: "",
+    blocks,
+  });
+  /** 代码块正文的起点（顶层第一块 → 位置 1） */
+  const 正文起点 = (editor: ReturnType<typeof createTestEditor>) => {
+    let 找 = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (找 < 0 && n.type.name === "mdOpaque") 找 = off + 1;
+    });
+    return 找;
+  };
+
+  it("没编辑的块：各种围栏形状都逐字节回写原样", () => {
+    for (const 形 of [
+      "```\n甲\n```\n",
+      "````\n内含 ``` 的一行\n````\n",
+      "~~~\n波浪号\n~~~\n",
+      "  ```py\n缩进两格\n  ```\n",
+      "```rust // 注释\nfn main() {}\n```\n",
+      "```\n```\n",
+      "```\n\n```\n",
+    ]) {
+      const d = 文档(码(形), 一段("尾段\n"));
+      const editor = createTestEditor(d);
+      expect(docToMarkdown(editor.state.doc, d), 形).toBe(reassemble(d));
+      editor.destroy();
+    }
+  });
+
+  it("编辑正文：新代码配上原来的围栏，闭栏那行的写法一个字都不许变", () => {
+    const d = 文档(码("````rust // 注释\nlet a = 1\n    ```\n````\n"), 一段("尾段\n"));
+    const editor = createTestEditor(d);
+    // 正文里本来就有一道三反引号——它不是闭栏，闭栏是最后那道四反引号的
+    expect(editor.state.doc.child(0).textContent).toBe("let a = 1\n    ```");
+    editor.view.dispatch(editor.state.tr.insertText("let b = 2\n", 正文起点(editor)));
+    expect(docToMarkdown(editor.state.doc, d)).toBe(
+      "````rust // 注释\nlet b = 2\nlet a = 1\n    ```\n````\n\n尾段\n"
+    );
+    editor.destroy();
+  });
+
+  it("没闭栏的围栏不接管：正文里带着围栏，编辑也不凭空造一道闭栏", () => {
+    const d = 文档(码("```go\nfunc main() {\n"));
+    const editor = createTestEditor(d);
+    const 块 = editor.state.doc.child(0);
+    expect(块.textContent).toBe("```go\nfunc main() {"); // 老形状：围栏就是正文
+    expect(块.attrs.mdFenceOpen).toBe("");
+    // 在正文末尾接着写：产出的还是"到文末都是代码"，不凭空多出闭栏
+    const 尾 = 1 + 块.textContent.length;
+    editor.view.dispatch(editor.state.tr.insertText("\n  let x = 1;", 尾));
+    expect(docToMarkdown(editor.state.doc, d)).toBe("```go\nfunc main() {\n  let x = 1;\n");
+    editor.destroy();
+  });
+
+  it("`零行` 与 `一个空行` 两种空代码块各自回写，打字之后都成正常块", () => {
+    for (const [形, 打完字] of [
+      ["```\n```\n", "```\nx\n```\n"],
+      ["```\n\n```\n", "```\nx\n```\n"],
+    ] as const) {
+      const d = 文档(码(形));
+      const editor = createTestEditor(d);
+      expect(docToMarkdown(editor.state.doc, d), 形).toBe(形);
+      editor.view.dispatch(editor.state.tr.insertText("x", 正文起点(editor)));
+      expect(docToMarkdown(editor.state.doc, d), 形).toBe(打完字);
+      editor.destroy();
+    }
+  });
+
+  it("把正文删空：回到「围栏之间那一行」，不会少一行", () => {
+    const d = 文档(码("```\nlet a = 1\n```\n"));
+    const editor = createTestEditor(d);
+    const 块 = editor.state.doc.child(0);
+    editor.view.dispatch(
+      editor.state.tr.delete(1, 1 + 块.textContent.length)
+    );
+    expect(editor.state.doc.child(0).textContent).toBe("");
+    expect(docToMarkdown(editor.state.doc, d)).toBe("```\n\n```\n");
+    editor.destroy();
+  });
+
+  it("显示形吃的是拼回围栏的那份（`带围栏`），不是节点正文", () => {
+    const d = 文档(码("```js\nconst a = 1;\n```\n"));
+    const editor = createTestEditor(d);
+    const 块 = editor.state.doc.child(0);
+    expect(块.textContent).toBe("const a = 1;");
+    expect(带围栏(块)).toBe("```js\nconst a = 1;\n```");
+    // 画出来的显示形里不该有围栏，也不该有 Markdown 星号之类的东西
+    const 画 = renderOpaque("code", 带围栏(块), document);
+    expect(画?.querySelector("code")?.textContent).toBe("const a = 1;");
+    expect(画?.querySelector(".lang")?.textContent).toBe("js");
     editor.destroy();
   });
 });
