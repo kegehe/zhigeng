@@ -7,6 +7,7 @@ import cpp from "highlight.js/lib/languages/cpp";
 import css from "highlight.js/lib/languages/css";
 import diff from "highlight.js/lib/languages/diff";
 import dockerfile from "highlight.js/lib/languages/dockerfile";
+import dos from "highlight.js/lib/languages/dos"; // bat / cmd 的模块名是 dos
 import go from "highlight.js/lib/languages/go";
 import ini from "highlight.js/lib/languages/ini";
 import java from "highlight.js/lib/languages/java";
@@ -46,6 +47,7 @@ const 注册 = (name: string, fn: Parameters<typeof hljs.registerLanguage>[1]) =
   hljs.registerLanguage(name, fn);
 
 注册("bash", bash);
+注册("dos", dos); // 下拉里叫"Batch"（别名 bat / cmd），模块名是 dos
 注册("c", cpp); // hljs 的 cpp 方言覆盖 C
 注册("cpp", cpp);
 注册("css", css);
@@ -94,6 +96,101 @@ const 额外别名: Record<string, string> = {
 
 /** 明确"就是纯文本"的写法：不着色，也别退化成"猜一门语言" */
 const 拒绝着色 = new Set(["text", "txt", "plain", "raw"]);
+
+/**
+ * 下拉里能选的值。写进文件的就是这一列词（都是 hljs 认得的别名，实测过一遍），
+ * 所以"选得出来的"与"上得了色的"是同一份清单——列一个上不了色的语言等于给用户一个摆设。
+ * `""` 是把开栏改回光秃秃的 ` ``` `，`text` 是明确声明"这就是纯文本，别猜"。
+ */
+export const 语言清单: { 值: string; 标签: string }[] = [
+  { 值: "", 标签: "无（保持 ``` 不带语言）" },
+  { 值: "text", 标签: "纯文本（不猜语言）" },
+  { 值: "js", 标签: "JavaScript" },
+  { 值: "ts", 标签: "TypeScript" },
+  { 值: "py", 标签: "Python" },
+  { 值: "rs", 标签: "Rust" },
+  { 值: "go", 标签: "Go" },
+  { 值: "java", 标签: "Java" },
+  { 值: "kotlin", 标签: "Kotlin" },
+  { 值: "swift", 标签: "Swift" },
+  { 值: "c", 标签: "C" },
+  { 值: "cpp", 标签: "C++" },
+  { 值: "php", 标签: "PHP" },
+  { 值: "rb", 标签: "Ruby" },
+  { 值: "lua", 标签: "Lua" },
+  { 值: "bash", 标签: "Shell / Bash" },
+  { 值: "ps1", 标签: "PowerShell" },
+  { 值: "dos", 标签: "Batch / 命令行批处理" },
+  { 值: "sql", 标签: "SQL" },
+  { 值: "json", 标签: "JSON" },
+  { 值: "yml", 标签: "YAML" },
+  { 值: "toml", 标签: "TOML / ini" },
+  { 值: "html", 标签: "HTML / XML" },
+  { 值: "css", 标签: "CSS" },
+  { 值: "scss", 标签: "SCSS" },
+  { 值: "md", 标签: "Markdown" },
+  { 值: "diff", 标签: "Diff" },
+  { 值: "dockerfile", 标签: "Dockerfile" },
+];
+
+/**
+ * **猜**一门语言：给没有 info 串（或 info 认不出来）的代码块。
+ *
+ * 三条限制都是实测出来的，不是洁癖：
+ * - `highlightAuto` 要在注册表里逐门跑一遍，实测 30 行 9ms、120 行 38ms，是指定语言的
+ *   十倍。所以它**不进击键路径、也不进装载路径**——调用方只在"这块交出焦点"与"这块要
+ *   落盘"两个时机用它（见 `blocks.ts` 的 `有效开栏` 与 `schema.ts` 的 `CodeHighlight`）。
+ * - 太短、单行的不猜：实测 `a=1` 会被判成 `ini`，把这种猜测写进用户文件比不写更糟。
+ * - 认不出来给 null（`highlightAuto` 落回纯文本时 `language` 就是 undefined），调用方
+ *   保持原样，不许编一门语言出来。
+ */
+const 识别缓存 = new Map<string, string | null>();
+const 最短 = 24;
+const 识别上限 = 6000;
+
+export function 识别(代码: string): string | null {
+  if (代码.length < 最短 || 代码.length > 识别上限) return null;
+  if (!代码.includes("\n")) return null; // 单行没有结构可猜，全是噪声
+  const 中 = 识别缓存.get(代码);
+  if (中 !== undefined) return 中;
+  let 得: string | null;
+  try {
+    const 候 = hljs.highlightAuto(代码, 语言清单.map((l) => l.值).filter(Boolean));
+    得 = 候.language && hljs.getLanguage(候.language) ? 候.language : null;
+  } catch {
+    得 = null;
+  }
+  if (识别缓存.size > 400) 识别缓存.delete(识别缓存.keys().next().value as string);
+  识别缓存.set(代码, 得);
+  return 得;
+}
+
+/**
+ * 只读缓存，不计算：`undefined` = 还没猜过。
+ *
+ * 语言牌在装载时要显示"将要落盘的那个词"，但装载不是跑 `highlightAuto` 的地方（十倍成本）。
+ * 装饰路径先算、牌后读，两边读的是同一份缓存，所以显示与落盘不可能分叉。
+ */
+export function 已识别(代码: string): string | null | undefined {
+  return 识别缓存.get(代码);
+}
+
+/** 下拉里写进文件的那个词 → 它到底认不认（认不了的选项不该存在） */
+export const 认得语言 = (词: string): boolean => Boolean(词) && Boolean(语言of(词));
+
+/**
+ * hljs 的规范名 → 清单里那个**短写**（`javascript` → `js`、`python` → `py`）。
+ *
+ * 识别给出的是规范名，而文件里、下拉里用的是短写。不映射的话会出现"识别写了
+ * ` ```javascript `，下拉框却对不上任何选项"——一个说不清自己状态的控件比没有控件更糟。
+ */
+const 短写表 = new Map<string, string>();
+for (const l of 语言清单) {
+  if (!l.值) continue;
+  const 范 = 语言of(l.值);
+  if (范 && !短写表.has(范)) 短写表.set(范, l.值);
+}
+export const 短写 = (语言: string): string => 短写表.get(语言) ?? 语言;
 
 /** info 串第一个词 → hljs 的语言名。认不出来给 null */
 export function 语言of(info: string | undefined | null): string | null {

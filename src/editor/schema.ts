@@ -21,7 +21,7 @@ import {
 } from "./blocks";
 import { 批量, TableSelect } from "./tableSelectPlugin";
 import { 围栏行of } from "./fence";
-import { 语言of, 着色区间 } from "./highlight";
+import { 短写, 已识别, 语言清单, 语言of, 着色区间, 识别 } from "./highlight";
 import { mightRender, renderOpaque } from "./render";
 
 /**
@@ -203,6 +203,9 @@ class OpaqueView implements NodeView {
   contentDOM: HTMLElement;
   /** 代码块走围栏账本时**没有宿主**（单面，见构造器），其余两副面孔的类型才有 */
   readonly host: HTMLDivElement | null;
+  /** 块内那个语言下拉。只有代码块那一面有，其余类型是 null */
+  private 牌: HTMLSelectElement | null = null;
+  private 节点: PmNode;
   private kind = "raw";
   private 正文 = "";
   private 待重算 = true;
@@ -249,10 +252,31 @@ class OpaqueView implements NodeView {
      * 正文里真实存在的字节，改一处就对不上一次。
      */
     this.单面 = this.kind === "code" && Boolean(node.attrs.mdFenceOpen) && Boolean(node.attrs.mdFenceClose);
+    this.节点 = node;
     if (this.单面) {
       dom.dataset["mdCode"] = "";
-      const 语 = 围栏行of(String(node.attrs.mdFenceOpen))?.语言 ?? "";
-      if (语) dom.setAttribute("data-md-lang", 语);
+      /**
+       * 语言牌是个**真下拉**（用户点名要"块内语言牌变成交互控件"）。它排在 contentDOM
+       * 之外，所以 PM 不会把它当正文；`stopEvent` 对它的每一个事件都返回 true，让浏览器
+       * 自己处理原生下拉——那一下不是"改源码"，是选一个元数据。
+       *
+       * 装载时只按**文件里写着的**那个词填，不在此刻猜语言：`highlightAuto` 是逐门跑一遍，
+       * 实测比指定语言贵十倍，一篇里十几个代码块全压在打开那一刻不值当。猜测由
+       * `CodeHighlight` 在装饰时算（跳过正在输入的那一块），算完回头刷这个牌。
+       */
+      const 牌 = document.createElement("select");
+      牌.className = "md-lang";
+      牌.setAttribute("aria-label", "代码语言");
+      牌.title = "代码语言（写进 ``` 后面）";
+      for (const 项 of 语言清单) {
+        const o = document.createElement("option");
+        o.value = 项.值;
+        o.textContent = 项.标签;
+        牌.append(o);
+      }
+      牌.addEventListener("change", () => this.改语言(牌.value));
+      this.牌 = 牌;
+      dom.append(牌);
     }
 
     // 宿主排在源文本**前面**：PM 的 `localPosFromDOM` 按"点击的元素在 contentDOM 之前还是
@@ -263,12 +287,88 @@ class OpaqueView implements NodeView {
     this.host = this.单面 ? null : host;
     this.contentDOM = code;
     渲染实例.set(dom, this);
-    this.补渲染();
+    // 装载这一次不许猜语言（`补渲染` 交出焦点时也会被调，那次允许）
+    this.补渲染(false);
+  }
+
+  /** 开栏行 → 下拉该显示的那个词 */
+  private 词(开: string): string {
+    const m = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(开);
+    return (m?.[3] ?? "").trim().split(/\s+/)[0] ?? "";
+  }
+
+  /**
+   * 把牌对到文档现在的内容上。
+   *
+   * `允许算` = 允许为"文件里没写语言"的块跑一次自动识别（只在交出焦点与装饰路径上给，
+   * 装载与击键路径上不给）。认出来的词写进 `title`，让用户看得见"这是猜的"。
+   */
+  刷语言(允许算: boolean): void {
+    if (!this.牌) return;
+    const 写着的 = this.词(String(this.节点.attrs.mdFenceOpen ?? ""));
+    let 现 = 写着的;
+    let 猜的: string | null = null;
+    if (!现) {
+      // 允许算 = 交出焦点这一刻；不允许时只读缓存（装载时装饰路径多半已经算过，
+      // 读得到就显示，读不到就先显示空——下一次重算会补上）
+      const 猜 = 允许算 ? 识别(this.节点.textContent) : 已识别(this.节点.textContent) ?? null;
+      if (猜) {
+        现 = 短写(猜);
+        猜的 = 现;
+      }
+    }
+    // 文件里写了个清单外的词（`klingon`）：加一条"当前"选项，别让下拉显示成"无"——
+    // 一个说不清自己状态的控件比没有控件更糟
+    if (现 && !语言清单.some((l) => l.值 === 现)) {
+      const o = document.createElement("option");
+      o.value = 现;
+      o.textContent = 现 + "（文件里写的）";
+      this.牌.append(o);
+    }
+    this.牌.value = 现;
+    if (猜的) {
+      this.牌.dataset["guessed"] = 猜的;
+      this.牌.title = `没写语言，按内容猜的是 ${现}（改一下这块就会写进文件；选一下可覆盖）`;
+    } else {
+      // 空字符串也算"属性存在"，CSS 的 [data-guessed] 会误判成"这是猜的"
+      delete this.牌.dataset["guessed"];
+      this.牌.title = "代码语言（写进 ``` 后面）";
+    }
+    this.dom.setAttribute("data-md-lang", 现);
+  }
+
+  /** 选语言 = 改开栏行的 info 首词，缩进、围栏长度、后面那串注释都原样留着 */
+  private 改语言(值: string): void {
+    let pos: number | undefined;
+    try {
+      pos = this.位置();
+    } catch {
+      return;
+    }
+    if (pos === undefined) return;
+    const 块 = this.view.state.doc.nodeAt(pos);
+    if (!块) return;
+    const 开 = String(块.attrs.mdFenceOpen ?? "");
+    const m = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(开);
+    if (!m) return;
+    const [, 缩 = "", 记 = "", 余 = ""] = m;
+    const 尾 = (余.trim().split(/\s+/).slice(1) ?? []).join(" ");
+    const 新 = 缩 + 记 + (值 || "") + (值 && 尾 ? " " + 尾 : "");
+    if (新 === 开) return;
+    this.view.dispatch(
+      this.view.state.tr.setNodeMarkup(pos, undefined, { ...块.attrs, mdFenceOpen: 新 })
+    );
   }
 
   /** 只在脏了的时候重画：一次焦点转移不该重排没动过的块 */
-  补渲染(): void {
-    if (this.单面 || !this.待重算) return;
+  补渲染(允许算 = true): void {
+    if (this.单面) {
+      // 交出焦点这一刻刷一次牌：允许它跑识别（缓存多半已被装饰路径捂热，见 CodeHighlight）。
+      // 装载那一次传的是 false——`highlightAuto` 比指定语言贵十倍，不该压在打开笔记的路上
+      this.刷语言(允许算);
+      return;
+    }
+    if (!this.待重算) return;
     this.待重算 = false;
     const 画 = mightRender(this.kind) ? renderOpaque(this.kind, this.正文, document) : null;
     // 画不出来（HTML、未识别语法、带子项的列表项）就别藏源文本：
@@ -284,15 +384,19 @@ class OpaqueView implements NodeView {
     const 该单面 =
       kind === "code" && Boolean(node.attrs.mdFenceOpen) && Boolean(node.attrs.mdFenceClose);
     if (该单面 !== this.单面) return false;
+    this.节点 = node;
     if (kind !== this.kind) {
       this.kind = kind;
       this.dom.setAttribute("data-md-raw", kind);
       this.待重算 = true;
     }
-    const 源 = 带围栏(node);
-    if (源 !== this.正文) {
-      this.正文 = 源;
-      this.待重算 = true;
+    // 单面那一种**不算源文本**：`带围栏` 会走自动识别，而 update 每次击键都来一遍
+    if (!this.单面) {
+      const 源 = 带围栏(node);
+      if (源 !== this.正文) {
+        this.正文 = 源;
+        this.待重算 = true;
+      }
     }
     return true;
   }
@@ -318,7 +422,13 @@ class OpaqueView implements NodeView {
    */
   stopEvent(ev: Event): boolean {
     const 目标 = ev.target as Element | null;
-    if (!目标 || !this.host?.contains(目标)) return false;
+    if (!目标) return false;
+    /**
+     * 语言下拉：PM 一律别看它。返回 true 让浏览器处理原生下拉，我们自己也不 preventDefault
+     * ——那一下是"选一个元数据"，不是"点进块里改源码"，走 `进源码()` 会把用户从下拉里踢出来。
+     */
+    if (目标.closest(".md-lang")) return true;
+    if (!this.host?.contains(目标)) return false;
     if (目标.closest(".cal-head")) {
       if (ev.type === "mousedown") {
         const box = 目标.closest<HTMLElement>(".callout");
@@ -750,6 +860,11 @@ export const FocusIndicator = Extension.create({
  */
 const 视口键 = new PluginKey<[number, number][]>("mdCodeViewport");
 let 视口: [number, number][] = [];
+/**
+ * 本应用只有一个编辑器实例，所以装饰路径要顺手刷一下块内那个语言下拉时，从这儿拿视图。
+ * （同一份纪律下 `OpaqueFace` 也在直接写 DOM——显示层的事不发事务。）
+ */
+let 当前视图: EditorView | null = null;
 /** 上下各多带一屏的余量，滚动时不会立刻露出没上色的边（按字符估，够粗） */
 const 余量 = 4000;
 /**
@@ -769,14 +884,14 @@ export const CodeHighlight = Extension.create({
         state: {
           init: (_c, cfg) => {
             视口 = [[0, 首屏]];
-            return 着色装饰(cfg.doc, cfg.schema);
+            return 着色装饰(cfg.doc, cfg.schema, cfg.selection);
           },
           apply: (tr, 旧, _前, 后) => {
             const 新 = tr.getMeta(视口键);
             const 换了 = 新 !== undefined && 新 !== 视口;
             if (新) 视口 = 新;
             if (!tr.docChanged && !换了) return 旧;
-            return 着色装饰(后.doc, 后.schema, 视口);
+            return 着色装饰(后.doc, 后.schema, 后.selection, 视口);
           },
         },
         props: {
@@ -785,6 +900,7 @@ export const CodeHighlight = Extension.create({
           },
         },
         view: (view) => {
+          当前视图 = view;
           let 排 = 0;
           const 报 = () => {
             排 = 0;
@@ -795,6 +911,16 @@ export const CodeHighlight = Extension.create({
             if (!排) 排 = requestAnimationFrame(报);
           };
           节流();
+          /**
+           * 视图建好之后刷一遍牌：装载那一次装饰已经算过识别（缓存是热的），但那时
+           * NodeView 还不存在，牌没被更新。不补这一下就会出现**牌上写着"无"、保存下去
+           * 文件里多了个 `py`** ——屏幕上说的与落盘的必须同一句话。
+           */
+          requestAnimationFrame(() => {
+            当前视图?.state.doc.forEach((块, off) => {
+              if (块.type.name === "mdOpaque" && 块.attrs.mdFenceOpen) 牌刷新(off);
+            });
+          });
           window.addEventListener("scroll", 节流, { capture: true, passive: true });
           window.addEventListener("resize", 节流);
           return {
@@ -836,11 +962,12 @@ function 看得见(起: number, 止: number): boolean {
   return 视口.some(([a, b]) => 止 >= a - 余量 && 起 <= b + 余量);
 }
 
-function 着色装饰(doc: PmNode, schema: Schema, 限: [number, number][] = 视口): DecorationSet {
+function 着色装饰(doc: PmNode, schema: Schema, 选: { from: number; to: number }, 限: [number, number][] = 视口): DecorationSet {
   if (!schema.spec.nodes.get("mdOpaque")) return DecorationSet.empty;
   const 备份 = 视口;
   视口 = 限;
   const 出: Decoration[] = [];
+  const 死线 = (typeof performance !== "undefined" ? performance.now() : 0) + 识别预算;
   try {
     doc.forEach((块, off) => {
       if (块.type.name !== "mdOpaque") return;
@@ -849,9 +976,10 @@ function 着色装饰(doc: PmNode, schema: Schema, 限: [number, number][] = 视
       // 本来就带着 ```，给它上色会把围栏当代码关键字）
       if (!a.mdFenceOpen || !a.mdFenceClose) return;
       if (!看得见(off, off + 块.nodeSize)) return;
-      const 语 = 语言of(围栏行of(String(a.mdFenceOpen))?.语言 ?? "");
       const 文 = 块.textContent;
-      if (!语 || !文) return;
+      if (!文) return;
+      const 语 = 上色语言(块, off, 选, () => performance.now() > 死线);
+      if (!语) return;
       for (const 段 of 着色区间(语, 文)) {
         // 缓存与文档对不上时宁可少画：越界的位置会让 PM 直接抛，一抛整篇画不出来
         if (段.止 > 文.length || 段.起 >= 段.止) continue;
@@ -862,6 +990,52 @@ function 着色装饰(doc: PmNode, schema: Schema, 限: [number, number][] = 视
   } finally {
     视口 = 备份;
   }
+}
+
+/** 位置 → 上一次识别的结果。用来让"猜语言"不进击键路径 */
+const 猜的 = new Map<number, { 文: string; 语: string | null }>();
+/**
+ * 一轮重算里最多花多少毫秒猜语言。
+ *
+ * `highlightAuto` 是逐门跑一遍，实测比指定语言贵十倍（30 行 9ms、120 行 38ms），而"哪些块
+ * 没写语言"要等用户开了笔记才知道。给一轮设死预算：**超了就这一轮不猜，下一轮接着来**——
+ * 少一帧颜色是可接受的，把打字与滚动拖卡不是。
+ */
+const 识别预算 = 8;
+
+/**
+ * 这一块该按哪门语言上色。**文件里写了就照写的**（认不出也不猜，更不覆盖作者的选择）；
+ * 没写才猜一次，而且**正在打字的那一块沿用上一次的答案**——识别不该出现在击键路径上。
+ *
+ * 猜完顺手刷一下块内那个语言下拉：屏幕上说的与将要落盘的必须是同一句话
+ * （两边都读 `highlight.ts` 里那份按正文缓存的识别结果，不会算出两个答案）。
+ */
+function 上色语言(
+  块: PmNode,
+  off: number,
+  选: { from: number; to: number },
+  截止: () => boolean
+): string | null {
+  const 写着的 = 围栏行of(String(块.attrs.mdFenceOpen ?? ""))?.语言 ?? "";
+  if (写着的) return 语言of(写着的);
+  const 文 = 块.textContent;
+  const 记 = 猜的.get(off);
+  if (记 && 记.文 === 文) return 记.语;
+  if (选.from < off + 块.nodeSize && 选.to > off) return 记?.语 ?? null;
+  if (截止()) return 记?.语 ?? null;
+  const 猜 = 识别(文);
+  const 语 = 猜 ? 语言of(短写(猜)) : null;
+  if (猜的.size > 400) 猜的.clear();
+  猜的.set(off, { 文, 语 });
+  if (猜) 牌刷新(off);
+  return 语;
+}
+
+/** 把猜出来的语言同步进块内那个下拉（拿不到视图实例就算了，牌不刷新不是错） */
+function 牌刷新(off: number): void {
+  const dom = 当前视图?.nodeDOM(off);
+  if (!(dom instanceof HTMLElement)) return;
+  渲染实例.get(dom)?.刷语言(false);
 }
 
 /**

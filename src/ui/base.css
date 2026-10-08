@@ -378,13 +378,28 @@
     border-radius: var(--radius-md);
     background: var(--bg-sunken);
   }
-  .block-editor .md-opaque[data-md-code][data-md-lang]::before {
-    content: attr(data-md-lang);
+  /**
+   * 语言牌是个**真下拉**（用户点名要块内可点）。它长得必须和以前那枚灰色小字一样：
+   * 无边框、无底色、字号颜色照旧——多了装饰就像工具栏跑进了正文里。
+   * 原生下拉的展开面板归操作系统画，深色下可能仍是浅色列表：那是控件本来的样子，
+   * 不是我们丢了样式（[06] §4 的控件一致性说的就是"别自造一套下拉"）。
+   */
+  .block-editor .md-opaque[data-md-code] .md-lang {
     display: block;
     margin-bottom: var(--space-1);
+    padding: 0;
+    border: none;
+    background: none;
     color: var(--text-disabled);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .block-editor .md-opaque[data-md-code] .md-lang:hover {
+    color: var(--text-secondary);
+  }
+  .block-editor .md-opaque[data-md-code] .md-lang[data-guessed] {
+    font-style: italic; /* 猜出来的与写进去的要能一眼分辨（title 里写了为什么） */
   }
   .block-editor .md-opaque[data-md-code] .md-src {
     margin: 0;

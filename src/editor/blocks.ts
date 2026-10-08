@@ -10,6 +10,7 @@ import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
 import { 拼围栏, 拆围栏 } from "./fence";
+import { 短写, 识别 } from "./highlight";
 import { inlineToJson, serializeInline } from "./inline";
 import { parseGrid, parseTable, serializeTable, type Align } from "./table";
 import { 含, 夹住, 覆盖列, type 矩形 } from "./tableSelect";
@@ -250,7 +251,7 @@ function serializeNode(node: PmNode): string {
       // 源文本块：内容就是用户的源文本，改了就原样落盘（自带换行由调用方补）
       // **不能写 `node.text`**：那是 `TextNode` 才有的字段，块节点上它是 undefined，
       // `?? ""` 会把整块吃成空字符串——用户编辑一次代码块 / 表格 / 引用，那块就没了。
-      const 开 = String(a.mdFenceOpen ?? "");
+      const 开 = 有效开栏(node);
       const 闭 = String(a.mdFenceClose ?? "");
       if (!开 || !闭) return node.textContent;
       // 围栏账本这条路：正文只装代码，两道围栏按原样拼回去。空正文要按 `mdFenceBody`
@@ -279,6 +280,27 @@ function serializeNode(node: PmNode): string {
 }
 
 /**
+ * 这一块**实际生效的开栏行**：账本里那一行 +（只在它是空的）自动识别出来的语言。
+ *
+ * 三条规矩：
+ * - **只在开栏没有 info 首词时猜**。作者写了 `klingon` 就留着 `klingon`——把别人写的
+ *   东西改成我们的猜测不叫"识别"，叫覆盖。
+ * - 序列化与显示共用这一个函数：屏幕上标的语言与文件里写的语言必须是同一个答案。
+ * - 没走围栏账本的块（没闭栏、非代码）原样返回。
+ */
+export function 有效开栏(node: PmNode): string {
+  const a = node.attrs as Record<string, unknown>;
+  const 开 = String(a.mdFenceOpen ?? "");
+  if (!开 || !a.mdFenceClose) return 开;
+  const m = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(开);
+  if (!m) return 开;
+  const [, 缩 = "", 记 = "", 余 = ""] = m;
+  if (余.trim().split(/\s+/)[0]) return 开; // 写了语言（认不认得出都不关我们的事）
+  const 猜 = 识别(node.textContent);
+  return 猜 ? 缩 + 记 + 短写(猜) : 开;
+}
+
+/**
  * 这一块**在文件里长什么样**的源文本：走了围栏账本的代码块要把两道围栏拼回来，
  * 其余不透明块就是节点正文。
  *
@@ -287,7 +309,7 @@ function serializeNode(node: PmNode): string {
  */
 export function 带围栏(node: PmNode): string {
   const a = node.attrs as Record<string, unknown>;
-  const 开 = String(a.mdFenceOpen ?? "");
+  const 开 = 有效开栏(node);
   const 闭 = String(a.mdFenceClose ?? "");
   if (!开 || !闭) return node.textContent;
   const 身 = node.textContent ? node.textContent.split("\n") : a.mdFenceBody ? [""] : [];

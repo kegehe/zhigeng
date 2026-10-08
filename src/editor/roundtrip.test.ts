@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/core";
 import { TextSelection, type EditorState } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
+import { 认得语言, 语言清单, 识别 } from "./highlight";
 import { renderOpaque } from "./render";
 import { 分派岛上鼠标 } from "./schema";
 import { parseTable } from "./table";
@@ -1355,6 +1356,114 @@ describe("代码块单面：着色与语言牌跟着编辑面走", () => {
     expect(壳.querySelector(".md-src")!.textContent).toContain("```go");
     expect(壳.querySelector(".md-src span"), "围栏在正文里，不上色").toBeNull();
     editor.destroy();
+  });
+});
+
+/**
+ * 自动识别语言 + 块内那个语言下拉（2026-09-30）。
+ *
+ * 用户拍板的是"识别出来就写进 ``` 后面"。这条与"打开一篇不许动它"顶牛，所以口径是：
+ * **猜归猜，只有这一块真要落盘时才把那个词写进去**——没改过的块连一个字节都不许多。
+ */
+describe("自动识别语言：猜得出来，但不许偷改文件", () => {
+  const 代码 = "def f(x):\n    return x * 2  # 注释\n\nclass K:\n    pass\n";
+  const 裸 = (raw: string): EditDoc["blocks"][number] => ({
+    kind: "code",
+    id: null,
+    raw,
+    gapBefore: "",
+    content: "",
+    level: null,
+    checked: null,
+    fields: [],
+    children: [],
+  });
+  const 文档 = (...blocks: EditDoc["blocks"]): EditDoc => ({
+    frontMatter: "",
+    trailingGap: "",
+    blocks,
+  });
+
+  it("什么都不改：猜出来的语言不落盘，产出逐字节等于源文件", () => {
+    const d = 文档(裸("```\n" + 代码 + "```\n"));
+    const editor = createTestEditor(d);
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("```\n" + 代码 + "```\n");
+    expect(出).not.toContain("```py");
+    editor.destroy();
+  });
+
+  it("改过这一块：识别出来的语言写进开栏行，闭栏与正文原样", () => {
+    const d = 文档(裸("```\n" + 代码 + "```\n"));
+    const editor = createTestEditor(d);
+    editor.view.dispatch(editor.state.tr.insertText("z = 1\n", 1));
+    const 出 = docToMarkdown(editor.state.doc, d);
+    // 认得出 Python 就必须带上那个词；认不出也绝不编——所以这条断言同时钉住"不是别的语言"
+    expect(出).toMatch(/^```py/);
+    expect(出).toContain("z = 1\ndef f(x):");
+    expect(出.endsWith("```\n")).toBe(true);
+    editor.destroy();
+  });
+
+  it("作者写了语言就永不覆盖，哪怕我们认不出它", () => {
+    const d = 文档(裸("```klingon\nnuqDotlh\n```\n"));
+    const editor = createTestEditor(d);
+    editor.view.dispatch(editor.state.tr.insertText("tlh ", 1));
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toBe("```klingon\ntlh nuqDotlh\n```\n");
+    editor.destroy();
+  });
+
+  it("太短或纯文字的块不猜：`a=1` 不该被写成 ini", () => {
+    const d = 文档(裸("```\na=1\n```\n"));
+    const editor = createTestEditor(d);
+    editor.view.dispatch(editor.state.tr.insertText("b", 2));
+    expect(docToMarkdown(editor.state.doc, d)).toBe("```\nab=1\n```\n");
+    editor.destroy();
+  });
+
+  it("下拉：选一门语言 = 改开栏行的首词，缩进/围栏长度/后面的注释都留着", () => {
+    const d = 文档(裸("  ```rust // 标记\nfn main() {}\n  ```\n"));
+    const editor = createTestEditor(d);
+    const 壳 = editor.view.nodeDOM(0) as HTMLElement;
+    const 牌 = 壳.querySelector<HTMLSelectElement>("select.md-lang")!;
+    expect(牌.value).toBe("rust");
+    牌.value = "go";
+    牌.dispatchEvent(new Event("change", { bubbles: true }));
+    const 块 = editor.state.doc.child(0);
+    expect(块.attrs.mdFenceOpen).toBe("  ```go // 标记");
+    expect(docToMarkdown(editor.state.doc, d)).toBe("  ```go // 标记\nfn main() {}\n  ```\n");
+    editor.destroy();
+  });
+
+  it("下拉选「无」把开栏改回光秃秃的 ```，选「纯文本」写 text", () => {
+    const d = 文档(裸("```js\nconst a = 1;\n```\n"));
+    const editor = createTestEditor(d);
+    const 牌 = (editor.view.nodeDOM(0) as HTMLElement).querySelector<HTMLSelectElement>(
+      "select.md-lang"
+    )!;
+    牌.value = "";
+    牌.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(docToMarkdown(editor.state.doc, d)).toBe("```\nconst a = 1;\n```\n");
+    牌.value = "text";
+    牌.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(docToMarkdown(editor.state.doc, d)).toBe("```text\nconst a = 1;\n```\n");
+    editor.destroy();
+  });
+
+  it("下拉的每一个选项都真能上色（列一个上不了色的语言等于给个摆设）", () => {
+    for (const 项 of 语言清单) {
+      // `text` 是唯一一个"故意不上色"的选项：它的意思是"别猜了，这就是纯文本"
+      const 该认 = 项.值 === "text" || 项.值 === "" ? true : 认得语言(项.值);
+      expect([项.值, 该认]).toEqual([项.值, true]);
+    }
+  });
+
+  it("识别本身：认不出给 null，绝不编一门语言", () => {
+    expect(识别(代码)).toBe("py"); // 子集里给的是别名，回来的就是那个别名（与文件里写的词一致）
+    expect(识别("这是一段中文笔记，没有代码结构，真的没有。")).toBeNull();
+    expect(识别("a=1")).toBeNull(); // 太短
+    expect(识别("const a = 1;")).toBeNull(); // 单行
   });
 });
 
