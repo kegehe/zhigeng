@@ -471,7 +471,6 @@
   }
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-variable,
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-template-variable,
-  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-class .hljs-title,
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-attr,
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-property,
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-attribute,
@@ -483,7 +482,7 @@
     color: var(--code-type);
   }
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-string,
-  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-char.escape_ {
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-char.hljs-escape_ {
     color: var(--code-str);
   }
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-symbol,
@@ -491,9 +490,17 @@
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-number {
     color: var(--code-num);
   }
+  /*
+   * 函数名与类名。hljs 11 的分层 scope 出来是**两个类**（`title.function_` →
+   * `class="hljs-title function_"`），`highlight.ts` 的 `规范类` 会把第二段也补上 `hljs-` 前缀，
+   * 所以这里写的是 `.hljs-title.hljs-class_` 这种复合形式——**不是** hljs 10 那套
+   * `.hljs-class .hljs-title` 后代选择器，那种写法在这里永远匹配不上（复查抓到过）。
+   */
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-title.hljs-class_,
+  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-title.hljs-class_.hljs-inherited_ {
+    color: var(--code-type);
+  }
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-built_in,
-  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-title.class.inherited,
-  .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-title.class_,
   .block-editor :is(.codeblock, .md-opaque[data-md-code]) .hljs-title {
     color: var(--code-fn);
   }

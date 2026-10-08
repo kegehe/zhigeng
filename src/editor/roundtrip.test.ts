@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Editor } from "@tiptap/core";
+import { DOMParser, DOMSerializer } from "@tiptap/pm/model";
 import { TextSelection, type EditorState } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
@@ -37,6 +38,7 @@ import {
   清场所选,
   setAlign,
   type BlockTypeId,
+  type EditBlock,
   type EditDoc,
 } from "./blocks";
 
@@ -2303,6 +2305,140 @@ describe("文档位置 → 格子坐标：真机拖选的第一跳，之前被 j
     expect(格坐标At(editor.state, 1)).toBeNull(); // 前面那个段落里
     const 表 = editor.state.doc.nodeAt(表起点(editor))!;
     expect(格坐标At(editor.state, 表起点(editor) + 表.nodeSize - 1)).toBeNull(); // 末行行末之外
+    editor.destroy();
+  });
+});
+
+/**
+ * 第五轮复查（2026-10-08）抓到的四类：账本过不了剪贴板、块锚被吃掉、CRLF 整篇不接管、
+ * 牌与下拉的状态与文件脱钩。共同点是**只有真把节点交出去一遍才看得见**——
+ * 光测"装载 → 逐字节回写"那一段全都绿。
+ */
+const 一块 = (过: Partial<EditBlock>): EditDoc => ({
+  frontMatter: "",
+  trailingGap: "",
+  blocks: [
+    {
+      kind: "code",
+      id: null,
+      raw: "",
+      gapBefore: "",
+      content: "",
+      level: null,
+      checked: null,
+      fields: [],
+      children: [],
+      ...过,
+    },
+  ],
+});
+
+describe("围栏账本的三条死角", () => {
+  it("块锚跟着代码块走：编辑这一块不许把 `^b-…` 从文件里抹掉", () => {
+    // 内核把代码块的锚点单起一行写在闭栏之后。装载时为了判"闭栏在末行"要先摘掉它，
+    // 忘了补回来就是：改一次代码 → 反链指过来的那个块 ID 消失。
+    const 源 = "```rust\nfn a() {}\n```\n^b-f3g6j9l2mn\n";
+    const doc = 一块({ kind: "code", id: "b-f3g6j9l2mn", raw: 源 });
+    const editor = createTestEditor(doc);
+    const 码 = 不透明块(editor)[0]!;
+    expect(docToMarkdown(editor.state.doc, doc), "什么都不改").toBe(源);
+    const 节点 = editor.state.doc.nodeAt(码.pos)!;
+    editor.view.dispatch(
+      editor.state.tr.insertText("b", 码.pos + 1 + 节点.textContent.length)
+    );
+    expect(docToMarkdown(editor.state.doc, doc), "改完锚点还在，且跟着这一块").toBe(
+      "```rust\nfn a() {}b\n```\n^b-f3g6j9l2mn\n"
+    );
+    editor.destroy();
+  });
+
+  it("CRLF 的文件照样接管成单面，且回写仍是 CRLF", () => {
+    const 源 = "```js\r\nlet a = 1;\r\n```\r\n";
+    const doc = 一块({ kind: "code", raw: 源 });
+    const editor = createTestEditor(doc);
+    const 码 = 不透明块(editor)[0]!;
+    const 壳 = 面孔(editor, 码.pos)!;
+    expect(壳.querySelector(".md-view"), "CRLF 那块该是单面卡片").toBeNull();
+    expect(壳.getAttribute("data-md-lang")).toBe("js");
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(源);
+    editor.destroy();
+  });
+
+  it("复制粘贴走一遍 PM 的 DOM，围栏与类型都还在", () => {
+    // PM 的剪贴板就是 `renderHTML` → `parseHTML`。围栏住在 attrs 里，不跟着进 DOM 就会
+    // 贴出一堆裸行——`# 这行不是标题` 那样的内容直接变成真标题。
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 码 = 不透明块(editor).find((b) => b.kind === "code")!;
+    const 节点 = editor.state.doc.nodeAt(码.pos)!;
+    const 包装 = document.createElement("div");
+    包装.append(DOMSerializer.fromSchema(editor.state.schema).serializeNode(节点));
+    const 贴回 = DOMParser.fromSchema(editor.state.schema).parseSlice(包装, {
+      preserveWhitespace: true,
+    });
+    const 新 = 贴回.content.firstChild!;
+    expect(新.attrs.mdFenceOpen).toBe(节点.attrs.mdFenceOpen);
+    expect(新.attrs.mdFenceClose).toBe(节点.attrs.mdFenceClose);
+    expect(新.attrs.mdKind, "类型丢了就退回两副面孔").toBe("code");
+    expect(新.textContent).toBe(节点.textContent);
+    editor.destroy();
+  });
+});
+
+describe("语言牌与文件必须说同一句话", () => {
+  const 带牌 = (开栏: string) => {
+    const doc = 一块({ kind: "code", raw: `${开栏}\nlet a = 1;\n\`\`\`\n` });
+    const editor = createTestEditor(doc);
+    return { doc, editor, 码: 不透明块(editor)[0]! };
+  };
+  const 牌of = (editor: Editor, pos: number) =>
+    (面孔(editor, pos)!.querySelector(".md-lang") as HTMLSelectElement | null)!;
+
+  it("清单外的语言：反复进出不许攒出一堆重复选项", () => {
+    const { editor, 码 } = 带牌("```klingon");
+    const 牌 = 牌of(editor, 码.pos);
+    const 基 = 牌.options.length;
+    for (let 次 = 0; 次 < 6; 次++) {
+      放进(editor, 码.pos);
+      放到文末(editor);
+    }
+    expect(牌.options.length, "每进出一遍多一行一模一样的 klingon").toBe(基);
+    expect([...牌.options].filter((o) => o.value === "klingon").length).toBe(1);
+    editor.destroy();
+  });
+
+  it("选了又撤销：牌跟着回退，不许留着撤销前那个值", () => {
+    const { editor, 码 } = 带牌("```js");
+    const 牌 = 牌of(editor, 码.pos);
+    牌.value = "go";
+    牌.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(牌of(editor, 码.pos).value).toBe("go");
+    // 撤销在文档层面就是一次 setNodeMarkup（history 也是发这个），焦点全程没动
+    const 位 = 码.pos;
+    const 现 = editor.state.doc.nodeAt(位)!;
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(位, undefined, { ...现.attrs, mdFenceOpen: "```js" })
+    );
+    expect(牌of(editor, 码.pos).value, "文件回到 js，牌还写着 go").toBe("js");
+    expect(面孔(editor, 位)!.getAttribute("data-md-lang")).toBe("js");
+    editor.destroy();
+  });
+
+  it("猜出来的词必须是清单里那一门：不许把 hljs 的内部名写进围栏", () => {
+    // `短写` 认不出的一律不写。真写出去会是 ```` ```Batch file (DOS) ````——带空格的信息串
+    // 下一份文件根本解析不回代码块。
+    const { doc, editor, 码 } = 带牌("```");
+    const 节点 = editor.state.doc.nodeAt(码.pos)!;
+    const 假 = editor.state.schema.nodes.mdOpaque!.create(
+      { ...节点.attrs, mdFenceOpen: "```" },
+      [editor.state.schema.text("def f():\n    return 1")]
+    );
+    editor.view.dispatch(editor.state.tr.replaceWith(码.pos, 码.pos + 节点.nodeSize, 假));
+    const 出 = docToMarkdown(editor.state.doc, doc);
+    const 首行 = 出.split("\n")[0]!;
+    expect(首行.startsWith("```")).toBe(true);
+    expect(首行.split(/\s/).length, `写出来的是 ${首行}`).toBeLessThanOrEqual(2);
+    if (首行 !== "```") expect(语言清单.some((l) => l.值 === 首行.slice(3))).toBe(true);
     editor.destroy();
   });
 });

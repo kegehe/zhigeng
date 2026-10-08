@@ -217,7 +217,24 @@ export function 语言of(info: string | undefined | null): string | null {
  */
 const 最长 = 20_000;
 
-const 是着色类 = (类: string) => 类.split(/\s+/).every((c) => !c || c.startsWith("hljs-"));
+/**
+ * hljs 11 把**带层级的 scope** 吐成空格分隔的两个类：`title.function_` →
+ * `class="hljs-title function_"`（`core.js` 的 `scopeToCSSClass` 只给第一段加前缀）。
+ * 从前这里按"每个词都得 `hljs-` 开头"判，于是 `function_` / `class_` / `invoke__` 这些第二段
+ * 把整个 span 判死——**函数名与类名一个都不上色**，而那正是"按语言显示不同样式"最显眼的一批
+ * （实测 py / js / rs / java 全中，`hljs-title function_` 整段被吃掉）。
+ *
+ * 所以改成**归一化而不是拒绝**：第二段统一补上 `hljs-` 前缀。安全性质一点没松——进 DOM 的
+ * 类名仍然全部在我们自己的命名空间里（撞不上 Tailwind 那类工具类），不认识的形状照样降级成文本；
+ * 变的只是"能不能上色"从此由 CSS 有没有写这条决定，而不是由这里静默吃掉。
+ */
+const 规范类 = (原始: string): string | null => {
+  const 词 = 原始
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((c) => (c.startsWith("hljs-") ? c : `hljs-${c}`));
+  return 词.every((c) => /^hljs-[\w-]+$/.test(c)) ? 词.join(" ") : null;
+};
 
 /** 把 hljs 的 HTML 串搬成节点，只认 `span.hljs-*` 与文本；别的元素连它的文字一起留成文本 */
 function 搬进(源: Node, 到: Node, d: Document) {
@@ -227,9 +244,10 @@ function 搬进(源: Node, 到: Node, d: Document) {
       continue;
     }
     const 元 = 子 as HTMLElement;
-    if (元.tagName === "SPAN" && 是着色类(元.className)) {
+    const 名 = 规范类(元.className);
+    if (元.tagName === "SPAN" && 名 !== null) {
       const 新 = d.createElement("span");
-      新.className = 元.className;
+      新.className = 名;
       搬进(元, 新, d);
       到.appendChild(新);
       continue;
@@ -307,11 +325,12 @@ function 区间of(html: string): 着色区间[] {
         continue;
       }
       const 元 = 子 as HTMLElement;
-      if (元.tagName !== "SPAN" || !是着色类(元.className)) {
+      const 名 = 规范类(元.className);
+      if (元.tagName !== "SPAN" || 名 === null) {
         偏 += 子.textContent?.length ?? 0;
         continue;
       }
-      走(元, 承类 ? 承类 + " " + 元.className : 元.className);
+      走(元, 承类 ? 承类 + " " + 名 : 名);
     }
   };
   走(new DOMParser().parseFromString(html, "text/html").body, "");

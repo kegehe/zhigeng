@@ -52,16 +52,25 @@ type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup" | "impo
 type Opened = { rel: string; title: string };
 
 function useTheme() {
-  const [theme, setTheme] = useState<Theme>(读主题);
+  const [theme, set档] = useState<Theme>(读主题);
   useEffect(() => {
-    // 存 + 套。以前只套不存：重启就回到跟随系统，用户选的那一档白点
-    写主题(theme);
-    // 系统换深浅色、或**速记窗那边**改了偏好，这一窗跟着重算
+    /**
+     * 这里**只套不存**。存只发生在用户真的点了一档那条路（下面的 `setTheme`）：
+     * 挂载与"收到另一个窗口改了"都走这个 effect，跟着 `setItem` 会把外部清掉的那一条
+     * （`removeItem` / `localStorage.clear()`）立刻补回去——"重置"永远不生效，
+     * 而且两个窗口互相补写看着就像死循环。
+     */
+    套主题(theme);
     return 盯主题变化(() => {
-      套主题(读主题());
-      setTheme(读主题());
+      const 新 = 读主题();
+      套主题(新);
+      set档(新);
     });
   }, [theme]);
+  const setTheme = (t: Theme) => {
+    写主题(t); // 套 + 落 localStorage；另一个窗口靠 `storage` 事件跟上来
+    set档(t);
+  };
   return { theme, setTheme };
 }
 

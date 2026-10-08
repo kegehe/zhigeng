@@ -139,6 +139,40 @@ describe("显示形：代码 / 表格 / 公式 / 资产", () => {
     expect(box?.querySelector(".lang")?.textContent).toBe("js");
   });
 
+  it("函数名与类名必须拿到颜色：hljs 的分层 scope 不许被白名单吃掉", () => {
+    /**
+     * hljs 11 把 `title.function_` 这样的分层 scope 吐成**两个类**（`class="hljs-title function_"`，
+     * 只有第一段带前缀）。白名单从前要求"每个词都以 `hljs-` 开头"，于是整个 span 被判死——
+     * 函数名与类名一个都不上色，而这正是"按语言显示不同样式"最显眼的一批。
+     * 实测 py / js / rs / java 全中，`go` 因为用裸 `hljs-title` 反而躲过了这一刀。
+     */
+    for (const [语, 文, 词] of [
+      ["py", "def greet(name):\n    return name", "greet"],
+      ["js", "function add(a, b) {\n  return a;\n}", "add"],
+      ["rs", "fn main() {\n    let x = 1;\n}", "main"],
+      ["java", "class App {\n  void run() {}\n}", "run"],
+    ] as const) {
+      const 码 = r("code", `\`\`\`${语}\n${文}\n\`\`\``)?.querySelector("code");
+      const 命中 = [...(码?.querySelectorAll("span") ?? [])].find(
+        (s) => s.textContent?.includes(词) && s.className.includes("hljs-title")
+      );
+      expect(命中, `${语} 的 ${词} 没拿到 hljs-title`).toBeTruthy();
+      // 第二段被补进我们自己的命名空间：类名一律 `hljs-` 开头，撞不上工具类
+      expect(命中!.className.split(/\s+/).every((c) => /^hljs-[\w-]+$/.test(c)), 命中!.className).toBe(true);
+      expect(命中!.className).toMatch(/hljs-(function_|class_)/);
+    }
+  });
+
+  it("子语言（HTML 里的 script）也得上色，文字仍然逐字不变", () => {
+    const 源 = '```html\n<div id="a"><script>var x = 1;</script></div>\n```';
+    const 码 = r("code", 源)?.querySelector("code");
+    expect(码?.textContent).toBe('<div id="a"><script>var x = 1;</script></div>');
+    expect(
+      [...(码?.querySelectorAll("span") ?? [])].some((s) => s.className.includes("hljs-keyword")),
+      "script 里的 var 该按 js 上色"
+    ).toBe(true);
+  });
+
   it("未知语言不着色、也不许顺手猜一门：正文照旧全在", () => {
     const 码 = r("code", "```klingon\nnuqDotlh\n```")?.querySelector("code");
     expect(码?.querySelectorAll("span")).toHaveLength(0);

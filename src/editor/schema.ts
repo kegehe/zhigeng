@@ -20,7 +20,7 @@ import {
   type BlockTypeId,
 } from "./blocks";
 import { 批量, TableSelect } from "./tableSelectPlugin";
-import { 围栏行of } from "./fence";
+import { 拼开栏, 拆开栏, 围栏行of } from "./fence";
 import { 短写, 已识别, 语言清单, 语言of, 着色区间, 识别 } from "./highlight";
 import { mightRender, renderOpaque } from "./render";
 
@@ -219,8 +219,11 @@ class OpaqueView implements NodeView {
   ) {
     this.kind = String(node.attrs.mdKind ?? "raw");
     // 显示形要的是"这一块在文件里长什么样"：代码块的围栏在账本里、不在正文里，
-    // 直接拿 textContent 去画会认不出开栏而整个降级
-    this.正文 = 带围栏(node);
+    // 直接拿 textContent 去画会认不出开栏而整个降级。
+    // **装载这一次不许猜语言**：`highlightAuto` 逐门跑一遍，实测 2~13ms 一块（首门含预热
+    // 223ms），而 NodeView 是在打开笔记时一批建出来的。猜测由 `CodeHighlight` 在装饰时算
+    // （那里有 8ms 一轮的预算），算完回头刷这个牌——两边读同一份按正文缓存的识别结果。
+    this.正文 = 带围栏(node, false);
 
     const dom = document.createElement("div");
     dom.className = "md-opaque";
@@ -300,9 +303,15 @@ class OpaqueView implements NodeView {
   }
 
   /** 开栏行 → 下拉该显示的那个词 */
+  /**
+   * 开栏里写着的那个词。
+   *
+   * **必须走 `fence.ts` 的 `拆开栏`**：这是第三处想自己正则一遍开栏行的地方（另外两处是
+   * `有效开栏` 与 `改语言`），而它那句 `(.*)$` 恰恰不认行尾的 `\r`——CRLF 的文件里
+   * `​```js` 读成"没写语言"，牌显示成空、着色也退回猜。三份实现早晚分叉，这次分叉的是看得见的地方。
+   */
   private 词(开: string): string {
-    const m = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(开);
-    return (m?.[3] ?? "").trim().split(/\s+/)[0] ?? "";
+    return 拆开栏(开)?.词 ?? "";
   }
 
   /**
@@ -326,8 +335,16 @@ class OpaqueView implements NodeView {
       }
     }
     // 文件里写了个清单外的词（`klingon`）：加一条"当前"选项，别让下拉显示成"无"——
-    // 一个说不清自己状态的控件比没有控件更糟
-    if (现 && !语言清单.some((l) => l.值 === 现)) {
+    // 一个说不清自己状态的控件比没有控件更糟。
+    const 在列 = (v: string) => 语言清单.some((l) => l.值 === v);
+    /**
+     * **先把上一轮加的删掉再决定加不加**。`刷语言` 有三条来路（建视图、交出焦点、装饰回刷），
+     * 只 append 不去重的结果是"每进出一遍，下拉里多一行一模一样的 klingon"——
+     * 实测两个清单外语言的块来回点 6 次，29 项涨到 35 项。
+     */
+    for (const 项 of Array.from(this.牌.options))
+      if (!在列(项.value) && 项.value !== 现) 项.remove();
+    if (现 && !在列(现) && !Array.from(this.牌.options).some((o) => o.value === 现)) {
       const o = document.createElement("option");
       o.value = 现;
       o.textContent = 现 + "（文件里写的）";
@@ -345,7 +362,7 @@ class OpaqueView implements NodeView {
     this.dom.setAttribute("data-md-lang", 现);
   }
 
-  /** 选语言 = 改开栏行的 info 首词，缩进、围栏长度、后面那串注释都原样留着 */
+  /** 选语言 = 改开栏行的 info 首词，缩进、围栏长度、后面那串 `// 注释` 都原样留着 */
   private 改语言(值: string): void {
     let pos: number | undefined;
     try {
@@ -356,13 +373,11 @@ class OpaqueView implements NodeView {
     if (pos === undefined) return;
     const 块 = this.view.state.doc.nodeAt(pos);
     if (!块) return;
-    const 开 = String(块.attrs.mdFenceOpen ?? "");
-    const m = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(开);
-    if (!m) return;
-    const [, 缩 = "", 记 = "", 余 = ""] = m;
-    const 尾 = (余.trim().split(/\s+/).slice(1) ?? []).join(" ");
-    const 新 = 缩 + 记 + (值 || "") + (值 && 尾 ? " " + 尾 : "");
-    if (新 === 开) return;
+    const 原 = String(块.attrs.mdFenceOpen ?? "");
+    const 拆 = 拆开栏(原);
+    if (!拆) return;
+    const 新 = 拼开栏({ ...拆, 词: 值 });
+    if (新 === 原) return; // 已经是这门语言了，别发空事务
     this.view.dispatch(
       this.view.state.tr.setNodeMarkup(pos, undefined, { ...块.attrs, mdFenceOpen: 新 })
     );
@@ -392,15 +407,23 @@ class OpaqueView implements NodeView {
     const 该单面 =
       kind === "code" && Boolean(node.attrs.mdFenceOpen) && Boolean(node.attrs.mdFenceClose);
     if (该单面 !== this.单面) return false;
+    const 旧开栏 = String(this.节点.attrs.mdFenceOpen ?? "");
     this.节点 = node;
     if (kind !== this.kind) {
       this.kind = kind;
       this.dom.setAttribute("data-md-raw", kind);
       this.待重算 = true;
     }
+    /**
+     * 开栏变了就把牌对回来。`Ctrl+Z` 撤销一次"选语言"改的正是这个属性，而牌此前只在
+     * **交出焦点**时刷（`补渲染`）——撤销时焦点根本没动过，于是文件回到了 `js`、
+     * 下拉与着色还写着 `go`，屏幕与盘各说一句话。只读缓存（`允许算 = false`），
+     * 这条路每次击键都会走。
+     */
+    if (this.单面 && String(node.attrs.mdFenceOpen ?? "") !== 旧开栏) this.刷语言(false);
     // 单面那一种**不算源文本**：`带围栏` 会走自动识别，而 update 每次击键都来一遍
     if (!this.单面) {
-      const 源 = 带围栏(node);
+      const 源 = 带围栏(node, false);
       if (源 !== this.正文) {
         this.正文 = 源;
         this.待重算 = true;
@@ -500,15 +523,48 @@ export const MdOpaque = Node.create({
     return mdAttributes;
   },
   parseHTML() {
-    return [{ tag: "pre[data-md-raw]" }];
+    return [
+      {
+        tag: "pre[data-md-raw]",
+        /**
+         * PM 的剪贴板走的就是这条 `renderHTML` → `parseHTML` 通路，所以**账本必须跟着进 DOM**，
+         * 否则"复制一个代码块贴到别处"贴出来的是没有围栏的一堆裸行——`# 这行不是标题`
+         * 那样的内容会直接变成真标题（复查实测：过一遍 DOM 之后 `mdFenceOpen` 是空串）。
+         * 同理 `mdKind` 也要带回来：只带围栏不带类型，贴出来的块 `单面` 判不出来，
+         * 又会退回两副面孔。
+         */
+        getAttrs: (el) => {
+          const 元 = el as HTMLElement;
+          const 出: Record<string, string | boolean> = {
+            mdKind: 元.getAttribute("data-md-raw") ?? "raw",
+          };
+          const 开 = 元.getAttribute("data-md-fence-open");
+          if (开) {
+            出.mdFenceOpen = 开;
+            出.mdFenceClose = 元.getAttribute("data-md-fence-close") ?? "";
+            出.mdFenceBody = 元.getAttribute("data-md-fence-body") === "1";
+          }
+          return 出;
+        },
+      },
+    ];
   },
   renderHTML({ node, HTMLAttributes }) {
+    const 开 = String(node.attrs.mdFenceOpen ?? "");
+    const 闭 = String(node.attrs.mdFenceClose ?? "");
     return [
       "pre",
       {
         ...domAttrs(HTMLAttributes),
         "data-md-raw": String(node.attrs.mdKind ?? "raw"),
         style: `--md-indent:${Number(node.attrs.mdDepth ?? 0)}`,
+        ...(开 && 闭
+          ? {
+              "data-md-fence-open": 开,
+              "data-md-fence-close": 闭,
+              "data-md-fence-body": node.attrs.mdFenceBody ? "1" : "0",
+            }
+          : {}),
       },
       ["code", 0],
     ];
@@ -911,10 +967,15 @@ export const CodeHighlight = Extension.create({
             for (const off of 列) 牌刷新(view, off);
           };
           let 排 = 0;
+          /**
+           * 视口只许在 `apply` 里落地。从前这里先 `视口 = 视口of(view)` 再带着同一个对象去
+           * dispatch，而 `apply` 判的是"meta 里那份与模块里那份不是同一个"——自己先赋了值，
+           * 那个比较就**永远相等**，滚动上报全部被当成"没换"丢掉：滚到首屏之外的代码块不上色，
+           * 要等下一次真改动文档的事务才补上。
+           */
           const 报 = () => {
             排 = 0;
-            视口 = 视口of(view);
-            view.dispatch(view.state.tr.setMeta(视口键, 视口));
+            view.dispatch(view.state.tr.setMeta(视口键, 视口of(view)));
           };
           const 节流 = () => {
             if (!排) 排 = requestAnimationFrame(报);

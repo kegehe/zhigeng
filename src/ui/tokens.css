@@ -40,7 +40,8 @@
   --code-key: oklch(48% 0.19 295);
   --code-str: oklch(45% 0.13 152);
   --code-num: oklch(50% 0.12 62);
-  --code-com: oklch(58% 0.012 260);
+  /* 注释在沉底灰的卡片上，L 58% 实测只有 3.84:1，不过 [06] §2 那条 AA 4.5 的线；压到 50% = 5.37:1 */
+  --code-com: oklch(50% 0.012 260);
   --code-fn: oklch(52% 0.15 248);
   --code-type: oklch(48% 0.11 190);
   --code-tag: oklch(50% 0.19 22);

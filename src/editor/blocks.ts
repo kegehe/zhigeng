@@ -9,8 +9,8 @@ import {
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
-import { 拼围栏, 拆围栏 } from "./fence";
-import { 短写, 识别 } from "./highlight";
+import { 拼开栏, 拼围栏, 拆围栏, 拆开栏 } from "./fence";
+import { 已识别, 短写, 语言清单, 识别 } from "./highlight";
 import { inlineToJson, serializeInline } from "./inline";
 import { parseGrid, parseTable, serializeTable, type Align } from "./table";
 import { 含, 夹住, 覆盖列, type 矩形 } from "./tableSelect";
@@ -116,8 +116,16 @@ export function docToJson(doc: EditDoc): JsonNode {
        * 这样点进去编辑的就是代码本身，不会先看到一屏 Markdown。判据只有一条——
        * **得有闭栏**。没闭栏的围栏按 CommonMark 是"到文末都是代码"，接管了就得凭空
        * 补一道 ` ``` `，那是替用户写字节。
+       *
+       * 接管之前先把**行尾那枚块锚**摘掉：内核给代码块写锚点是单起一行（`^b-…` 走在闭栏
+       * 之后），而 `拆围栏` 认的是"闭栏在末行"。不摘就判成"没闭栏"，整块退回两副面孔；
+       * 摘了又忘了补，就是改一次代码块把它的锚点从文件里抹掉——反链与拖拽排序都认那个 ID。
+       * **只摘与 `b.id` 一字不差的那一行**，别的一律留在正文里：宁可少接管，不可吃用户字节。
        */
-      const 拆 = b.kind === "code" ? 拆围栏(text) : null;
+      const 尾锚 = typeof b.id === "string" && b.id ? `^${b.id}` : "";
+      const 有尾锚 = 尾锚 !== "" && text.endsWith(`\n${尾锚}`);
+      const 体 = 有尾锚 ? text.slice(0, -(`\n${尾锚}`.length)) : text;
+      const 拆 = b.kind === "code" ? 拆围栏(体) : null;
       if (拆?.闭) {
         const 身 = 拆.身.join("\n");
         return {
@@ -261,7 +269,13 @@ function serializeNode(node: PmNode): string {
         : a.mdFenceBody
           ? [""]
           : [];
-      return 拼围栏({ 开, 身, 闭 });
+      /**
+       * 块锚补回自己那一行（装载时是从 `拆围栏` 眼前摘掉的）。没这条就是"编辑一次代码块，
+       * 它的 `^b-…` 从文件里消失"——反链按块 ID 指过来就指空了。
+       * 不走账本的那条路不用补：锚点一直躺在 `textContent` 里。
+       */
+      const 锚 = typeof a.mdId === "string" && a.mdId ? `\n^${a.mdId}` : "";
+      return 拼围栏({ 开, 身, 闭 }) + 锚;
     }
     case "mdTable": {
       // 结构 → GFM。列数与对齐由这张表自己带着（mdAligns），所以"加一列"必须同时
@@ -282,22 +296,29 @@ function serializeNode(node: PmNode): string {
 /**
  * 这一块**实际生效的开栏行**：账本里那一行 +（只在它是空的）自动识别出来的语言。
  *
- * 三条规矩：
+ * 四条规矩：
  * - **只在开栏没有 info 首词时猜**。作者写了 `klingon` 就留着 `klingon`——把别人写的
  *   东西改成我们的猜测不叫"识别"，叫覆盖。
+ * - **猜出来的词后面那段原样留着**（`​```js // 标记` 清成无语言要得到 `​``` // 标记`，
+ *   不是 `​````）：那是用户写的字节，改语言不等于删注释。行尾的 `\r` 也算"那段"。
+ * - **只写清单里有的那一门**。`识别` 万一哪天吐回 hljs 的真名（`Batch file (DOS)`、
+ *   `TOML, also INI` 这种带空格的），直接拼进开栏就写出一道解析不出来的围栏。
  * - 序列化与显示共用这一个函数：屏幕上标的语言与文件里写的语言必须是同一个答案。
- * - 没走围栏账本的块（没闭栏、非代码）原样返回。
+ *
+ * `允许猜 = false` 给"装载那一路"用：`highlightAuto` 是逐门跑一遍，实测比指定语言贵十倍
+ * （30 行 2~13ms、首门含预热 223ms），不该压在打开笔记与建 NodeView 的路上。
  */
-export function 有效开栏(node: PmNode): string {
+export function 有效开栏(node: PmNode, 允许猜 = true): string {
   const a = node.attrs as Record<string, unknown>;
   const 开 = String(a.mdFenceOpen ?? "");
   if (!开 || !a.mdFenceClose) return 开;
-  const m = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(开);
-  if (!m) return 开;
-  const [, 缩 = "", 记 = "", 余 = ""] = m;
-  if (余.trim().split(/\s+/)[0]) return 开; // 写了语言（认不认得出都不关我们的事）
-  const 猜 = 识别(node.textContent);
-  return 猜 ? 缩 + 记 + 短写(猜) : 开;
+  const 拆 = 拆开栏(开);
+  if (!拆 || 拆.词) return 开; // 写了语言（认不认得出都不关我们的事）
+  const 猜 = 允许猜 ? 识别(node.textContent) : (已识别(node.textContent) ?? null);
+  if (!猜) return 开;
+  const 项 = 语言清单.find((l) => l.值 === 短写(猜));
+  if (!项) return 开;
+  return 拼开栏({ ...拆, 词: 项.值 });
 }
 
 /**
@@ -307,9 +328,9 @@ export function 有效开栏(node: PmNode): string {
  * 显示形要的是这个，不是 `node.textContent`——后者对代码块来说只有围栏之间那段，
  * 拿它去 `renderOpaque("code", …)` 会因为认不出开栏而整个降级。
  */
-export function 带围栏(node: PmNode): string {
+export function 带围栏(node: PmNode, 允许猜 = true): string {
   const a = node.attrs as Record<string, unknown>;
-  const 开 = 有效开栏(node);
+  const 开 = 有效开栏(node, 允许猜);
   const 闭 = String(a.mdFenceClose ?? "");
   if (!开 || !闭) return node.textContent;
   const 身 = node.textContent ? node.textContent.split("\n") : a.mdFenceBody ? [""] : [];
