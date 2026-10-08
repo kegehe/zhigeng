@@ -147,6 +147,8 @@ export const 语言清单: { 值: string; 标签: string }[] = [
 const 识别缓存 = new Map<string, string | null>();
 const 最短 = 24;
 const 识别上限 = 6000;
+/** 相关度门槛，见 `识别` 里那段实测数字 */
+const 证据门槛 = 6;
 
 export function 识别(代码: string): string | null {
   if (代码.length < 最短 || 代码.length > 识别上限) return null;
@@ -156,7 +158,15 @@ export function 识别(代码: string): string | null {
   let 得: string | null;
   try {
     const 候 = hljs.highlightAuto(代码, 语言清单.map((l) => l.值).filter(Boolean));
-    得 = 候.language && hljs.getLanguage(候.language) ? 候.language : null;
+    /**
+     * **证据不够就不猜**。门槛是实测出来的：常见片段的相关度是 js 6 / rust 8 / python 9 /
+     * bash 15，而一段 C 被误判成 php 只有 5 分——低分那一档正是猜错的集中区。
+     *
+     * 试过"要求第一名明显压过第二名"，太狠：js 对 ts（1.2 倍）、rust 对 js（1.33 倍）
+     * 都是判对了却被毙掉。相关度是绝对的信息量，比相对差距靠谱。
+     * 并列时按 `语言清单` 的顺序取胜（js/ts/py/rs 排在 rb/php 前面），这是有意排的。
+     */
+    得 = 候.language && hljs.getLanguage(候.language) && 候.relevance >= 证据门槛 ? 候.language : null;
   } catch {
     得 = null;
   }

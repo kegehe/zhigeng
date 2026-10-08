@@ -37,8 +37,8 @@ import type {
   SnapshotRow,
   TrashRow,
 } from "./ipc/types";
+import { 读主题, 套主题, 写主题, 盯主题变化, type Theme } from "./ui/theme";
 
-type Theme = "system" | "light" | "dark";
 /**
  * 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。
  *
@@ -52,17 +52,15 @@ type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup" | "impo
 type Opened = { rel: string; title: string };
 
 function useTheme() {
-  const [theme, setTheme] = useState<Theme>("system");
+  const [theme, setTheme] = useState<Theme>(读主题);
   useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => {
-      const resolved = theme === "system" ? (mq.matches ? "dark" : "light") : theme;
-      document.documentElement.dataset.theme = resolved;
-    };
-    apply();
-    if (theme !== "system") return;
-    mq.addEventListener("change", apply);
-    return () => mq.removeEventListener("change", apply);
+    // 存 + 套。以前只套不存：重启就回到跟随系统，用户选的那一档白点
+    写主题(theme);
+    // 系统换深浅色、或**速记窗那边**改了偏好，这一窗跟着重算
+    return 盯主题变化(() => {
+      套主题(读主题());
+      setTheme(读主题());
+    });
   }, [theme]);
   return { theme, setTheme };
 }

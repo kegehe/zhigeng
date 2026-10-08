@@ -276,7 +276,15 @@ class OpaqueView implements NodeView {
       }
       牌.addEventListener("change", () => this.改语言(牌.value));
       this.牌 = 牌;
-      dom.append(牌);
+      /**
+       * 原生 `<select>` 上画不出伪元素（replaced element），所以套一层盒子让 CSS 用
+       * `currentColor` 画那枚尖角——自造一套下拉在 [06] §4 里是被判死的（控件行为与
+       * 键盘都得自己实现，还常常比原生的难用）。
+       */
+      const 牌框 = document.createElement("span");
+      牌框.className = "md-lang-box";
+      牌框.append(牌);
+      dom.append(牌框);
     }
 
     // 宿主排在源文本**前面**：PM 的 `localPosFromDOM` 按"点击的元素在 contentDOM 之前还是
@@ -860,11 +868,6 @@ export const FocusIndicator = Extension.create({
  */
 const 视口键 = new PluginKey<[number, number][]>("mdCodeViewport");
 let 视口: [number, number][] = [];
-/**
- * 本应用只有一个编辑器实例，所以装饰路径要顺手刷一下块内那个语言下拉时，从这儿拿视图。
- * （同一份纪律下 `OpaqueFace` 也在直接写 DOM——显示层的事不发事务。）
- */
-let 当前视图: EditorView | null = null;
 /** 上下各多带一屏的余量，滚动时不会立刻露出没上色的边（按字符估，够粗） */
 const 余量 = 4000;
 /**
@@ -900,7 +903,13 @@ export const CodeHighlight = Extension.create({
           },
         },
         view: (view) => {
-          当前视图 = view;
+          /** 攒着的牌在视图更新完之后刷（那时 DOM 才是稳的） */
+          const 刷 = () => {
+            if (!待刷牌.size) return;
+            const 列 = [...待刷牌];
+            待刷牌.clear();
+            for (const off of 列) 牌刷新(view, off);
+          };
           let 排 = 0;
           const 报 = () => {
             排 = 0;
@@ -916,18 +925,21 @@ export const CodeHighlight = Extension.create({
            * NodeView 还不存在，牌没被更新。不补这一下就会出现**牌上写着"无"、保存下去
            * 文件里多了个 `py`** ——屏幕上说的与落盘的必须同一句话。
            */
-          requestAnimationFrame(() => {
-            当前视图?.state.doc.forEach((块, off) => {
-              if (块.type.name === "mdOpaque" && 块.attrs.mdFenceOpen) 牌刷新(off);
+          let 初刷 = requestAnimationFrame(() => {
+            初刷 = 0;
+            view.state.doc.forEach((块, off) => {
+              if (块.type.name === "mdOpaque" && 块.attrs.mdFenceOpen) 牌刷新(view, off);
             });
           });
           window.addEventListener("scroll", 节流, { capture: true, passive: true });
           window.addEventListener("resize", 节流);
           return {
+            update: () => 刷(),
             destroy: () => {
               window.removeEventListener("scroll", 节流, { capture: true });
               window.removeEventListener("resize", 节流);
               if (排) cancelAnimationFrame(排);
+              if (初刷) cancelAnimationFrame(初刷);
             },
           };
         },
@@ -1010,6 +1022,10 @@ const 识别预算 = 8;
  * 猜完顺手刷一下块内那个语言下拉：屏幕上说的与将要落盘的必须是同一句话
  * （两边都读 `highlight.ts` 里那份按正文缓存的识别结果，不会算出两个答案）。
  */
+/** 等着刷语言牌的块。**只在视图更新完之后刷**——`state.apply` 里碰 `view.nodeDOM`
+ *  会撞上 PM 正在重建 docView，实测直接抛 `descAt of null`，一抛整篇画不出来。 */
+const 待刷牌 = new Set<number>();
+
 function 上色语言(
   块: PmNode,
   off: number,
@@ -1020,20 +1036,32 @@ function 上色语言(
   if (写着的) return 语言of(写着的);
   const 文 = 块.textContent;
   const 记 = 猜的.get(off);
-  if (记 && 记.文 === 文) return 记.语;
+  // 缓存命中也要刷牌：装载那一次装饰算得出、NodeView 还不存在，不补这一下就会出现
+  // "牌上显示着猜的结果、却没有'这是猜的'那个标记"
+  if (记 && 记.文 === 文) {
+    待刷牌.add(off);
+    return 记.语;
+  }
   if (选.from < off + 块.nodeSize && 选.to > off) return 记?.语 ?? null;
-  if (截止()) return 记?.语 ?? null;
+  if (截止()) {
+    待刷牌.add(off);
+    return 记?.语 ?? null;
+  }
   const 猜 = 识别(文);
   const 语 = 猜 ? 语言of(短写(猜)) : null;
   if (猜的.size > 400) 猜的.clear();
   猜的.set(off, { 文, 语 });
-  if (猜) 牌刷新(off);
+  待刷牌.add(off);
   return 语;
 }
 
 /** 把猜出来的语言同步进块内那个下拉（拿不到视图实例就算了，牌不刷新不是错） */
-function 牌刷新(off: number): void {
-  const dom = 当前视图?.nodeDOM(off);
+function 牌刷新(view: EditorView, off: number): void {
+  // 牌刷新有几条路是延后的（rAF、视图更新完再刷），延后的路上编辑器可能被销毁。
+  // 销毁之后 PM 把 docView 置空，nodeDOM 会直接抛 `descAt of null`——那是测试里
+  // "editor.destroy() 那一帧还没跑"的样子，不是用户能撞到的错，但一次抛错就够把整轮测试带崩。
+  if (view.isDestroyed) return;
+  const dom = view.nodeDOM(off);
   if (!(dom instanceof HTMLElement)) return;
   渲染实例.get(dom)?.刷语言(false);
 }

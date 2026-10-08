@@ -381,21 +381,46 @@
   /**
    * 语言牌是个**真下拉**（用户点名要块内可点）。它长得必须和以前那枚灰色小字一样：
    * 无边框、无底色、字号颜色照旧——多了装饰就像工具栏跑进了正文里。
-   * 原生下拉的展开面板归操作系统画，深色下可能仍是浅色列表：那是控件本来的样子，
-   * 不是我们丢了样式（[06] §4 的控件一致性说的就是"别自造一套下拉"）。
+   *
+   * `appearance: none` 是这条的关键：不去掉原生外观，暗色界面里就会浮出一块浅色的
+   * 系统控件底（用户看到的"样式不对"就是这个）。尖角由盒子的 `::after` 用
+   * `currentColor` 画——自造一套下拉是被 [06] §4 判死的，控件行为与键盘都得原生的。
+   * 展开的那张列表归操作系统画，跟着 `color-scheme` 走深浅，不在我们手里。
    */
-  .block-editor .md-opaque[data-md-code] .md-lang {
-    display: block;
+  .block-editor .md-opaque[data-md-code] .md-lang-box {
+    display: inline-flex;
+    align-items: center;
     margin-bottom: var(--space-1);
+    cursor: pointer;
+  }
+  .block-editor .md-opaque[data-md-code] .md-lang-box::after {
+    content: "";
+    width: 0;
+    height: 0;
+    margin-left: var(--space-1);
+    border-left: 3px solid transparent;
+    border-right: 3px solid transparent;
+    border-top: 4px solid currentColor;
+    color: var(--text-disabled);
+  }
+  .block-editor .md-opaque[data-md-code] .md-lang {
     padding: 0;
     border: none;
+    appearance: none;
+    -webkit-appearance: none;
     background: none;
     color: var(--text-disabled);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     cursor: pointer;
   }
-  .block-editor .md-opaque[data-md-code] .md-lang:hover {
+  .block-editor .md-opaque[data-md-code] .md-lang option {
+    /* 列表里的每一行仍是原生绘制，但底色跟着 token，暗色下不会是白的 */
+    background: var(--bg-raised);
+    color: var(--text-primary);
+  }
+  .block-editor .md-opaque[data-md-code] .md-lang-box:hover .md-lang,
+  .block-editor .md-opaque[data-md-code] .md-lang-box:hover::after {
     color: var(--text-secondary);
   }
   .block-editor .md-opaque[data-md-code] .md-lang[data-guessed] {

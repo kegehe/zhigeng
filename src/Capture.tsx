@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { CapturedOut } from "./ipc/types";
+import { 套主题, 盯主题变化, 读主题 } from "./ui/theme";
 
 type Phase = "idle" | "saving" | "saved" | "error";
 
@@ -19,6 +20,12 @@ export function Capture() {
   useEffect(() => {
     ta.current?.focus();
   }, []);
+
+  /**
+   * 速记窗以前**从来没被问过主题**：主窗是暗的，它永远套浅色 token（用户原话
+   * "为什么没有跟随系统颜色"）。这里跟着同一份偏好走；主窗改了会通过 `storage` 事件过来。
+   */
+  useEffect(() => 盯主题变化(() => 套主题(读主题())), []);
 
   const close = useCallback(() => {
     void getCurrentWindow().hide();
