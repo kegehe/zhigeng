@@ -19,7 +19,7 @@ tauri-build = { version = "2.6", features = [] }
 [dependencies]
 note-core = { workspace = true }
 md-kernel = { workspace = true }
-tauri = { version = "2.11", features = ["tray-icon"] }
+tauri = { version = "2.11", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-single-instance = "2.4"
 tauri-plugin-log = "2.9"
 tauri-plugin-global-shortcut = "2.3"

@@ -7,8 +7,9 @@ import {
   type Schema,
 } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
-import { TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
+import { 拼资产引用, 是库内资产, 拆资产引用, type 资产引用 } from "./asset";
 import { 拼开栏, 拼围栏, 拆围栏, 拆开栏 } from "./fence";
 import { 已识别, 短写, 语言清单, 识别 } from "./highlight";
 import { inlineToJson, serializeInline } from "./inline";
@@ -38,9 +39,39 @@ export type { EditBlock, EditDoc };
 /** 可行内编辑的类型；其余进 mdOpaque */
 const EDITABLE = new Set(["paragraph", "heading", "bullet", "numbered", "todo"]);
 
+/**
+ * 这一块能不能接管成 `mdImage`。**判据保守，够格才接管**（与表格那条同一口气）：
+ *
+ * - 内核判的是 image，且**没有子项**；
+ * - 摘掉块锚点与 CRLF 的行尾 `\r` 之后，整行**正好只有这一个引用**——`![[a.png]] 后面还有字`
+ *   那种接管了就会把后面的字吃掉；
+ * - 目标指向本库 `attachments/`（裸文件名与相对路径要的是全库解析，那件活没做）；
+ * - 形状里没有我们没搬进 attrs 的字节（标题、尖括号）。
+ *
+ * 任一条不满足就返回 null，这一块维持 `mdOpaque` 显示源文本——宁可少接管，不可吃用户字节。
+ */
+function 图片接管(b: EditBlock): 资产引用 | null {
+  if (b.kind !== "image" || b.children.length) return null;
+  let 行 = b.raw.replace(/\n+$/, "");
+  // CRLF 文件的这一行以 `\r` 收尾，而它在锚点**之后**，所以先摘下来交给调用方补回去
+  if (行.endsWith("\r")) 行 = 行.slice(0, -1);
+  const 尾锚 = typeof b.id === "string" && b.id ? ` ^${b.id}` : "";
+  if (尾锚 && 行.endsWith(尾锚)) 行 = 行.slice(0, -尾锚.length);
+  const 拆 = 拆资产引用(行);
+  return 拆 && 是库内资产(拆.目标) ? 拆 : null;
+}
+
+/** 这一块的行尾是不是 CRLF 那个 `\r`。序列化时它排在块锚点之后，位置不能错 */
+function 行尾回车(b: EditBlock): string {
+  const 文本 = b.raw.replace(/\n+$/, "");
+  return 文本.endsWith("\r") ? "\r" : "";
+}
+
 function nodeType(b: EditBlock): string {
   // 父项的 raw 含子项那几行的字节（缩进也在里面），所以带子项的块不能拆成行内节点
   if (!EDITABLE.has(b.kind) || b.children.length) {
+    // 图片是唯一被接管的**原子**块：缩略图就是它的正文，光标进来不许换一副样子
+    if (图片接管(b)) return "mdImage";
     // 表格是唯一被"接管"的不透明块：判据保守（见 table.ts），够格才建网格，
     // 否则维持源文本编辑——列数不齐的表我们拼不回去，就不该装作能
     if (b.kind === "table" && parseTable(b.raw)) return "mdTable";
@@ -142,6 +173,18 @@ export function docToJson(doc: EditDoc): JsonNode {
       return { type, attrs, content: text ? [{ type: "text", text }] : [] };
     }
     if (type === "mdTable") return tableJson(parseTable(b.raw)!, attrs);
+    if (type === "mdImage") {
+      const 拆 = 图片接管(b)!;
+      return {
+        type,
+        attrs: {
+          ...attrs,
+          ...图片账本(拆),
+          // 摘下来是为了拆得动引用，拼回去时必须原位补回，不然 CRLF 文件保存一次就整行换形
+          mdEol: 行尾回车(b),
+        },
+      };
+    }
     const node: JsonNode = { type, attrs };
     // exactOptionalPropertyTypes：不能写 `content: undefined`
     if (b.content) node.content = inlineToJson(b.content);
@@ -254,6 +297,26 @@ function serializeNode(node: PmNode): string {
         fieldSuffix(a.mdFields) +
         anchorSuffix(a.mdId)
       );
+    }
+    case "mdImage": {
+      /**
+       * 图片块的字节**只从 attrs 拼**，不碰 `mdRaw`：屏幕上显示的就是这张图，
+       * 用户能改的（别名）也直接落进 attrs，所以"屏幕说的"与"落盘的"天然是同一句话。
+       * 没改过的块由 `docToMarkdown` 那侧的 `unchanged` 分支原样回写 `raw`，走不到这里。
+       *
+       * `mdNamed` 是"`![[a.png|]]` 那根竖线是用户打的"这件事本身；别名一旦有内容，
+       * 无论这个标志怎么来的都必须写回去——宁可多一根竖线，不可丢掉用户打的字。
+       */
+      const 拆: 资产引用 = {
+        形: a.mdWiki === false ? "md" : "wiki",
+        目标: String(a.mdSrc ?? ""),
+        别名: String(a.mdAlt ?? ""),
+        有别名: Boolean(a.mdNamed) || String(a.mdAlt ?? "") !== "",
+        前: String(a.mdLead ?? ""),
+        后: String(a.mdTail ?? ""),
+      };
+      // 顺序是文件里的顺序：引用、锚点、行尾回车。换一下就改了用户字节的位置
+      return 拼资产引用(拆) + anchorSuffix(a.mdId) + String(a.mdEol ?? "");
     }
     case "mdOpaque": {
       // 源文本块：内容就是用户的源文本，改了就原样落盘（自带换行由调用方补）
@@ -560,12 +623,22 @@ export function moveBlock(state: EditorState, from: number, to: number): Transac
  */
 export function moveCurrentBlock(state: EditorState, delta: number): Transaction | null {
   const { $from } = state.selection;
-  if (!$from.depth || delta === 0) return null;
-  const start = $from.before(1);
+  if (delta === 0) return null;
+  /**
+   * 顶层块的起点。**原子块（图片）被选中时 `depth` 是 0**：那一块自己就是选区，
+   * 下面没有可落的文本位置。不接这一支，"选中一张图按 Alt+↓"就什么都不会发生——
+   * 手柄 `⋮` 能拖，键盘不能做，正是这个项目被报过两次的那类缺口。
+   */
+  const 起点 = $from.depth
+    ? $from.before(1)
+    : state.selection instanceof NodeSelection && $from.depth === 0
+      ? state.selection.from
+      : -1;
+  if (起点 < 0) return null;
   let index = -1;
   let i = 0;
-  state.doc.forEach((_n, off) => {
-    if (off === start) index = i;
+  state.doc.forEach((n, off) => {
+    if (off === 起点) index = i;
     i++;
   });
   if (index < 0) return null;
@@ -581,6 +654,10 @@ export function moveCurrentBlock(state: EditorState, delta: number): Transaction
   });
   const moved = tr.doc.nodeAt(newStart);
   if (!moved) return null;
+  if (moved.type.isAtom) {
+    // 原子块没有"块内偏移"可回，选回这一块本身（连着按两次 Alt+↓ 移的才是同一块）
+    return tr.setSelection(NodeSelection.create(tr.doc, newStart));
+  }
   const back = Math.min($from.parentOffset, moved.content.size);
   return tr.setSelection(TextSelection.near(tr.doc.resolve(newStart + 1 + back)));
 }
@@ -631,6 +708,19 @@ export function replaceBlockWithSource(
   const tr = state.tr.replaceWith(start, start + node.nodeSize, sourceBlock(state, kind, source, gap));
   if (kind === "code") tr.setSelection(TextSelection.near(tr.doc.resolve(代码落点(start))));
   return tr;
+}
+
+/** 图片块那一行的形状。载入与粘贴共用，两处各写一份就会分叉 */
+function 图片账本(拆: 资产引用): Record<string, unknown> {
+  return {
+    mdSrc: 拆.目标,
+    mdAlt: 拆.别名,
+    mdWiki: 拆.形 !== "md",
+    mdNamed: 拆.有别名,
+    mdLead: 拆.前,
+    mdTail: 拆.后,
+    mdEol: "",
+  };
 }
 
 /** 新建块的账本：没有源切片可回，所以 `mdRaw` 空、签名空（必被重新序列化） */
@@ -728,6 +818,37 @@ export function pasteGrid(state: EditorState, text: string): Transaction | null 
   // 粘完直接把光标放进第一格：用户的下一件事是打字，不是再点一下
   const 首 = 第n格(节点, 起点, 0);
   return 首 === null ? tr : tr.setSelection(TextSelection.near(tr.doc.resolve(首 + 1)));
+}
+
+/**
+ * 把存好盘的几张图落成**顶层块**。粘贴与（将来的）拖拽共用这一条。
+ *
+ * 三条与表格一致的口径：
+ * - 光标在一个**空段落**里就换掉它——"新起一行粘图"才是用户预期的，留着那个空段就是多一行空白；
+ * - 后面永远跟一个空段落**落脚点**。图片是原子块，插入符进不去，文末粘图不给落脚点
+ *   就是"块在文末没有键盘出路"那一类死局（用户报过两次，见 docs/05）；
+ * - 落脚点是空段落，不落盘，一个字节都不多。
+ */
+export function 插图片块(state: EditorState, 引用们: 资产引用[]): Transaction | null {
+  const 型 = state.schema.nodes.mdImage;
+  if (!型 || !引用们.length) return null;
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  const 起点 = $from.before(1);
+  const 块 = state.doc.nodeAt(起点);
+  if (!块) return null;
+  const 换 = 块.type.name === "mdParagraph" && !块.textContent.trim();
+  const 插入点 = 换 ? 起点 : 起点 + 块.nodeSize;
+  const 账本 = { ...新块账本(String(块.attrs.mdGap ?? "\n")), mdKind: "image" };
+  const 节点们 = 引用们.map((拆) => 型.create({ ...账本, ...图片账本(拆) }));
+  const 尾 = 落脚点(state.schema);
+  const 内容 = 尾 ? [...节点们, 尾] : 节点们;
+  const tr = 换
+    ? state.tr.replaceWith(起点, 起点 + 块.nodeSize, 内容)
+    : state.tr.insert(插入点, 内容);
+  // 粘完把人放到图片下面那一行：用户的下一件事是继续打字，不是去够鼠标
+  const 尺寸 = 节点们.reduce((n, x) => n + x.nodeSize, 0);
+  return tr.setSelection(TextSelection.near(tr.doc.resolve(插入点 + 尺寸 + 1))).scrollIntoView();
 }
 
 /**
@@ -1341,6 +1462,19 @@ export function exitOpaqueDown(state: EditorState): Transaction | null {
   // 后面还有换行 = 不在最后一行
   if (块.textContent.slice($from.parentOffset).includes("\n")) return null;
   return 送出块下(state.tr, 起点);
+}
+
+/**
+ * 选中图片块时按 `↓` 或 `Enter`：离开这块，落到它下面那一行（没有就现造一个落脚点）。
+ *
+ * 图片是**原子块**，插入符根本进不去，所以判据不是"在最后一行"而是"这一整块就是选区"
+ * （点一下、或方向键走到它上面都会得到 NodeSelection）。不接这条键，"文末粘一张图"
+ * 就又变成用户报过两次的那个死局：块占了文末，键盘出不去。
+ */
+export function 图片下出口(state: EditorState): Transaction | null {
+  const 选 = state.selection;
+  if (!(选 instanceof NodeSelection) || 选.node.type.name !== "mdImage") return null;
+  return 送出块下(state.tr, 选.from);
 }
 
 /**

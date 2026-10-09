@@ -265,13 +265,16 @@ pub fn apply_external(
         let rel = match c {
             crate::watch::Change::Touched(r) | crate::watch::Change::Removed(r) => r,
         };
+        // **先问扫描器收不收这条路，再花钱读文件**。原顺序是把读与 hash 放在前面，
+        // 于是粘一张 5MB 的截图进 `attachments/`，监听器会整份读一遍、算一遍 sha，
+        // 只为得出一句"这不归索引管"。被排除的路径也从不入库，所以跳过与原来等价。
+        if !crate::vault::is_indexable_rel(rel) {
+            continue;
+        }
         let on_disk = vault.read(rel).map(|b| crate::hash::content_hash(&b)).ok();
         let stored = index.stored_hash(rel)?;
         match (on_disk, stored) {
             (Some(h), Some(old)) if h == old => {} // 自己刚写的那一次
-            // 扫描器不收的路径（被排除的目录、`.md` 之外的东西）也不能在这儿收进来：
-            // 那会让索引里多出一行、全库自检从此报漂移，而监听器不知道这些规矩。
-            (Some(_), _) if !crate::vault::is_indexable_rel(rel) => {}
             (Some(_), _) => {
                 reindex_note(vault, index, rel)?;
                 done += 1;

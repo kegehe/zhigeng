@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use note_core::assets;
 use note_core::capture::Captured;
 use note_core::import::{Entry as ImportEntry, Report as ImportReport};
 use note_core::index::Index;
@@ -21,12 +22,15 @@ const CAPTURE_SHORTCUT: &str = "Alt+Shift+N";
 
 /// 壳只持有状态与命令注册。业务判断一律在 `note-core`——
 /// 因为 CLI / MCP 必须走到完全相同的代码（docs/03 §后端 = 本地服务层）。
-///
 /// 第二个槽是文件监听器：**换库时必须换掉它**，否则旧库的事件会写进新库的索引。
 /// drop 即停止监听，所以"赋新值丢旧值"就是收尾。
+///
+/// 第三个槽记着"上一次放进 asset 协议 scope 的是哪个目录"。换库时不撤旧的，
+/// 旧库的图片就还能被 `<img>` 读出来——那是另一件事：本产品的边界是"当前这个库"。
 struct Shared(
     Mutex<Option<Hub>>,
     Mutex<Option<note_core::watch::WatcherHandle>>,
+    Mutex<Option<PathBuf>>,
 );
 
 /// "上一次打开的 Vault 在哪"这个指针必须存在 Vault 之外（否则先有 Vault 还是先有指针）。
@@ -144,6 +148,48 @@ where
         // 前端靠它把"已存"变成"已可搜"；失败时下次 reindex 会兜底
         let _ = app.emit("note://indexed", done);
     });
+}
+
+/// 后台跑一件只碰**派生数据**的活：拿句柄的一瞬锁主锁，之后立刻还回去。
+///
+/// 与 `reindex_async` 同一个形状，但不广播 `note://indexed`——附件登记行不是"哪篇笔记变了"，
+/// 前端没有任何东西需要因为它而刷新。失败只记日志：`attachments` 表随时能从字节重算，
+/// 为它把一次粘贴变成红色报错是撒谎（图片其实已经存好了）。
+fn bg_job(app: AppHandle, job: impl FnOnce(&Index) -> note_core::Result<()> + Send + 'static) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bg = app
+            .state::<Shared>()
+            .0
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|h| h.indexer()));
+        let Some(bg) = bg else { return };
+        let Ok(index) = bg.lock() else { return };
+        if let Err(e) = job(&index) {
+            log::warn!("附件登记没补上（不影响图片显示，重建索引会补）：{e}");
+        }
+    });
+}
+
+/// 把当前 Vault 的 `attachments/` 放进 asset 协议的运行期 scope，并撤掉上一个库的那条。
+///
+/// 配置文件里 scope 是空数组——Vault 位置由用户随时改，静态配置写不死，所以只能运行期给。
+/// 这条 scope 只管**前端能不能读到某个路径**，与写盘无关：写文件走的是 `Vault::resolve`
+/// 那道墙。撤旧的不是洁癖，是"切库之后旧库的图不该还能显示"这条产品边界。
+fn 盯资产目录(app: &AppHandle, 记着: &Mutex<Option<PathBuf>>, vault: &Vault) {
+    let 目录 = vault.root().join(note_core::vault::ATTACHMENTS_DIR);
+    let scope = app.asset_protocol_scope();
+    if let Ok(mut 守) = 记着.lock() {
+        if let Some(旧) = 守.as_ref() {
+            if *旧 != 目录 {
+                let _ = scope.forbid_directory(旧, true);
+            }
+        }
+        *守 = Some(目录.clone());
+    }
+    if let Err(e) = scope.allow_directory(&目录, true) {
+        log::warn!("asset 协议没放行 attachments 目录，图片只显示文件名：{e}");
+    }
 }
 
 /// 起文件监听。外部改了库里的文件时重算那几篇，然后广播 `note://indexed`
@@ -389,6 +435,7 @@ fn vault_open(
     let hub = Hub::open_or_create(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
     let info = hub.app_info().map_err(|e| e.to_string())?;
     let watcher = start_watcher(&app, &hub);
+    盯资产目录(&app, &state.2, hub.vault());
     *state.0.lock().map_err(|e| e.to_string())? = Some(hub);
     *state.1.lock().map_err(|e| e.to_string())? = watcher;
     write_last_vault(&app, std::path::Path::new(&path));
@@ -426,6 +473,40 @@ fn note_create(
         reindex_note(vault, index, &rel)
     });
     Ok(shown)
+}
+
+/// 把剪贴板来的图片字节存进 `attachments/`，返回内容寻址路径给前端拼成 `![[…]]`。
+///
+/// **只有落盘那一步是同步的**：返回即代表字节已经在盘上，正文里那行引用不会指着空气。
+/// `attachments` 表那一行在后台补（可丢的派生数据，docs/02 §`.note/` 两分层），
+/// 所以粘一张 2MB 的截图不会被 DB 写排队拖住——它也不该报错：图已经存好了。
+///
+/// 字节走 IPC 的 **raw body**（`invoke("attachment_save", uint8)`）。用 JSON 传一张
+/// 2MB 的图要么 base64 膨胀到 2.7MB，要么十进制数组膨胀到 8MB 以上，而这条命令就在
+/// 打字路径上；格式则由**字节本身**判（`assets::sniff`），不信文件名——剪贴板给的名字
+/// 永远是 `image.png`，用户改了什么名我们根本不知道。
+#[tauri::command]
+fn attachment_save(
+    app: AppHandle,
+    state: State<'_, Shared>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<assets::AssetOut, WriteErr> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => b.clone(),
+        // 前端忘了走 raw（传了对象/数组）时给一句能看懂的话，而不是把 JSON 当图片存下来
+        _ => {
+            return Err(WriteErr {
+                kind: "error",
+                message: "attachment_save 要走 raw body：前端请传 Uint8Array".into(),
+            })
+        }
+    };
+    let out = with_hub_write(&state, |h| assets::save_bytes(h.vault(), &bytes))?;
+    let 记录 = out.clone();
+    bg_job(app, move |index| {
+        assets::register(index.conn(), &记录, None)
+    });
+    Ok(out)
 }
 
 #[tauri::command]
@@ -581,7 +662,7 @@ pub fn run() {
     );
 
     builder
-        .manage(Shared(Mutex::new(None), Mutex::new(None)))
+        .manage(Shared(Mutex::new(None), Mutex::new(None), Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             app_info,
             capture_text,
@@ -598,6 +679,7 @@ pub fn run() {
             vault_open,
             save_note,
             note_create,
+            attachment_save,
             note_rename,
             note_move,
             note_trash,
@@ -619,6 +701,7 @@ pub fn run() {
                 match Hub::open(&p) {
                     Ok(hub) => {
                         let watcher = start_watcher(&handle, &hub);
+                        盯资产目录(&handle, &state.2, hub.vault());
                         *state.0.lock().unwrap() = Some(hub);
                         *state.1.lock().unwrap() = watcher;
                         log::info!("已打开 Vault {}", p.display());

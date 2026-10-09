@@ -64,6 +64,25 @@ fn 非规范形必须回显原文而不是重建() {
 }
 
 #[test]
+fn 图片与嵌入行不许被规范化加成一个列表项() {
+    // docs/02 D9 的白名单里有 image / embed / file。这几类的 `content` 就是那一整行
+    // （语法也在里面），所以规范化只能补缩进。曾经它们与 Bullet 共用一支，
+    // `![[a.png]]` 被重写成 `- ![[a.png]]` —— 那是把用户的文件改成另一个块类型。
+    for s in [
+        "![[attachments/a3/x.png]]\n",
+        "![[attachments/a3/x.png|今年冬天]]\n",
+        "![[去年圣诞.png]]\n", // embed
+        "![](../outside.png)\n",
+        "[[某篇]]\n",                    // file
+        "  ![[attachments/a3/x.png]]\n", // 缩进要留着
+    ] {
+        let d = parse(s);
+        assert_eq!(&render_exact(&d), s, "exact {s}");
+        assert_eq!(&render_canonical(&d), s, "canonical {s}");
+    }
+}
+
+#[test]
 fn 松散列表的空行不丢() {
     let s = "- 甲\n\n- 乙\n";
     let d = parse(s);

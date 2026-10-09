@@ -500,6 +500,79 @@
     line-height: var(--leading-body);
   }
   /*
+   * 图片块（docs/02 §资产引用格式、docs/03 §图片）。**屏幕上只有这一面**：
+   * 聚焦、选中、失焦都在同一批 DOM 上，所以这里没有"源码态"的样式——那一行引用
+   * 从来不上屏幕，它是这个块的全部字节，而块是原子的。
+   *
+   * 盒子与代码块同一档（sunken 底 + subtle 边），因为它在正文里的身份一样：
+   * 一张"嵌在段落之间的东西"，不是工具栏、不是浮层。
+   */
+  .block-editor .md-img {
+    margin: 0 0 var(--gap-para);
+    padding: var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-sunken);
+  }
+  /* 选中只改边框色。加粗边框会把图顶得挪动一两个像素——那是"选一下画面抖一下" */
+  .block-editor .md-img[data-md-sel] {
+    border-color: var(--accent);
+  }
+  .block-editor .md-img .md-img-i {
+    display: block;
+    max-width: 100%;
+    /*
+     * 高度上限不是审美问题：一张 4000px 的截图会把正文顶到看不完，而图片是原子块，
+     * 插入符进不去，用户只能靠滚。360px 大约八行正文，看完一张图不需要整屏。
+     */
+    max-height: 360px;
+    margin-inline: auto;
+    border-radius: var(--radius-sm);
+    object-fit: contain;
+  }
+  .block-editor .md-img .md-img-bar {
+    display: flex;
+    justify-content: center;
+    margin-top: var(--space-1);
+  }
+  /**
+   * 图注输入框。视觉档与语言牌一致：无边框、无底色、居中——它是这张图的元数据，
+   * 不是表单。但**打的字用 secondary 色**，placeholder 才用 disabled 色：
+   * 图注会原样落进文件，读屏色温和对比度那条（[06] §4）不许用在真内容上。
+   */
+  .block-editor .md-img .md-img-alt {
+    width: min(100%, 420px);
+    padding: 0 var(--space-1);
+    border: none;
+    background: none;
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    text-align: center;
+  }
+  .block-editor .md-img .md-img-alt::placeholder {
+    color: var(--text-disabled);
+  }
+  /* 读不到文件（图被删了、库在另一台机器上）：不画破图，退成文件名那一枚牌 */
+  .block-editor .md-img .md-img-miss {
+    display: none;
+  }
+  .block-editor .md-img[data-md-miss] .md-img-i {
+    display: none;
+  }
+  .block-editor .md-img[data-md-miss] .md-img-miss {
+    display: block;
+    margin-inline: auto;
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-raised);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+  /*
    * 代码着色的类 → 语义映射（docs/03 §块渲染）。
    *
    * 颜色一律走 tokens.css 的 `--code-*`：护栏禁字面量颜色，而双主题本来就该由 token 承担，

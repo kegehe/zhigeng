@@ -11,7 +11,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
-import { api, describeError, inTauri } from "./ipc/commands";
+import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
 import {
   buildTree,
   dirsOf,
@@ -157,6 +157,9 @@ export function App() {
 
   const apply = useCallback(async (app: AppInfo) => {
     setInfo(app);
+    // 图片块要它把 `attachments/…` 拼成能读的地址。存这一份而不是塞进节点 attrs：
+    // 绝对路径是**会话状态**，跟着库走；躺在节点里就会被复制走、被写进 JSON，换台机器即坏
+    设库根(app.vaultPath);
     if (!app.vaultPath) {
       // 没选库时不去调 list_notes——它会失败，把首启界面盖成报错条
       setNotes(null);
@@ -1432,6 +1435,7 @@ export function App() {
                           editable={mode === "inline"}
                           onEditStart={() => setMode("inline")}
                           onEdit={() => setInlineRev((n) => n + 1)}
+                          onNotice={(文) => setFlash(文)}
                           editApi={editApi}
                         />
                       </div>

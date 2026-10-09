@@ -50,6 +50,7 @@ export function BlockEditor({
   editable,
   onEdit,
   onEditStart,
+  onNotice,
   editApi,
 }: {
   doc: EditDoc;
@@ -57,6 +58,8 @@ export function BlockEditor({
   onEdit: () => void;
   /** 浏览态点正文就地转编辑。父组件要把 mode 跟上，否则界面与实例状态分叉 */
   onEditStart: () => void;
+  /** 编辑器里发生了一件"什么都没改成"的事（粘的文件不是图片、图存不下）。界面上要说一句 */
+  onNotice?: (文本: string) => void;
   editApi: RefObject<(() => string) | null>;
 }) {
   // **必须 memo 住**：这是整篇的行内解析，写成 `content: docToJson(doc)` 的话每次渲染都
@@ -67,12 +70,14 @@ export function BlockEditor({
   const editableRef = useRef(editable);
   const editRef = useRef(onEdit);
   const startRef = useRef(onEditStart);
+  const noticeRef = useRef(onNotice);
   // 打签名那笔事务不是用户改的。`onCreate` 在 `useEditor` 里同步跑完，所以用一个
   // 一次性闸门把它挡住：不挡，一进编辑态界面就显示"未保存的修改"，800ms 后还白跑
   // 一次 persist（内容一致所以不会写坏文件，但那圈状态是错的）。
   const stamping = useRef(true);
   editRef.current = onEdit;
   startRef.current = onEditStart;
+  noticeRef.current = onNotice;
   const wrap = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<Float | null>(null);
   /** 块菜单：`/` 与行首手柄共用同一个浮层。`dropSlash` 是选中后要删掉的那个 `/` 的位置 */
@@ -318,12 +323,22 @@ export function BlockEditor({
     editor.on("transaction", onTr);
     const hostEl = wrap.current;
     hostEl?.addEventListener("md-slash", onSlash);
+    /**
+     * 编辑器抛出来的"什么都没改成"那一类消息（粘的不是图片、图存不下）。
+     * 走 DOM 事件而不是把回调穿进扩展：扩展只认 PM 的世界，界面文案归界面层。
+     */
+    const on提示 = (e: Event) => {
+      const 文 = (e as CustomEvent<string>).detail;
+      if (文) noticeRef.current?.(文);
+    };
+    hostEl?.addEventListener("md-notice", on提示);
     window.addEventListener("scroll", syncSel, true);
     return () => {
       editor.off("selectionUpdate", syncSel);
       editor.off("update", closeSlash);
       editor.off("transaction", onTr);
       hostEl?.removeEventListener("md-slash", onSlash);
+      hostEl?.removeEventListener("md-notice", on提示);
       window.removeEventListener("scroll", syncSel, true);
     };
   }, [editor]);

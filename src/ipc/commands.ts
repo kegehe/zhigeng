@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
+  AssetOut,
   CapturedOut,
   EditDoc,
   ImportEntry,
@@ -55,6 +56,15 @@ export const api = {
     invoke<string>("save_note", { rel, content, expectHash: expectHash ?? null }),
   /** 返回新建笔记的相对路径 */
   noteCreate: (title: string) => invoke<string>("note_create", { title }),
+  /**
+   * 把剪贴板来的图片字节存进 `attachments/`，拿回内容寻址路径。
+   *
+   * 第二参数直接给 `Uint8Array`：Tauri 会把整个负载当 **raw body** 送过去，
+   * 而不是 JSON。一张 2MB 的截图用 JSON 传要么 base64 膨胀到 2.7MB，要么十进制数组
+   * 膨胀到 8MB 以上，而这条调用就压在"按下 Ctrl+V"那一刻。扩展名与 mime 由 Rust
+   * 从字节本身判（剪贴板给的文件名永远是 `image.png`，没有信息量）。
+   */
+  attachmentSave: (bytes: Uint8Array) => invoke<AssetOut>("attachment_save", bytes),
   noteRename: (rel: string, newStem: string) =>
     invoke<string>("note_rename", { rel, newStem }),
   noteMove: (rel: string, newRel: string) => invoke<void>("note_move", { rel, newRel }),
@@ -80,3 +90,33 @@ export const api = {
   importPreview: (src: string) => invoke<ImportEntry[]>("import_preview", { src }),
   importApply: (src: string) => invoke<ImportReport>("import_apply", { src }),
 };
+
+/**
+ * 当前 Vault 的绝对路径。图片块要把它拼成 `asset:` URL 才能显示，而它是**会话状态**
+ * （用户可以换库），不属于任何一个节点，所以存在这里而不是塞进节点 attrs——
+ * attrs 会被复制、会被存进 JSON，一个绝对路径躺在里面就是"换台机器图就坏了"。
+ */
+let 库根 = "";
+
+/** 由界面层在拿到 app_info / 换库之后调用。空串代表"还没选库"，读取处自己退化。 */
+export function 设库根(路径: string | null): void {
+  库根 = 路径 ?? "";
+}
+
+/**
+ * Vault 根相对的资产路径 → `<img>` 能用的地址。
+ *
+ * 三条退化都是**故意的**：不在 Tauri 里（测试）、还没选库、或目标根本不是库内资产，
+ * 一律给空串，让调用方走"显示文件名"的兜底，而不是画一个注定 404 的 `<img>`。
+ *
+ * 分隔符跟着库根走：这个产品只有 Windows（docs/01），Rust 侧 `display()` 给的是
+ * `D:\Notes`，而正文里的引用按 docs/02 永远写 `/`。两边强行拼在一起没问题，
+ * 但让 scope 的 glob 去匹配混合分隔符是给自己找事，所以统一成库根自己那一种。
+ */
+export function 资产地址(目标: string): string {
+  if (!库根 || !inTauri()) return "";
+  const 干 = 目标.replace(/^\/+/, "");
+  const 用反斜杠 = 库根.includes("\\");
+  const 绝 = 库根 + (用反斜杠 ? "\\" : "/") + (用反斜杠 ? 干.replace(/\//g, "\\") : 干);
+  return convertFileSrc(绝);
+}

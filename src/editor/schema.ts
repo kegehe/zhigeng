@@ -15,12 +15,16 @@ import {
   numberedMarker,
   replaceBlockWithSource,
   判粘贴,
+  图片下出口,
+  插图片块,
   填充所选,
   块内范围,
   清场所选,
   全选档,
   type BlockTypeId,
 } from "./blocks";
+import { 新引用, type 资产引用 } from "./asset";
+import { api, describeError, 资产地址 } from "../ipc/commands";
 import { 批量, TableSelect } from "./tableSelectPlugin";
 import { 拼开栏, 拆开栏, 围栏行of } from "./fence";
 import { 短写, 已识别, 语言清单, 语言of, 着色区间, 识别 } from "./highlight";
@@ -714,6 +718,208 @@ export const MdOpaque = Node.create({
   addNodeView() {
     return ({ node, view, getPos, HTMLAttributes }) =>
       new OpaqueView(node, HTMLAttributes, view, getPos);
+  },
+});
+
+/**
+ * 图片块的 NodeView。**屏幕上只有这一副样子**：聚焦、选中、失焦都不换 DOM——
+ * 代码块那一轮立下的产品杆子（"光标进来就换一副样子"不算过关）在这里同样成立。
+ *
+ * 三件事排在一起才成立：
+ * - 正文里没有 Markdown 那一行。它是**原子块**，引用整个住在 attrs 里，屏幕上就是那张图；
+ * - 唯一能改的字节（图注）是排在 `contentDOM` 位置之外的真 `<input>`，PM 看不见它，
+ *   `stopEvent` 对它返回 true——那一下是打字，不是"点进块里改源码"；
+ * - 文件读不到（图被删了、库换到别的机器上）时不画破图，退成文件名那一枚牌。仍然不显示
+ *   源文本：那一行本来只有一个引用，显示它的名字就是说真话。
+ */
+class ImageView implements NodeView {
+  dom: HTMLElement;
+  private 图: HTMLImageElement;
+  private 牌: HTMLSpanElement;
+  private 注: HTMLInputElement;
+  private 视图: EditorView;
+  private 位置: () => number | undefined;
+
+  constructor(
+    node: PmNode,
+    _属性: Record<string, unknown>,
+    view: EditorView,
+    getPos: () => number | undefined
+  ) {
+    this.视图 = view;
+    this.位置 = getPos;
+
+    const 盒 = document.createElement("div");
+    盒.className = "md-img";
+
+    const 图 = document.createElement("img");
+    图.className = "md-img-i";
+    // 图不该挡住打字：先让浏览器把它解码完再排版，滚动到哪算哪
+    图.loading = "lazy";
+    图.decoding = "async";
+    图.addEventListener("error", () => {
+      盒.dataset.mdMiss = "";
+    });
+    this.图 = 图;
+
+    const 牌 = document.createElement("span");
+    牌.className = "md-img-miss";
+    this.牌 = 牌;
+
+    /**
+     * 图注那一行工具条。它**不是** contentDOM：PM 看不见，里面的字永远不会被当成正文，
+     * 于是"打个图注"不可能往代码或别的块里塞字节。
+     */
+    const 条 = document.createElement("div");
+    条.className = "md-img-bar";
+    const 注 = document.createElement("input");
+    注.className = "md-img-alt";
+    注.type = "text";
+    注.setAttribute("aria-label", "图注");
+    注.placeholder = "图注（可留空）";
+    注.title = "图注：写进文件里 ![[…|这里]] 的那一段";
+    // 用 change 而不是 input：只想聚焦看一眼不该改文件，也不该把整篇标成未保存
+    注.addEventListener("change", () => this.改注(注.value));
+    // 点在工具条上不该顺带把整块选中——那会让输入框刚拿到焦点就被 NodeSelection 抢走
+    条.addEventListener("mousedown", (e) => e.stopPropagation());
+    条.append(注);
+    this.注 = 注;
+
+    盒.append(图, 牌, 条);
+    this.dom = 盒;
+    this.同步(node);
+  }
+
+  /** 把 attrs 投射到 DOM 上。原子块没有正文，所以只有这三样 */
+  private 同步(节点: PmNode): void {
+    const 目标 = String(节点.attrs.mdSrc ?? "");
+    const 注 = String(节点.attrs.mdAlt ?? "");
+    const 址 = 资产地址(目标);
+    delete this.dom.dataset.mdMiss;
+    if (址) this.图.src = 址;
+    else this.图.removeAttribute("src"); // 没有 src 的 <img> 会触发 error，正好走那枚牌
+    this.图.alt = 注;
+    this.图.title = 目标;
+    this.牌.textContent = 目标.split("/").pop() || 目标;
+    // 正在打字的那一格不许被外部更新踩掉（撤销、或另一处改了同一块）
+    if (document.activeElement !== this.注) this.注.value = 注;
+  }
+
+  update(节点: PmNode): boolean {
+    if (节点.type.name !== "mdImage") return false;
+    this.同步(节点);
+    return true;
+  }
+
+  /** 工具条里的每一个事件都交回浏览器：那一下是控件行为，不是文档编辑 */
+  stopEvent(事件: Event): boolean {
+    const 目标 = 事件.target;
+    return 目标 instanceof Element && 目标.closest(".md-img-bar") !== null;
+  }
+
+  ignoreMutation(): boolean {
+    return true;
+  }
+
+  /** 选中只加一个 DOM 标记，不重画、不发事务——"聚焦前后是同一批 DOM"就是这么来的 */
+  selectNode(): void {
+    this.dom.dataset.mdSel = "";
+  }
+  deselectNode(): void {
+    delete this.dom.dataset.mdSel;
+  }
+
+  /** 写回图注。**空别名要把那根竖线一起收掉**，否则清掉图注会在文件里留下 `![[a.png|]]` */
+  private 改注(值: string): void {
+    // 浏览态整个实例是只读的，但这个 `<input>` 不归 PM 管——不挡一下，"只是看看"也能把
+    // 图注写进文件。PM 的 `dispatch` 不看 `editable`，所以这道闸必须自己上
+    if (!this.视图.editable) return;
+    let pos: number | undefined;
+    try {
+      pos = this.位置();
+    } catch {
+      return;
+    }
+    if (pos === undefined) return;
+    const 块 = this.视图.state.doc.nodeAt(pos);
+    if (!块 || 块.type.name !== "mdImage") return;
+    const 原 = String(块.attrs.mdAlt ?? "");
+    const 空 = 值.trim() === "";
+    if (原 === 值 && Boolean(块.attrs.mdNamed) !== !空) return;
+    this.视图.dispatch(
+      this.视图.state.tr.setNodeMarkup(pos, undefined, {
+        ...块.attrs,
+        mdAlt: 值,
+        mdNamed: !空,
+      })
+    );
+  }
+}
+
+/**
+ * 图片块。**schema 里的原子块**，字节只有文件里那一行引用：
+ * `![[attachments/a3/<sha>.png]]` 或 `![图注](attachments/…)`。
+ *
+ * 为什么值得为它建节点而不是留在 `mdOpaque` 里：不透明块的两副面孔对图片是错的——
+ * 那一行没有"正文"可言（整行都是语法记号），把它退回源文本编辑等于让用户手打哈希文件名。
+ * 接管之后屏幕上只有图，能改的只有图注，路径由内容寻址说话。
+ *
+ * `parseHTML` / `renderHTML` 是剪贴板那条通路（PM 的复制粘贴走的就是它）。账本里
+ * 只带 `mdSrc`/`mdAlt`/`mdWiki`：一块被复制到别处就是"另建一块指向同一份字节"，
+ * 不该捎走原块的 `mdRaw`、锚点与缩进形状。
+ */
+export const MdImage = Node.create({
+  name: "mdImage",
+  group: "block",
+  atom: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      ...mdAttributes,
+      /** Vault 根相对的资产路径，**照文件里写的那个样子**存着 */
+      mdSrc: { default: "" },
+      mdAlt: { default: "" },
+      /** wiki 形还是 Markdown 形。作者选哪一种，落盘就还是哪一种 */
+      mdWiki: { default: true },
+      /** `![[a.png|]]` 里那根竖线是用户打的字，不能与 `![[a.png]]` 混为一种字节 */
+      mdNamed: { default: false },
+      mdLead: { default: "" },
+      mdTail: { default: "" },
+      /** CRLF 文件的行尾 `\r`。它排在块锚点之后，位置错了就是改用户字节 */
+      mdEol: { default: "" },
+    };
+  },
+  parseHTML() {
+    return [
+      {
+        tag: "img[data-md-src]",
+        getAttrs: (el) => {
+          const 元 = el as HTMLElement;
+          return {
+            mdKind: "image",
+            mdSrc: 元.getAttribute("data-md-src") ?? "",
+            mdAlt: 元.getAttribute("data-md-alt") ?? "",
+            mdWiki: 元.getAttribute("data-md-wiki") !== "0",
+          };
+        },
+      },
+    ];
+  },
+  renderHTML({ node }) {
+    return [
+      "img",
+      {
+        class: "md-img-clip",
+        "data-md-src": String(node.attrs.mdSrc ?? ""),
+        "data-md-alt": String(node.attrs.mdAlt ?? ""),
+        "data-md-wiki": node.attrs.mdWiki === false ? "0" : "1",
+        alt: String(node.attrs.mdAlt ?? ""),
+      },
+    ];
+  },
+  addNodeView() {
+    return ({ node, view, getPos, HTMLAttributes }) =>
+      new ImageView(node, HTMLAttributes, view, getPos);
   },
 });
 
@@ -1471,8 +1677,10 @@ export const TableKeys = Extension.create({
     return {
       Tab: 走((s) => moveCell(s, 1)),
       "Shift-Tab": 走((s) => moveCell(s, -1)),
-      Enter: 走(enterCell),
-      ArrowDown: 走((s) => exitTableDown(s) ?? exitOpaqueDown(s)),
+      // 格子里的 Enter 归表格；选中的是图片块时 Enter 是"下去"，两条串在同一个键上，
+      // 同一个键在两个扩展里各绑一次的话谁赢取决于注册顺序，那是查不动的东西
+      Enter: 走((s) => enterCell(s) ?? 图片下出口(s)),
+      ArrowDown: 走((s) => exitTableDown(s) ?? exitOpaqueDown(s) ?? 图片下出口(s)),
       /**
        * 框了多格时 `Delete` / `Backspace` 清空所选的每一格——与电子表格一致，也是用户
        * 框完最自然按下去的那一键。**没框多格就返回 false**：单格时那两键仍是删字符，
@@ -1514,6 +1722,80 @@ export const TablePaste = Extension.create({
   },
 });
 
+/**
+ * 认得出是图片的那些扩展名。**与 md-kernel 的 `is_image_target` 同一批**：两处不一致，
+ * 就会出现"内核把它判成 image、我们却不去接管"或反过来的分裂。MIME 优先，
+ * 因为截图那类来源只给 `image.png`；有些来源连 MIME 都给不出（只有扩展名）。
+ */
+const 图片扩展 = /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i;
+
+function 是图片(项: File): boolean {
+  if (项.type.startsWith("image/")) return true;
+  return 图片扩展.test(项.name);
+}
+
+/**
+ * 把剪贴板里的图片**存进库里**并落成图片块。
+ *
+ * 三条判据，少一条就会咬人：
+ *
+ * 1. **没有图片项就整条交回**。文本与 Markdown 表走的是 `TablePaste` 那条老路，
+ *    抢过来就是把"粘一段字"粘坏。
+ * 2. **字节先落盘，再动文档**。顺序反了就是"正文里指着一张还没存下来的图"——刷新一次
+ *    图就没了。落盘失败时文档一个字都不改，只报一句为什么没进来。
+ * 3. **图和文同时在场时听图的**。从网页复制一张带说明的图，用户要么想要图、要么想要字，
+ *    两边都插会把一行正文劈开。这一档先取图，说明交回用户自己打（档 2 再谈图文混排）。
+ *
+ * 等 IPC 的那几十毫秒里用户可能已经切了篇、甚至关了窗，所以回来第一件事是查
+ * `view.isDestroyed`（这一轮刚被同类问题坑过一次：销毁后的回调让整篇炸红）。
+ * 落点也不揣着旧坐标——用**当下**的选区重算，粘到哪算哪，比把图插到三行之前诚实。
+ */
+export const ImagePaste = Extension.create({
+  name: "imagePaste",
+  addProseMirrorPlugins() {
+    const 报 = (view: EditorView, 文本: string) => {
+      view.dom.dispatchEvent(new CustomEvent("md-notice", { detail: 文本, bubbles: true }));
+    };
+    const 收 = async (view: EditorView, 文件们: File[]): Promise<void> => {
+      const 引用们: 资产引用[] = [];
+      const 错们: string[] = [];
+      for (const 件 of 文件们) {
+        try {
+          const 出 = await api.attachmentSave(new Uint8Array(await 件.arrayBuffer()));
+          引用们.push(新引用(出.rel));
+        } catch (e) {
+          错们.push(describeError(e).message);
+        }
+      }
+      if (view.isDestroyed) return;
+      if (引用们.length) {
+        const tr = 插图片块(view.state, 引用们);
+        if (tr) view.dispatch(tr);
+      }
+      if (错们.length) 报(view, 错们[0]!);
+    };
+    return [
+      new Plugin({
+        props: {
+          handlePaste: (view, event) => {
+            if (!view.editable) return false;
+            const 全 = Array.from(event.clipboardData?.files ?? []);
+            if (!全.length) return false;
+            const 图们 = 全.filter(是图片);
+            if (!图们.length) {
+              // 粘的是别的文件：界面必须说一句话，静默不响应是"应用坏了"的观感
+              报(view, `${全.length} 个文件里没有认得出的图片，什么都没动`);
+              return true;
+            }
+            void 收(view, 图们);
+            return true;
+          },
+        },
+      }),
+    ];
+  },
+});
+
 export const mdExtensions = [
   MdDoc,
   MdText,
@@ -1521,6 +1803,7 @@ export const mdExtensions = [
   MdHeading,
   MdItem,
   MdOpaque,
+  MdImage,
   MdTable,
   MdTableRow,
   MdTableCell,
@@ -1535,6 +1818,7 @@ export const mdExtensions = [
   BlockSelectAll,
   TableKeys,
   TablePaste,
+  ImagePaste,
   TableSelect,
   CodeHighlight,
   FocusIndicator,

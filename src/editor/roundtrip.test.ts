@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import type { Editor } from "@tiptap/core";
 import { DOMParser, DOMSerializer } from "@tiptap/pm/model";
-import { TextSelection, type EditorState } from "@tiptap/pm/state";
+import { NodeSelection, TextSelection, type EditorState } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
+import { 新引用 } from "./asset";
 import { 认得语言, 语言清单, 识别 } from "./highlight";
 import { renderOpaque } from "./render";
 import { 分派岛上鼠标 } from "./schema";
@@ -22,6 +23,8 @@ import {
   带围栏,
   块内范围,
   全选档,
+  插图片块,
+  图片下出口,
   判粘贴,
   格坐标At,
   INSERTABLE,
@@ -62,6 +65,7 @@ const SAMPLES = [
   "04-引用与标注",
   "05-未识别语法",
   "06-插入骨架", // 工具栏插入的三种结构块，内核必须按字节认回来
+  "07-图片", // 图片引用：内核判成 image 的各种写法，接管与不接管各半
 ] as const;
 
 function load(name: string) {
@@ -2566,6 +2570,260 @@ describe("代码块三件事：块内全选 / 行号 / 复制", () => {
     const 卡 = 面孔(editor, 不透明块(editor)[0]!.pos)!;
     expect(卡.querySelector(".md-copy")).toBeNull();
     expect(卡.querySelector(".md-gutter"), "两面的卡片不套网格").toBeNull();
+    editor.destroy();
+  });
+});
+
+/**
+ * 图片块。三件事各自都曾被当成"加个节点就行"，实际都得有判据：
+ * 1. **哪些写法能接管**。原子块没有正文，那一行引用就是全部字节，拼不回去就是改用户文件；
+ * 2. **单面**。代码块那一轮立下的杆子：光标进来不许换一副样子；
+ * 3. **键盘出路**。图片是原子块，插入符进不去，块占了文末又不给出口，就是用户报过两次的那个死局。
+ */
+describe("图片块", () => {
+  const 图片位 = (editor: Editor): number[] => {
+    const 位: number[] = [];
+    editor.state.doc.forEach((n, off) => {
+      if (n.type.name === "mdImage") 位.push(off);
+    });
+    return 位;
+  };
+  const 图 = (editor: Editor, 位: number) => 面孔(editor, 位)!.querySelector(".md-img-alt")!;
+
+  it("夹具 07：够格的接管，不够格的一个都不许接管", () => {
+    const { doc } = load("07-图片");
+    const editor = createTestEditor(doc);
+    expect(图片位(editor)).toHaveLength(7);
+    // 裸文件名、相对路径、带标题的那三种仍是 image 类型的不透明块（显示源文本）
+    expect(不透明块(editor).filter((b) => b.kind === "image")).toHaveLength(3);
+
+    const 们 = 图片位(editor).map((p) => editor.state.doc.nodeAt(p)!);
+    expect(们[1]!.attrs.mdAlt, "别名进了 attrs，屏幕上才画得出图注").toBe("今年冬天");
+    expect(们[0]!.attrs.mdNamed).toBe(false);
+    expect(们[2]!.attrs.mdNamed, "![[x.png|]] 那根竖线是用户打的字").toBe(true);
+    expect(
+      String(们[3]!.attrs.mdSrc),
+      "根相对的写法要照原样留着"
+    ).toMatch(/^\/attachments\//);
+    expect(们[4]!.attrs.mdWiki, "作者写的是 Markdown 形，落盘就还是 Markdown 形").toBe(false);
+    expect(们[5]!.attrs.mdLead, "行首缩进是字节").toBe("  ");
+    expect(们[6]!.attrs.mdId, "锚点跟着这一块").toBe("b-h3j5k7l9m0");
+    editor.destroy();
+  });
+
+  it("单面：聚焦、选中、失焦都是同一批 DOM，屏幕上永远没有 ![[", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" });
+    const editor = createTestEditor(doc);
+    const 位 = 图片位(editor)[0]!;
+    const 壳 = 面孔(editor, 位)!;
+    expect(壳.querySelector("img"), "屏幕上那一颗图就是内容").not.toBeNull();
+    expect(壳.textContent).not.toContain("![[");
+
+    editor.view.focus();
+    editor.view.dispatch(
+      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 位))
+    );
+    expect(面孔(editor, 位), "选中不许换 DOM——换了就是又开一副面孔").toBe(壳);
+    expect(壳.hasAttribute("data-md-sel")).toBe(true);
+    expect(壳.querySelector("img")).not.toBeNull();
+    expect(壳.textContent).not.toContain("![[");
+
+    editor.view.dom.blur();
+    expect(面孔(editor, 位)).toBe(壳);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("![[attachments/a3/x.png]]\n");
+    editor.destroy();
+  });
+
+  it("图注是真输入框：打进去的字就是文件里的别名", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" });
+    const editor = createTestEditor(doc);
+    const 框 = 图(editor, 图片位(editor)[0]!) as HTMLInputElement;
+    框.value = "雪后的院子";
+    框.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "![[attachments/a3/x.png|雪后的院子]]\n"
+    );
+    editor.destroy();
+  });
+
+  it("清空图注：那根竖线一起收掉，不留 ![[x.png|]]", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png|院子]]\n" });
+    const editor = createTestEditor(doc);
+    const 框 = 图(editor, 图片位(editor)[0]!) as HTMLInputElement;
+    框.value = "";
+    框.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("![[attachments/a3/x.png]]\n");
+    editor.destroy();
+  });
+
+  it("只是聚焦看一眼：一个字都不许多", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png|]]\n" });
+    const editor = createTestEditor(doc);
+    const 框 = 图(editor, 图片位(editor)[0]!) as HTMLInputElement;
+    expect(框.value).toBe("");
+    // 没改就不发 change。就算发了，空别名 + 原本有竖线也要原样回去
+    框.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("![[attachments/a3/x.png|]]\n");
+    editor.destroy();
+  });
+
+  it("CRLF 与锚点：改完图注，行尾回车仍然排在锚点之后", () => {
+    const 源 = "![[attachments/a3/x.png]] ^b-f3g6j9l2mn\r\n";
+    const doc = 一块({ kind: "image", id: "b-f3g6j9l2mn", raw: 源 });
+    const editor = createTestEditor(doc);
+    expect(docToMarkdown(editor.state.doc, doc), "什么都不改").toBe(源);
+    const 框 = 图(editor, 图片位(editor)[0]!) as HTMLInputElement;
+    框.value = "院子";
+    框.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "![[attachments/a3/x.png|院子]] ^b-f3g6j9l2mn\r\n"
+    );
+    editor.destroy();
+  });
+
+  it("接管不了的写法：一个字节都不动，也一颗图都不画", () => {
+    for (const 源 of [
+      "![[去年圣诞.png]]\n", // 裸文件名要的是全库解析
+      "![](../outside.png)\n", // 相对路径同上
+      '![x](attachments/i3/y.png "标题")\n', // 标题没搬进 attrs
+    ]) {
+      const doc = 一块({ kind: "image", raw: 源 });
+      const editor = createTestEditor(doc);
+      expect(图片位(editor), 源).toHaveLength(0);
+      expect(不透明块(editor)[0]!.kind, 源).toBe("image");
+      expect(docToMarkdown(editor.state.doc, doc), 源).toBe(源);
+      editor.destroy();
+    }
+  });
+
+  it("复制粘贴走一遍 PM 的 DOM，路径与图注都还在", () => {
+    // PM 的剪贴板就是 renderHTML → parseHTML。路径不跟着进 DOM，贴出去就是没有图的一块
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png|院子]]\n" });
+    const editor = createTestEditor(doc);
+    const 位 = 图片位(editor)[0]!;
+    const 节点 = editor.state.doc.nodeAt(位)!;
+    const 包装 = document.createElement("div");
+    包装.append(DOMSerializer.fromSchema(editor.state.schema).serializeNode(节点));
+    const 新 = DOMParser.fromSchema(editor.state.schema)
+      .parseSlice(包装, { preserveWhitespace: true })
+      .content.child(0);
+    expect(新.type.name).toBe("mdImage");
+    expect(新.attrs.mdSrc).toBe(节点.attrs.mdSrc);
+    expect(新.attrs.mdAlt).toBe(节点.attrs.mdAlt);
+    expect(新.attrs.mdKind, "类型丢了就画不出图").toBe("image");
+    editor.destroy();
+  });
+
+  it("粘两张图：空段落被换成图，后面跟着一个不落盘的落脚点", () => {
+    const doc = 一块({ kind: "paragraph", raw: "" });
+    const editor = createTestEditor(doc);
+    const tr = 插图片块(editor.state, [
+      新引用("attachments/a3/x.png"),
+      新引用("attachments/b3/y.jpg"),
+    ]);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 型们: string[] = [];
+    editor.state.doc.forEach((n) => 型们.push(n.type.name));
+    expect(型们).toEqual(["mdImage", "mdImage", "mdParagraph"]);
+    expect(型们.length, "落脚点没落进文件就不该被算进来").toBe(3);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "![[attachments/a3/x.png]]\n\n![[attachments/b3/y.jpg]]"
+    );
+    // 粘完插入符在图片下面那一行：用户的下一件事是继续打字
+    expect(editor.state.selection.$from.depth).toBe(1);
+    expect(editor.state.doc.nodeAt(editor.state.selection.$from.before(1))!.type.name).toBe(
+      "mdParagraph"
+    );
+    editor.destroy();
+  });
+
+  it("文末只有一张图时按 ↓：送出去，且文件一个字都没多", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" });
+    const editor = createTestEditor(doc);
+    const 位 = 图片位(editor)[0]!;
+    editor.view.dispatch(
+      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 位))
+    );
+    const tr = 图片下出口(editor.state);
+    expect(tr, "图片是原子块，不给这条键就是死局").not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(editor.state.selection.$from.depth).toBe(1);
+    expect(editor.state.doc.childCount).toBe(2);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("![[attachments/a3/x.png]]\n");
+    editor.destroy();
+  });
+
+  it("光标不在图片上时那条键位不接管（别把 ↓ 抢成无关的事）", () => {
+    const doc = 一块({ kind: "paragraph", raw: "一句话\n" });
+    const editor = createTestEditor(doc);
+    expect(图片下出口(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
+  it("浏览态只读：图注那个输入框也不许写进文件", () => {
+    // 输入框不归 PM 管（它在 contentDOM 之外），所以 `editable=false` 不会自动挡住它。
+    // 不自己上这道闸，"只是打开看一眼"就能把图注写进用户的文件。
+    const 源 = "![[attachments/a3/x.png]]\n";
+    const doc = 一块({ kind: "image", raw: 源 });
+    const editor = createTestEditor(doc);
+    editor.setEditable(false);
+    const 框 = 图(editor, 图片位(editor)[0]!) as HTMLInputElement;
+    框.value = "浏览态里打的字";
+    框.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(源);
+    editor.destroy();
+  });
+});
+
+describe("图片块的整块移动", () => {
+  it("选中一张图按 Alt+↓：块真的挪了，选区还跟着它", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "上面一行\n",
+          gapBefore: "",
+          content: "上面一行",
+          level: null,
+          checked: null,
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "image",
+          id: null,
+          raw: "![[attachments/a3/x.png]]\n",
+          gapBefore: "\n",
+          content: "",
+          level: null,
+          checked: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    // 图片是第二块：它的起点就是第一块的 nodeSize
+    const 图位 = editor.state.doc.child(0).nodeSize;
+    editor.view.dispatch(
+      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 图位))
+    );
+    const tr = moveCurrentBlock(editor.state, -1);
+    expect(tr, "图片是原子块，不接这一支就是能看不能做").not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 型们: string[] = [];
+    editor.state.doc.forEach((n) => 型们.push(n.type.name));
+    expect(型们).toEqual(["mdImage", "mdParagraph"]);
+    const 选 = editor.state.selection;
+    expect(选 instanceof NodeSelection, "选区要跟着块走，连按两次移的才是同一块").toBe(true);
+    expect((选 as NodeSelection).node.type.name).toBe("mdImage");
+    const 出 = docToMarkdown(editor.state.doc, doc);
+    expect(出).toContain("![[attachments/a3/x.png]]");
+    expect(出).toContain("上面一行");
     editor.destroy();
   });
 });

@@ -31,6 +31,16 @@ export type AppInfo = {
   backupLastAt: string | null;
 };
 
+/** 一次图片入库的返回。`rel` 是 Vault 根相对路径，正文里写的就是它 */
+export type AssetOut = {
+  rel: string;
+  mime: string;
+  size: number;
+  sha256: string;
+  /** 盘上早有这一份（同一张图粘第二次），true 时后端没再写文件 */
+  existed: boolean;
+};
+
 /** 快照列表里的一行。全量清单留在 Rust 侧，两万条 hash 不该过 IPC */
 export type SnapshotRow = {
   id: string;

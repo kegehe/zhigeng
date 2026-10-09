@@ -299,9 +299,17 @@ fn render_block(out: &mut String, b: &Block) {
             body.push_str(if *checked { "- [x] " } else { "- [ ] " });
             body.push_str(&b.content);
         }
-        Kind::Bullet | Kind::Image | Kind::Embed | Kind::File => {
+        Kind::Bullet => {
             body.push_str(&b.indent);
             body.push_str("- ");
+            body.push_str(&b.content);
+        }
+        // 图片 / 嵌入 / 文件：`content` 里装的是**那一整行**，`![[…]]` 的语法本身也在里面，
+        // 所以与段落同一条写法（只补缩进）。这几类原先与 `Bullet` 共用一支，规范化于是把
+        // `![[a.png]]` 重写成 `- ![[a.png]]`——而 docs/02 D9 的白名单里明明有 image。
+        // 这条一直没被测到，是因为 testdata 里从来没有过图片行（2026-10-09 补 07-图片 才暴露）。
+        Kind::Image | Kind::Embed | Kind::File => {
+            body.push_str(&b.indent);
             body.push_str(&b.content);
         }
         Kind::Ordered { marker } => {
