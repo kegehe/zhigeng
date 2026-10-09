@@ -20,6 +20,8 @@ import {
   exitOpaqueDown,
   insertSourceBlock,
   带围栏,
+  块内范围,
+  全选档,
   判粘贴,
   格坐标At,
   INSERTABLE,
@@ -2439,6 +2441,131 @@ describe("语言牌与文件必须说同一句话", () => {
     expect(首行.startsWith("```")).toBe(true);
     expect(首行.split(/\s/).length, `写出来的是 ${首行}`).toBeLessThanOrEqual(2);
     if (首行 !== "```") expect(语言清单.some((l) => l.值 === 首行.slice(3))).toBe(true);
+    editor.destroy();
+  });
+});
+
+describe("代码块三件事：块内全选 / 行号 / 复制", () => {
+  /** 走注册好的 keymap 按 Ctrl+A，返回有没有被接管 */
+  const 按全选 = (editor: Editor) =>
+    editor.view.someProp("handleKeyDown", (f) =>
+      f(editor.view, new KeyboardEvent("keydown", { key: "a", code: "KeyA", ctrlKey: true }))
+    ) === true;
+
+  const 五行 = "```py\ndef a():\n    return 1\n\n\n# 尾行\n```\n";
+  const 节点字数 = (editor: Editor, 起: number) => editor.state.doc.nodeAt(起)!.textContent.length;
+
+  it("判据：不透明块里 → 块；整块已包住 → 全文；段落与表格交回默认", () => {
+    const doc = 一块({ kind: "code", raw: 五行 });
+    const editor = createTestEditor(doc);
+    const 块起 = 不透明块(editor)[0]!.pos;
+    editor.commands.setTextSelection(块起 + 2);
+    expect(全选档(editor.state)).toBe("块");
+    // 只选半截仍算"没选全"，下一档还是把整块包住
+    editor.commands.setTextSelection({ from: 块起 + 2, to: 块起 + 8 });
+    expect(全选档(editor.state)).toBe("块");
+    editor.commands.setTextSelection({ from: 块起 + 1, to: 块起 + 1 + 节点字数(editor, 块起) });
+    expect(全选档(editor.state)).toBe("全文");
+    // 全选整篇之后 `$from` 落在文档开头（depth 0），这条判据直接交回默认：
+    // 第三下 Ctrl+A 由浏览器再选一次整篇，不许把选区缩回块里
+    editor.commands.selectAll();
+    expect(全选档(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
+  it("普通段落与表格里的 Ctrl+A 不许被接管", () => {
+    // 段落里用户要的就是全选整篇；表格有自己的格子矩形选区（tableSelectPlugin），
+    // 抢下 Mod-a 会把那套判据整个绕开。这两类都必须交回默认，判据是"返回 null"。
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    let 段 = -1;
+    let 表 = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (段 < 0 && n.type.name === "mdParagraph") 段 = off;
+      if (表 < 0 && n.type.name === "mdTable") 表 = off;
+    });
+    expect(段).toBeGreaterThan(-1);
+    editor.commands.setTextSelection(段 + 2);
+    expect(全选档(editor.state)).toBeNull();
+    expect(块内范围(editor.state)).toBeNull();
+    expect(表).toBeGreaterThan(-1);
+    editor.commands.setTextSelection(表 + 3);
+    expect(全选档(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
+  it("Ctrl+A 两级：第一下正好是那块的正文，第二下才是整篇", () => {
+    const editor = createTestEditor(一块({ kind: "code", raw: 五行 }));
+    const 块起 = 不透明块(editor)[0]!.pos;
+    editor.view.focus();
+    editor.commands.setTextSelection(块起 + 2);
+    expect(按全选(editor), "Ctrl+A 该被接管").toBe(true);
+    let s = editor.state.selection;
+    expect([s.from, s.to]).toEqual([块起 + 1, 块起 + 1 + 节点字数(editor, 块起)]);
+    expect(按全选(editor)).toBe(true);
+    s = editor.state.selection;
+    expect([s.from, s.to]).toEqual([0, editor.state.doc.content.size]);
+    // 第三下不许把选区缩回块里（否则全选整篇这条路就断了）
+    expect(按全选(editor)).toBe(true);
+    expect([editor.state.selection.from, editor.state.selection.to]).toEqual([
+      0,
+      editor.state.doc.content.size,
+    ]);
+    editor.destroy();
+  });
+
+  it("两行以上才有行号，且行号一个字节都进不了文件", () => {
+    const 单 = createTestEditor(一块({ kind: "code", raw: "```js\nlet a = 1;\n```\n" }));
+    expect(面孔(单, 不透明块(单)[0]!.pos)!.querySelector(".md-gutter"), "单行块不该挂个 1").toBeNull();
+    单.destroy();
+
+    const editor = createTestEditor(一块({ kind: "code", raw: 五行 }));
+    const 起 = 不透明块(editor)[0]!.pos;
+    const 槽 = () => 面孔(editor, 起)!.querySelector(".md-gutter");
+    expect(槽()!.textContent).toBe("1\n2\n3\n4\n5");
+    expect(槽()!.getAttribute("aria-hidden"), "读屏不该念一串数字").toBe("true");
+    // 在正文末尾敲一个回车：行号跟着长，而产出里不许出现号码
+    const 尾 = 起 + 1 + 节点字数(editor, 起);
+    editor.view.dispatch(editor.state.tr.insertText("\n加一行", 尾));
+    expect(槽()!.textContent!.split("\n").length).toBe(6);
+    const 出 = docToMarkdown(editor.state.doc, 一块({ kind: "code", raw: 五行 }));
+    expect(出).toContain("def a():");
+    expect(出, "行号混进正文就是改用户字节").not.toMatch(/^1\n2\n/m);
+    expect(出.split("\n").filter((l) => /^\d+$/.test(l))).toEqual([]);
+    editor.destroy();
+  });
+
+  it("复制按钮抄的是围栏之间那段：不带围栏、不带行号、也不甩走插入符", () => {
+    const 交: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: (s: string) => Promise.resolve(交.push(s)) },
+      configurable: true,
+    });
+    const editor = createTestEditor(一块({ kind: "code", raw: 五行 }));
+    const 起 = 不透明块(editor)[0]!.pos;
+    const 卡 = 面孔(editor, 起)!;
+    const 钮 = 卡.querySelector<HTMLButtonElement>(".md-copy")!;
+    expect(钮, "单面代码块该有复制钮").toBeTruthy();
+    expect(钮.getAttribute("aria-label")).toBe("复制代码");
+    editor.view.focus();
+    editor.commands.setTextSelection(起 + 3);
+    钮.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    钮.click();
+    return Promise.resolve().then(async () => {
+      await Promise.resolve();
+      expect(交[0]).toBe("def a():\n    return 1\n\n\n# 尾行");
+      expect(交[0]).not.toContain("```");
+      expect(卡.hasAttribute("data-copied"), "抄上了要给一眼看得见的回显").toBe(true);
+      expect(editor.state.selection.from, "点复制不该把插入符甩进块里").toBe(起 + 3);
+      editor.destroy();
+    });
+  });
+
+  it("两副面孔的块（没闭栏）不给复制钮：它正文里就躺着围栏", () => {
+    const editor = createTestEditor(一块({ kind: "code", raw: "```sh\n没有闭栏\n" }));
+    const 卡 = 面孔(editor, 不透明块(editor)[0]!.pos)!;
+    expect(卡.querySelector(".md-copy")).toBeNull();
+    expect(卡.querySelector(".md-gutter"), "两面的卡片不套网格").toBeNull();
     editor.destroy();
   });
 });

@@ -377,6 +377,66 @@
     padding: var(--space-3) var(--space-4);
     border-radius: var(--radius-md);
     background: var(--bg-sunken);
+    /*
+     * 两列网格：`[行号][代码]`，头那一行（语言牌 + 复制）横跨两列。
+     * 为什么不是把行号画进 `pre` 里：`pre` 是**横向滚动**的那个容器（长行不折行），
+     * 放进去的数字会跟着滚走，滚到右边就看不见行号了。
+     * 列间距做在行号自己的 `padding-right` 上而不是 `column-gap`：单行块没有行号栏，
+     * 用 gap 就会凭空多出一条对不齐的代码左边距。
+     */
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+  .block-editor .md-opaque[data-md-code] .md-card-head {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+  .block-editor .md-opaque[data-md-code] .md-gutter {
+    grid-column: 1;
+    padding-right: var(--space-3);
+    /* 与代码同一套字与行高，否则数字会一路漂开 */
+    font-family: var(--font-mono);
+    font-size: var(--text-mono);
+    line-height: var(--leading-body);
+    text-align: right;
+    white-space: pre;
+    color: var(--text-disabled);
+    /* 它是装饰：不许被选中、不许进剪贴板、读屏也不念一串数字（aria-hidden 在 JS 那边设） */
+    user-select: none;
+  }
+  .block-editor .md-opaque[data-md-code] .md-src {
+    grid-column: 2;
+  }
+  /**
+   * 复制按钮。跟语言牌一个视觉档（无边框、无底色、muted 色），hover 才提亮——
+   * 卡片顶那一行是"这块代码的元数据"，不是工具栏，抢眼睛就错了。
+   * 焦点环交回全局 `:focus-visible` 那条（[06] §4 要的就是"有看得见的指示"）。
+   */
+  .block-editor .md-opaque[data-md-code] .md-copy {
+    display: inline-flex;
+    align-items: center;
+    padding: 0;
+    cursor: pointer;
+    color: var(--text-disabled);
+  }
+  .block-editor .md-opaque[data-md-code] .md-copy:hover {
+    color: var(--text-secondary);
+  }
+  .block-editor .md-opaque[data-md-code] .md-copy .md-copy-ok {
+    display: none;
+  }
+  /* 抄成功那一下换成一枚对勾：图标按钮没有地方放文字，而"到底抄上了没有"必须看得见 */
+  .block-editor .md-opaque[data-md-code][data-copied] .md-copy > svg:first-child {
+    display: none;
+  }
+  .block-editor .md-opaque[data-md-code][data-copied] .md-copy .md-copy-ok {
+    display: block;
+    color: var(--success);
   }
   /**
    * 语言牌是个**真下拉**（用户点名要块内可点）。它长得必须和以前那枚灰色小字一样：

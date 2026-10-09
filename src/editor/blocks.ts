@@ -396,6 +396,40 @@ export function 代码落点(块起点: number): number {
 }
 
 /**
+ * `Ctrl+A` 该落到哪一档：光标在**不透明块**里时先选这一块，整块已经包住了再按才扩到全文。
+ * 返回 `null` = 这条不管，交回默认行为。
+ *
+ * 为什么要改默认：代码块是一整段就地编辑的内容，人在里面按全选要的是**那段代码**；
+ * 一次跳到全文等于逼他"点出去、再按、再滚回来"。第二次扩到全文是 Notion / VS Code 的
+ * 肌肉记忆，所以"我就是要选整篇"这条路没被堵掉。
+ *
+ * 两类块明确不在其列：
+ * - **表格**：它有自己的格子矩形选区（`tableSelectPlugin`），抢 `Mod-a` 会把那套判据绕开；
+ * - **普通段落 / 标题 / 列表项**：那是写正文的地方，全选就是全选整篇，没人期待"只选这一段"。
+ */
+export function 全选档(state: EditorState): "块" | "全文" | null {
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  const 块 = $from.node(1);
+  if (块.type.name !== "mdOpaque") return null;
+  const 起 = $from.before(1) + 1;
+  const 止 = $from.after(1) - 1;
+  if (止 <= 起) return "全文"; // 空块没有"这一块"可选，直接给全文
+  const { from, to, empty } = state.selection;
+  // 整块已被包住（含"选区比块还大"的整篇全选）→ 下一档才是全文
+  return !empty && from <= 起 && to >= 止 ? "全文" : "块";
+}
+
+/** 那一块内容的起止（选区用），不在不透明块里或空块给 null */
+export function 块内范围(state: EditorState): { 起: number; 止: number } | null {
+  const { $from } = state.selection;
+  if (!$from.depth || $from.node(1).type.name !== "mdOpaque") return null;
+  const 起 = $from.before(1) + 1;
+  const 止 = $from.after(1) - 1;
+  return 止 > 起 ? { 起, 止 } : null;
+}
+
+/**
  * 把块改成目标类型需要的节点类型与属性补丁。**返回 null 表示不用改或不能改**——
  * 包括不透明块，以及"目标就是当前类型"（不这么判的话一次无意义的 setNodeMarkup 会
  * 改掉 `mdSig`，把整块重新序列化，用户只是点了同一个菜单项却多出一次落盘）。

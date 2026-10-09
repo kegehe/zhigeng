@@ -16,7 +16,9 @@ import {
   replaceBlockWithSource,
   判粘贴,
   填充所选,
+  块内范围,
   清场所选,
+  全选档,
   type BlockTypeId,
 } from "./blocks";
 import { 批量, TableSelect } from "./tableSelectPlugin";
@@ -185,6 +187,40 @@ export function 分派岛上鼠标(ev: Event): 岛上鼠标 {
 }
 
 /**
+ * 卡片上的小图标。几何抄自 lucide（与工具栏那组同一套：`fill=none` + `stroke=currentColor`
+ * + 圆角线帽），但 NodeView 里是手搓 DOM，用不了 React 组件。
+ * 尺寸给 14：语言牌是 12px 的等宽小字，图标再大就把"卡片的一行元数据"画成工具栏了。
+ */
+function 画图标(形: "copy" | "check"): SVGSVGElement {
+  const 站 = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(站, "svg");
+  for (const [k, v] of Object.entries({
+    viewBox: "0 0 24 24",
+    width: "14",
+    height: "14",
+    fill: "none",
+    stroke: "currentColor",
+    "stroke-width": "2",
+    "stroke-linecap": "round",
+    "stroke-linejoin": "round",
+    "aria-hidden": "true",
+  }))
+    svg.setAttribute(k, v);
+  const 加 = (名: string, 属: Record<string, string>) => {
+    const 元 = document.createElementNS(站, 名);
+    for (const [k, v] of Object.entries(属)) 元.setAttribute(k, v);
+    svg.append(元);
+  };
+  if (形 === "copy") {
+    加("rect", { width: "14", height: "14", x: "8", y: "8", rx: "2", ry: "2" });
+    加("path", { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" });
+  } else {
+    加("path", { d: "M20 6 9 17l-5-5" });
+  }
+  return svg;
+}
+
+/**
  * 不透明块的两副面孔：**平时是显示形（表格画成网格、引用画成引用），光标进来就退回源文本**。
  *
  * 为什么不"渲染 + 结构化编辑"一起做：`serializeNode` 产不出 `> ` 与 ` ``` ` 前缀，
@@ -205,6 +241,11 @@ class OpaqueView implements NodeView {
   readonly host: HTMLDivElement | null;
   /** 块内那个语言下拉。只有代码块那一面有，其余类型是 null */
   private 牌: HTMLSelectElement | null = null;
+  /** 行号栏与"这一栏现在是几行"。两行以上才存在，单行块不留一个孤零零的 `1` */
+  private 行号槽: HTMLDivElement | null = null;
+  private 行号数 = 0;
+  /** "已复制"那个回显的定时器，视图销毁时要掐掉 */
+  private 抄时: ReturnType<typeof setTimeout> | 0 = 0;
   private 节点: PmNode;
   private kind = "raw";
   private 正文 = "";
@@ -287,7 +328,33 @@ class OpaqueView implements NodeView {
       const 牌框 = document.createElement("span");
       牌框.className = "md-lang-box";
       牌框.append(牌);
-      dom.append(牌框);
+
+      /**
+       * 复制按钮：抄的是**这一块正文**，也就是围栏之间那段代码——围栏住在账本 attrs 里、
+       * 不在正文里，所以"复制代码"天然不会带上 ` ``` `。
+       *
+       * 它和语言牌一样排在 `contentDOM` **之外**：PM 看不见它，图标与"已复制"那点文字
+       * 永远进不了文件。`stopEvent` 对它返回 true，那一下是点控件，不是"点进块里改源码"。
+       */
+      const 抄 = document.createElement("button");
+      抄.type = "button";
+      抄.className = "md-copy";
+      抄.setAttribute("aria-label", "复制代码");
+      抄.title = "复制代码";
+      const 两个 = [画图标("copy"), 画图标("check")];
+      两个[1]!.classList.add("md-copy-ok");
+      抄.append(...两个);
+      抄.addEventListener("click", () => void this.抄代码());
+      /**
+       * `mousedown` 也交回浏览器：不拦的话 PM 会把插入符打到块首，用户看到的是
+       * "点一下复制，光标跳走了、还顺手把选区清了"。
+       */
+      抄.addEventListener("mousedown", (e) => e.preventDefault());
+
+      const 头 = document.createElement("div");
+      头.className = "md-card-head";
+      头.append(牌框, 抄);
+      dom.append(头);
     }
 
     // 宿主排在源文本**前面**：PM 的 `localPosFromDOM` 按"点击的元素在 contentDOM 之前还是
@@ -300,6 +367,78 @@ class OpaqueView implements NodeView {
     渲染实例.set(dom, this);
     // 装载这一次不许猜语言（`补渲染` 交出焦点时也会被调，那次允许）
     this.补渲染(false);
+    this.刷行号();
+  }
+
+  /**
+   * 行号栏。**两行以上才有**（用户拍的档：单行片段挂一个 `1` 看着像出错了）。
+   *
+   * 三条不是随便选的位置：
+   * - 它是 `contentDOM` **之外**的兄弟节点，PM 看不见它——行号要是混进正文，下一次落盘
+   *   文件里就多了 `1 2 3`，那是改用户字节里最坏的一种；
+   * - 它排在 `pre` **之前**且不在 `pre` 里面：`pre` 才是横向滚动的那个容器（长行不折行），
+   *   放进去就会跟着滚走，滚到右边就看不见行号了；
+   * - 只在行数真的变了的时候重写 DOM。行数要是不变，打字这一路一次读写都不做。
+   */
+  private 刷行号(): void {
+    if (!this.单面) return;
+    const 数 = this.节点.textContent.split("\n").length; // 行尾带 `\r` 不影响计数
+    if (数 === this.行号数) return;
+    this.行号数 = 数;
+    if (数 < 2) {
+      this.行号槽?.remove();
+      this.行号槽 = null;
+      return;
+    }
+    if (!this.行号槽) {
+      const 槽 = document.createElement("div");
+      槽.className = "md-gutter";
+      槽.setAttribute("aria-hidden", "true"); // 装饰性内容，读屏不该念一串数字
+      this.dom.insertBefore(槽, this.dom.querySelector(".md-src"));
+      this.行号槽 = 槽;
+    }
+    this.行号槽.textContent = Array.from({ length: 数 }, (_, i) => String(i + 1)).join("\n");
+  }
+
+  /**
+   * 复制这一块代码。`navigator.clipboard` 优先（WebView2 里由用户手势触发，是安全上下文），
+   * 被拒或不可用时退回一个离屏 textarea + `execCommand`——**不能只留一条**：那条 API 在
+   * 窗口没拿到系统焦点时会 reject，而"点了复制什么也没发生"比退回一条更糟。
+   */
+  private async 抄代码(): Promise<void> {
+    const 文 = this.节点.textContent;
+    const 成 = () => {
+      this.dom.dataset["copied"] = "";
+      if (this.抄时) clearTimeout(this.抄时);
+      this.抄时 = setTimeout(() => {
+        this.抄时 = 0;
+        delete this.dom.dataset["copied"];
+      }, 1400);
+    };
+    try {
+      await navigator.clipboard.writeText(文);
+      成();
+      return;
+    } catch {
+      /* 权限 / 非安全上下文 / 窗口没焦点：下面退回 execCommand */
+    }
+    const 藏 = document.createElement("textarea");
+    藏.value = 文;
+    藏.setAttribute("aria-hidden", "true");
+    藏.style.position = "fixed";
+    藏.style.top = "-1000px";
+    document.body.append(藏);
+    藏.select();
+    try {
+      if (document.execCommand("copy")) 成();
+    } catch {
+      /* 两条路都不通就什么也不标：比标了"已复制"却没抄上诚实 */
+    }
+    藏.remove();
+  }
+
+  destroy(): void {
+    if (this.抄时) clearTimeout(this.抄时);
   }
 
   /** 开栏行 → 下拉该显示的那个词 */
@@ -421,6 +560,8 @@ class OpaqueView implements NodeView {
      * 这条路每次击键都会走。
      */
     if (this.单面 && String(node.attrs.mdFenceOpen ?? "") !== 旧开栏) this.刷语言(false);
+    // 行数变了才重写那一栏（打字时行数一般不动，这条判据让它在击键路径上零读写）
+    this.刷行号();
     // 单面那一种**不算源文本**：`带围栏` 会走自动识别，而 update 每次击键都来一遍
     if (!this.单面) {
       const 源 = 带围栏(node, false);
@@ -455,10 +596,11 @@ class OpaqueView implements NodeView {
     const 目标 = ev.target as Element | null;
     if (!目标) return false;
     /**
-     * 语言下拉：PM 一律别看它。返回 true 让浏览器处理原生下拉，我们自己也不 preventDefault
-     * ——那一下是"选一个元数据"，不是"点进块里改源码"，走 `进源码()` 会把用户从下拉里踢出来。
+     * 语言下拉与复制按钮：PM 一律别看它们。返回 true 让浏览器处理原生行为，我们自己也不
+     * preventDefault——那一下是"选一个元数据 / 抄一段代码"，不是"点进块里改源码"，
+     * 走 `进源码()` 会把用户从下拉里踢出来、或者把插入符甩到块首。
      */
-    if (目标.closest(".md-lang")) return true;
+    if (目标.closest(".md-lang") || 目标.closest(".md-copy")) return true;
     if (!this.host?.contains(目标)) return false;
     if (目标.closest(".cal-head")) {
       if (ev.type === "mousedown") {
@@ -841,6 +983,37 @@ export const BlockKeys = Extension.create({
       "Ctrl-Shift-9": setType("todo"),
       "Alt-ArrowUp": move(-1),
       "Alt-ArrowDown": move(1),
+    };
+  },
+});
+
+/**
+ * `Ctrl+A` 的两级落点：光标在不透明块里 → 第一下选这一块，第二下才扩到全文。
+ *
+ * 判据是 `blocks.ts` 的 **`全选档`**（纯函数，用例直接钉），这里只负责发选区事务。
+ * 表格与普通段落一律交回默认——前者有自己的格子矩形选区，后者用户要的就是全选整篇。
+ */
+export const BlockSelectAll = Extension.create({
+  name: "blockSelectAll",
+  addKeyboardShortcuts() {
+    return {
+      "Mod-a": ({ editor }) => {
+        const { state } = editor;
+        const 档 = 全选档(state);
+        if (!档) return false;
+        if (档 === "全文") return editor.commands.selectAll();
+        const 范 = 块内范围(state);
+        if (!范) return editor.commands.selectAll();
+        // 只发选区：选区事务不许把笔记标脏（这条纪律本轮已被踩过两次）
+        editor.view.dispatch(
+          state.tr
+            .setSelection(
+              new TextSelection(state.doc.resolve(范.起), state.doc.resolve(范.止))
+            )
+            .scrollIntoView()
+        );
+        return true;
+      },
     };
   },
 });
@@ -1359,6 +1532,7 @@ export const mdExtensions = [
   BlockIdGuard,
   BlockTools,
   BlockKeys,
+  BlockSelectAll,
   TableKeys,
   TablePaste,
   TableSelect,
