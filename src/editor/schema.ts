@@ -23,7 +23,7 @@ import {
   全选档,
   type BlockTypeId,
 } from "./blocks";
-import { 新引用, type 资产引用 } from "./asset";
+import { 可无损, 收图注, 是库内资产, 拆自attrs, 新引用, type 资产引用 } from "./asset";
 import { api, describeError, 资产地址 } from "../ipc/commands";
 import { 批量, TableSelect } from "./tableSelectPlugin";
 import { 拼开栏, 拆开栏, 围栏行of } from "./fence";
@@ -739,6 +739,8 @@ class ImageView implements NodeView {
   private 注: HTMLInputElement;
   private 视图: EditorView;
   private 位置: () => number | undefined;
+  /** 框里有还没进文档的用户输入。只有 `input` 事件能置它，外部更新据此决定踩不踩 */
+  private 打过字 = false;
 
   constructor(
     node: PmNode,
@@ -780,8 +782,19 @@ class ImageView implements NodeView {
     注.title = "图注：写进文件里 ![[…|这里]] 的那一段";
     // 用 change 而不是 input：只想聚焦看一眼不该改文件，也不该把整篇标成未保存
     注.addEventListener("change", () => this.改注(注.value));
-    // 点在工具条上不该顺带把整块选中——那会让输入框刚拿到焦点就被 NodeSelection 抢走
-    条.addEventListener("mousedown", (e) => e.stopPropagation());
+    // 只有用户真打过字才算"框里有还没进文档的内容"。不记这一笔，撤销之后外部更新会被
+    // "别踩掉正在打字的格子"那条判断挡在门外，框里留着撤销前的旧值，用户一 blur 又把
+    // 撤销掉的内容写回文件（真查出来过这条链）
+    注.addEventListener("input", () => {
+      this.打过字 = true;
+    });
+    // 编辑态：点在工具条上不该顺带把整块选中（那会让输入框刚拿到焦点就被 NodeSelection 抢走）。
+    // 浏览态：**必须让它冒泡出去**——"点正文就地转编辑"那个监听挂在 view.dom 上，拦下来
+    // 用户点到的就是一格永远写不进去的框。代价是浏览态下要点两下（第一下翻进编辑态，
+    // 第二下才进框），比"打了字却静默消失"诚实
+    条.addEventListener("mousedown", (e) => {
+      if (this.视图.editable) e.stopPropagation();
+    });
     条.append(注);
     this.注 = 注;
 
@@ -790,19 +803,27 @@ class ImageView implements NodeView {
     this.同步(node);
   }
 
-  /** 把 attrs 投射到 DOM 上。原子块没有正文，所以只有这三样 */
+  /** 把 attrs 投射到 DOM 上。原子块没有正文，所以只有这几样 */
   private 同步(节点: PmNode): void {
     const 目标 = String(节点.attrs.mdSrc ?? "");
     const 注 = String(节点.attrs.mdAlt ?? "");
     const 址 = 资产地址(目标);
-    delete this.dom.dataset.mdMiss;
-    if (址) this.图.src = 址;
-    else this.图.removeAttribute("src"); // 没有 src 的 <img> 会触发 error，正好走那枚牌
+    if (址) {
+      this.图.src = 址;
+    } else {
+      // 没有地址就**直接**进"读不到"那一面：浏览器不会因为 `src` 被摘掉而抛 error 事件，
+      // 只 removeAttribute 的话屏幕上会剩一个既没有图也没有名牌的空框（查过才改的）
+      this.图.removeAttribute("src");
+      this.dom.dataset.mdMiss = "";
+    }
     this.图.alt = 注;
     this.图.title = 目标;
     this.牌.textContent = 目标.split("/").pop() || 目标;
-    // 正在打字的那一格不许被外部更新踩掉（撤销、或另一处改了同一块）
-    if (document.activeElement !== this.注) this.注.value = 注;
+    // 正在打字且框里的值与文档不同，说明那是还没提交的用户输入，不许被外部更新踩掉
+    if (!(document.activeElement === this.注 && this.打过字)) {
+      this.注.value = 注;
+      this.打过字 = false;
+    }
   }
 
   update(节点: PmNode): boolean {
@@ -829,7 +850,12 @@ class ImageView implements NodeView {
     delete this.dom.dataset.mdSel;
   }
 
-  /** 写回图注。**空别名要把那根竖线一起收掉**，否则清掉图注会在文件里留下 `![[a.png|]]` */
+  /**
+   * 写回图注。**空别名要把那根竖线一起收掉**，否则清掉图注会在文件里留下 `![[a.png|]]`；
+   * 表示不了的字符（方括号、换行，Markdown 形还有圆括号）先收掉，收完再过一次写侧那道闸。
+   * 收过之后框里剩什么，屏幕上就得显示什么——留着被打掉的字符就是"屏幕说的与落盘的不是
+   * 同一句话"，所以这里把框也改回收过的值。
+   */
   private 改注(值: string): void {
     // 浏览态整个实例是只读的，但这个 `<input>` 不归 PM 管——不挡一下，"只是看看"也能把
     // 图注写进文件。PM 的 `dispatch` 不看 `editable`，所以这道闸必须自己上
@@ -843,16 +869,24 @@ class ImageView implements NodeView {
     if (pos === undefined) return;
     const 块 = this.视图.state.doc.nodeAt(pos);
     if (!块 || 块.type.name !== "mdImage") return;
+    const 形: "wiki" | "md" = 块.attrs.mdWiki === false ? "md" : "wiki";
     const 原 = String(块.attrs.mdAlt ?? "");
-    const 空 = 值.trim() === "";
-    if (原 === 值 && Boolean(块.attrs.mdNamed) !== !空) return;
-    this.视图.dispatch(
-      this.视图.state.tr.setNodeMarkup(pos, undefined, {
-        ...块.attrs,
-        mdAlt: 值,
-        mdNamed: !空,
-      })
-    );
+    const 收 = 收图注(值, 形);
+    if (收 !== 值) this.注.value = 收;
+    /**
+     * **值没变就一个事务都不发**——连那根竖线的标志也不动。两个理由叠在一起：
+     * 空事务照样走 `onUpdate`，而界面的脏判据是 `inlineRev > 0 || 字节不同`，
+     * 于是"聚焦看一眼再移开"能把整篇顶成未保存；而 `![[a.png|]]` 那块被这么一动就会
+     * 掉一根竖线（用户没打任何字，文件却变了）。清掉一个**有内容**的图注走的是下面那条：
+     * 那时值确实变了，竖线跟着收掉才对。
+     */
+    if (原 === 收) return;
+    const 属性 = { ...块.attrs, mdAlt: 收, mdNamed: 收 !== "" };
+    if (!可无损(拆自attrs(属性))) return; // 收过还不行就什么都不改，也比写出一行拆不回来的强
+    this.视图.dispatch(this.视图.state.tr.setNodeMarkup(pos, undefined, 属性));
+    // 这一刻起框里的内容与文档一致：闸门交回给"外部更新可以踩它"。
+    // 不在这儿清，撤销之后框里还留着撤销前的值，用户一 blur 就把刚撤销掉的内容写回文件
+    this.打过字 = false;
   }
 }
 
@@ -893,13 +927,32 @@ export const MdImage = Node.create({
     return [
       {
         tag: "img[data-md-src]",
+        /**
+         * **剪贴板是不可信的，这道闸必须在这儿。** PM 的粘贴走 `renderHTML` → `parseHTML`，
+         * 所以外部 HTML 里带一个 `data-md-src` 就能把任意字符串塞进 attrs，而序列化器会把它
+         * 原样拼成一行写进用户的文件——真测过：`data-md-src="a.png]]\n\n# 注入的标题\n![[b"`
+         * 落盘后凭空多出一个标题块。判据不另写一套，就用读写共用的那一对函数自己验自己。
+         */
         getAttrs: (el) => {
           const 元 = el as HTMLElement;
+          const 目标 = 元.getAttribute("data-md-src") ?? "";
+          const 别名 = 元.getAttribute("data-md-alt") ?? "";
+          const 形 = 元.getAttribute("data-md-wiki") === "0" ? "md" : "wiki";
+          const 拆: 资产引用 = {
+            形,
+            目标,
+            别名,
+            有别名: 元.getAttribute("data-md-named") === "1" || 别名 !== "",
+            前: "",
+            后: "",
+          };
+          if (!是库内资产(目标) || !可无损(拆)) return false;
           return {
             mdKind: "image",
-            mdSrc: 元.getAttribute("data-md-src") ?? "",
-            mdAlt: 元.getAttribute("data-md-alt") ?? "",
-            mdWiki: 元.getAttribute("data-md-wiki") !== "0",
+            mdSrc: 目标,
+            mdAlt: 别名,
+            mdWiki: 形 !== "md",
+            mdNamed: 拆.有别名,
           };
         },
       },
@@ -913,6 +966,8 @@ export const MdImage = Node.create({
         "data-md-src": String(node.attrs.mdSrc ?? ""),
         "data-md-alt": String(node.attrs.mdAlt ?? ""),
         "data-md-wiki": node.attrs.mdWiki === false ? "0" : "1",
+        // 那根竖线是用户打的字节，复制粘贴一趟不该把它弄丢
+        "data-md-named": node.attrs.mdNamed ? "1" : "0",
         alt: String(node.attrs.mdAlt ?? ""),
       },
     ];
@@ -1770,7 +1825,10 @@ export const ImagePaste = Extension.create({
       if (view.isDestroyed) return;
       if (引用们.length) {
         const tr = 插图片块(view.state, 引用们);
+        // 落点算不出来（选区在 PM 认为不合法的位置）时**必须说一句**：字节已经落盘了，
+        // 屏幕上什么都不发生就是"应用吞了我的图"，而那句红字是用户唯一能看见的线索
         if (tr) view.dispatch(tr);
+        else 报(view, "图片存好了，但这儿放不下它：先点一下正文再粘");
       }
       if (错们.length) 报(view, 错们[0]!);
     };

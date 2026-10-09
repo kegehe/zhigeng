@@ -9,7 +9,7 @@ import {
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import type { EditBlock, EditDoc } from "../ipc/types";
-import { 拼资产引用, 是库内资产, 拆资产引用, type 资产引用 } from "./asset";
+import { 拼资产引用, 是库内资产, 拆资产引用, 拆自attrs, type 资产引用 } from "./asset";
 import { 拼开栏, 拼围栏, 拆围栏, 拆开栏 } from "./fence";
 import { 已识别, 短写, 语言清单, 识别 } from "./highlight";
 import { inlineToJson, serializeInline } from "./inline";
@@ -307,14 +307,7 @@ function serializeNode(node: PmNode): string {
        * `mdNamed` 是"`![[a.png|]]` 那根竖线是用户打的"这件事本身；别名一旦有内容，
        * 无论这个标志怎么来的都必须写回去——宁可多一根竖线，不可丢掉用户打的字。
        */
-      const 拆: 资产引用 = {
-        形: a.mdWiki === false ? "md" : "wiki",
-        目标: String(a.mdSrc ?? ""),
-        别名: String(a.mdAlt ?? ""),
-        有别名: Boolean(a.mdNamed) || String(a.mdAlt ?? "") !== "",
-        前: String(a.mdLead ?? ""),
-        后: String(a.mdTail ?? ""),
-      };
+      const 拆 = 拆自attrs(a);
       // 顺序是文件里的顺序：引用、锚点、行尾回车。换一下就改了用户字节的位置
       return 拼资产引用(拆) + anchorSuffix(a.mdId) + String(a.mdEol ?? "");
     }
@@ -832,12 +825,19 @@ export function pasteGrid(state: EditorState, text: string): Transaction | null 
 export function 插图片块(state: EditorState, 引用们: 资产引用[]): Transaction | null {
   const 型 = state.schema.nodes.mdImage;
   if (!型 || !引用们.length) return null;
-  const { $from } = state.selection;
-  if (!$from.depth) return null;
-  const 起点 = $from.before(1);
+  const 选 = state.selection;
+  /**
+   * 整块被选中（图片是原子块，点一下就是 NodeSelection，`$from.depth` 为 0）。
+   * 不接这一支，"选中一张图再 Ctrl+V"会返回 null——而字节**已经落盘了**，于是屏幕上
+   * 什么都没发生、盘上多一枚没人引用的文件，还一句提示都没有（复查实测到的形状）。
+   * 接了之后语义与 Notion 一致：选中的那一块被换掉。
+   */
+  const 整块选中 = 选 instanceof NodeSelection && 选.$from.depth === 0;
+  const 起点 = 整块选中 ? 选.from : 选.$from.depth ? 选.$from.before(1) : -1;
+  if (起点 < 0) return null;
   const 块 = state.doc.nodeAt(起点);
   if (!块) return null;
-  const 换 = 块.type.name === "mdParagraph" && !块.textContent.trim();
+  const 换 = 整块选中 || (块.type.name === "mdParagraph" && !块.textContent.trim());
   const 插入点 = 换 ? 起点 : 起点 + 块.nodeSize;
   const 账本 = { ...新块账本(String(块.attrs.mdGap ?? "\n")), mdKind: "image" };
   const 节点们 = 引用们.map((拆) => 型.create({ ...账本, ...图片账本(拆) }));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { 是库内资产, 新引用, 拼资产引用, 拆资产引用 } from "./asset";
+import { 可无损, 收图注, 是库内资产, 新引用, 拼资产引用, 拆资产引用 } from "./asset";
 
 /**
  * 资产引用的拆与拼。**判的不是画得好不好，而是拆完再拼必须逐字节等于原样**——
@@ -57,7 +57,6 @@ describe("资产引用的拆与拼", () => {
       "前面 ![[a.png]]",
       "![[a.png]]]]", // 多出来的尾巴
       "![[|]]", // 没有目标
-      "![[a.png|左|右]]", // 第二根竖线没进 attrs，接管就拼不回去
       '![x](a.png "标题")', // 标题没搬进 attrs
       "![x](<a.png>)", // 尖括号包路径
       "![x](a.png extra)",
@@ -68,6 +67,34 @@ describe("资产引用的拆与拼", () => {
     ]) {
       expect(拆资产引用(源), 源).toBeNull();
     }
+  });
+
+  it("别名里的竖线是内容不是分隔符（内核 split 只认第一根）", () => {
+    const 拆 = 拆资产引用("![[a.png|左|右]]")!;
+    expect(拆.目标).toBe("a.png");
+    expect(拆.别名).toBe("左|右");
+    expect(拼资产引用(拆)).toBe("![[a.png|左|右]]");
+    // 图注里打竖线不许把这块降级回源文本——那是单面这根杆子被自己写的序列化打破
+    expect(可无损(拆)).toBe(true);
+  });
+
+  it("可无损：写侧那道闸，拼回去拆不回来的都不许写", () => {
+    expect(可无损(新引用("attachments/a3/x.png"))).toBe(true);
+    // 注入面：目标里带方括号与换行，拼回去就成了两个块
+    expect(可无损({ ...新引用('a.png]]\n\n# 注入的标题\n![[b'), 目标: "a.png]]\n\n# 注入\n![[b" })).toBe(false);
+    expect(可无损({ ...新引用("attachments/a/x.png"), 别名: "带]的图注" })).toBe(false);
+    expect(可无损({ ...新引用("attachments/a/x.png"), 别名: "带\n换行" })).toBe(false);
+    expect(可无损({ ...新引用("x.png"), 形: "md", 别名: "带)的图注" })).toBe(false);
+  });
+
+  it("收图注：把表示不了的字符收掉，竖线留着", () => {
+    expect(收图注("带 [方] 括号\n换行", "wiki")).toBe("带 方 括号换行");
+    expect(收图注("左|右", "wiki")).toBe("左|右");
+    expect(收图注("a(b)c", "md")).toBe("abc");
+    expect(收图注("  两头  ", "wiki")).toBe("两头");
+    // 收完一定过得了写侧那道闸（别名非空时那根竖线要跟着立起来，序列化器就是这么算的）
+    const 收 = 收图注("x]|y[", "wiki");
+    expect(可无损({ ...新引用("attachments/a/x.png"), 别名: 收, 有别名: 收 !== "" })).toBe(true);
   });
 
   it("只有指向 attachments/ 的才算库内资产", () => {

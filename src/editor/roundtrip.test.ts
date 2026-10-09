@@ -2726,7 +2726,6 @@ describe("图片块", () => {
     const 型们: string[] = [];
     editor.state.doc.forEach((n) => 型们.push(n.type.name));
     expect(型们).toEqual(["mdImage", "mdImage", "mdParagraph"]);
-    expect(型们.length, "落脚点没落进文件就不该被算进来").toBe(3);
     expect(docToMarkdown(editor.state.doc, doc)).toBe(
       "![[attachments/a3/x.png]]\n\n![[attachments/b3/y.jpg]]"
     );
@@ -2821,9 +2820,137 @@ describe("图片块的整块移动", () => {
     const 选 = editor.state.selection;
     expect(选 instanceof NodeSelection, "选区要跟着块走，连按两次移的才是同一块").toBe(true);
     expect((选 as NodeSelection).node.type.name).toBe("mdImage");
+    // 整串断言，不是 toContain：移动改的是**块间空白**，只查内容在不在等于没钉
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "![[attachments/a3/x.png]]\n\n上面一行\n"
+    );
+    editor.destroy();
+  });
+});
+
+/**
+ * 第六轮复查照出来的六条。它们共同的形状是：**读侧有判据、写侧没有**，
+ * 或者"界面看着没事、字节已经不对"。每一条都先用一个能跑红的用例钉住再修。
+ */
+describe("图片块：写侧必须跑同一份判据（第六轮复查）", () => {
+  const 图块位 = (editor: Editor) => {
+    const 位: number[] = [];
+    editor.state.doc.forEach((n, off) => {
+      if (n.type.name === "mdImage") 位.push(off);
+    });
+    return 位;
+  };
+  const 从剪贴板 = (editor: Editor, html: string) => {
+    const 宿 = document.createElement("div");
+    宿.innerHTML = html;
+    return DOMParser.fromSchema(editor.state.schema).parseSlice(宿, { preserveWhitespace: true });
+  };
+
+  it("剪贴板里那个 data-md-src 想写什么就写什么？不行", () => {
+    const editor = createTestEditor(一块({ kind: "paragraph", raw: "" }));
+    // 注入面：目标里塞方括号与换行，拼回去就成了三个块
+    const 坏 = 从剪贴板(
+      editor,
+      '<img data-md-src="a.png]]\n\n# 注入的标题\n![[b" data-md-alt="">'
+    );
+    expect(坏.content.firstChild, "这一份不该建成图片节点").toBeNull();
+    // 越出库的相对路径同样不许进来
+    expect(
+      从剪贴板(editor, '<img data-md-src="../../../Windows/win.ini">').content.firstChild
+    ).toBeNull();
+    // 裸文件名不是我们管的形状（装载侧同一条判据）
+    expect(从剪贴板(editor, '<img data-md-src="去年圣诞.png">').content.firstChild).toBeNull();
+    // 合法的照旧进得来，且那根竖线跟着走一趟
+    const 好 = 从剪贴板(
+      editor,
+      '<img data-md-src="attachments/a3/x.png" data-md-alt="" data-md-wiki="1" data-md-named="1">'
+    ).content.child(0);
+    expect(好.type.name).toBe("mdImage");
+    expect(好.attrs.mdNamed, "复制粘贴一趟不该把用户打的竖线弄丢").toBe(true);
+    editor.destroy();
+  });
+
+  it("选中一张图再粘：换掉它，而不是什么都不发生", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" });
+    const editor = createTestEditor(doc);
+    const 位 = 图块位(editor)[0]!;
+    editor.view.dispatch(
+      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 位))
+    );
+    const tr = 插图片块(editor.state, [新引用("attachments/b3/y.jpg")]);
+    expect(tr, "字节已经落盘了，这一路返回 null 就是静默吞掉粘贴").not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 们 = 图块位(editor).map((p) => String(editor.state.doc.nodeAt(p)!.attrs.mdSrc));
+    expect(们).toEqual(["attachments/b3/y.jpg"]);
+    editor.destroy();
+  });
+
+  it("图注里打竖线：落盘那一行下次还得接管得回来", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" });
+    const editor = createTestEditor(doc);
+    const 框 = 面孔(editor, 图块位(editor)[0]!)!.querySelector(".md-img-alt") as HTMLInputElement;
+    框.value = "左|右";
+    框.dispatchEvent(new Event("change", { bubbles: true }));
     const 出 = docToMarkdown(editor.state.doc, doc);
-    expect(出).toContain("![[attachments/a3/x.png]]");
-    expect(出).toContain("上面一行");
+    expect(出).toBe("![[attachments/a3/x.png|左|右]]\n");
+    // 关键不是这行长什么样，而是它重新装载之后**还是图片块**（单面这根杆子不能被自己写的字节打破）
+    const 二 = createTestEditor({ ...doc, blocks: [{ ...doc.blocks[0]!, raw: 出 }] });
+    expect(图块位(二)).toHaveLength(1);
+    expect(二.state.doc.firstChild!.attrs.mdAlt).toBe("左|右");
+    editor.destroy();
+    二.destroy();
+  });
+
+  it("图注里打方括号：收掉，且屏幕上写的与文件里落的是同一句", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" });
+    const editor = createTestEditor(doc);
+    const 壳 = 面孔(editor, 图块位(editor)[0]!)!;
+    const 框 = 壳.querySelector(".md-img-alt") as HTMLInputElement;
+    框.value = "甲]乙\n丙";
+    框.dispatchEvent(new Event("change", { bubbles: true }));
+    const 出 = docToMarkdown(editor.state.doc, doc);
+    expect(出).toBe("![[attachments/a3/x.png|甲乙丙]]\n");
+    expect(框.value, "被打掉的字符不许留在框里骗人").toBe("甲乙丙");
+    editor.destroy();
+  });
+
+  it("值没变：一个事务都不发（不然整篇被顶成未保存）", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png|]]\n" });
+    const editor = createTestEditor(doc);
+    const 框 = 面孔(editor, 图块位(editor)[0]!)!.querySelector(".md-img-alt") as HTMLInputElement;
+    let 次 = 0;
+    editor.on("transaction", () => 次++);
+    框.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(次, "空事务照样走 onUpdate，而脏判据是 inlineRev > 0").toBe(0);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("![[attachments/a3/x.png|]]\n");
+    editor.destroy();
+  });
+
+  it("撤销之后图注框跟着回退（焦点还在框里也一样）", () => {
+    const doc = 一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" });
+    const editor = createTestEditor(doc);
+    const 壳 = 面孔(editor, 图块位(editor)[0]!)!;
+    const 框 = 壳.querySelector(".md-img-alt") as HTMLInputElement;
+    框.focus();
+    框.value = "先打一个字";
+    框.dispatchEvent(new Event("input", { bubbles: true }));
+    框.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(框.value).toBe("先打一个字");
+    框.focus();
+    editor.view.someProp("handleKeyDown", (f) =>
+      f(editor.view, new KeyboardEvent("keydown", { key: "z", code: "KeyZ", ctrlKey: true }))
+    );
+    expect(框.value, "撤销完框里还写着撤销前的值，用户一 blur 就把旧内容写回文件").toBe("");
+    editor.destroy();
+  });
+
+  it("读不到地址就是读不到：直接进那一面，不等 error 事件", () => {
+    // jsdom 里 `资产地址` 永远给空串（不在 Tauri），正好是这条判据的天然样本。
+    // 浏览器不会因为 src 被摘掉而抛 error，所以"等 error"的写法会留下一个既没图也没名牌的空框
+    const editor = createTestEditor(一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" }));
+    const 壳 = 面孔(editor, 图块位(editor)[0]!)!;
+    expect(壳.hasAttribute("data-md-miss")).toBe(true);
+    expect(壳.querySelector(".md-img-miss")!.textContent).toBe("x.png");
     editor.destroy();
   });
 });

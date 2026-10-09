@@ -7,9 +7,10 @@
 //! 2. **`.md` 里只写引用，字节住在 `attachments/`**。Markdown 仍是唯一真相源（I1）：
 //!    图片不是"第二种正文"，它是一行 `![[…]]` 指向的二进制。删掉那一行不会把文件删掉，
 //!    这一点与 Obsidian 的默认行为一致，也是快照把 `attachments/` 整目录收进去的原因。
-//! 3. **登记表是可丢的派生数据**（docs/02 §`.note/` 两分层）。`attachments` 那一行没写成功
-//!    不影响图片显示——路径与 mime 都能从字节本身算回来。所以登记那一半允许走后台，
-//!    同步返回的只有"文件已经在盘上了"。
+//! 3. **登记表是派生数据，但今天没有重建路径**。`attachments` 那一行没写成功**不影响图片显示**
+//!    （路径与 mime 都能从字节本身算回来），所以登记那一半允许走后台、失败只记日志。
+//!    要说清楚的是：`Index::rebuild_all` 只扫 `.md`，删掉 `index.db` 之后这张表**不会自己长回来**，
+//!    全仓也没有一处 `SELECT attachments`。它现在是纯粹的"留给反链与 AI 那两档用"的账本。
 
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -72,14 +73,22 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if bytes.len() >= 3 && bytes[..3] == [0xff, 0xd8, 0xff] {
         return Some(JPG);
     }
-    if bytes.starts_with(b"GIF8") {
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        // GIF 的头就是这 6 个字节（`GIF8` 加版本号）。只认 `GIF8` 会把 "GIF8 开头的
+        // 四个字母的文本" 当图片收进来
         return Some(GIF);
     }
     if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
         return Some(WEBP);
     }
-    if bytes.starts_with(b"BM") {
-        return Some(BMP);
+    // BMP 的签名只有 `BM` 两个字母，任何以它开头的文本都会中招（仓库里那条
+    // `sniff(b"BM........")` 的断言就是 10 个字节的东西被判成图片）。真实 BMP 至少
+    // 要有文件头(14) + DIB 头(≥40)，所以再加一道长度与 DIB 大小的下限。
+    if bytes.len() >= 54 && bytes.starts_with(b"BM") {
+        let dib = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        if (12..=124).contains(&dib) {
+            return Some(BMP);
+        }
     }
     // ISO-BMFF：`长度(4) + "ftyp" + 品牌(4)`。avif 与 avis 两个品牌都按 avif 存
     if bytes.len() >= 12
@@ -151,8 +160,8 @@ pub fn plan(bytes: &[u8]) -> Result<(Format, String, String)> {
     }
     if bytes.len() > MAX_ASSET_BYTES {
         return Err(Error::Invalid(format!(
-            "这张图有 {} MB，超过 {} MB 上限，没存",
-            bytes.len() / (1024 * 1024),
+            "这张图有 {:.1} MB，超过上限 {} MB，没存",
+            bytes.len() as f64 / (1024.0 * 1024.0),
             MAX_ASSET_BYTES / (1024 * 1024)
         )));
     }
@@ -170,7 +179,9 @@ pub fn plan(bytes: &[u8]) -> Result<(Format, String, String)> {
 /// 但判据不该依赖"我生成的一定安全"。
 pub fn save_bytes(vault: &Vault, bytes: &[u8]) -> Result<AssetOut> {
     let (式, sha, rel) = plan(bytes)?;
-    let 已存在 = std::fs::metadata(vault.resolve(&rel)?).is_ok();
+    // `is_file()` 而不是 `metadata().is_ok()`：目录、断掉的符号链接也算"is_ok"，
+    // 那样会被判成"这一份已经有了"，从此既不重写也读不出字节（内容寻址的账就错了）
+    let 已存在 = vault.resolve(&rel).map(|p| p.is_file()).unwrap_or(false);
     if !已存在 {
         vault.write_atomic(&rel, bytes)?;
     }
@@ -230,6 +241,17 @@ mod tests {
         v
     }
 
+    /// 一个够真的最小 BMP：14 字节文件头 + 40 字节 DIB 头
+    fn bmp() -> Vec<u8> {
+        let mut v = b"BM".to_vec();
+        v.extend_from_slice(&54u32.to_le_bytes());
+        v.extend_from_slice(&[0, 0, 0, 0]);
+        v.extend_from_slice(&54u32.to_le_bytes());
+        v.extend_from_slice(&40u32.to_le_bytes());
+        v.resize(54, 0);
+        v
+    }
+
     fn 建表() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::schema::SCHEMA).unwrap();
@@ -241,7 +263,11 @@ mod tests {
         assert_eq!(sniff(&png()).unwrap().ext, "png");
         assert_eq!(sniff(&[0xff, 0xd8, 0xff, 0xe0, 0, 0]).unwrap().ext, "jpg");
         assert_eq!(sniff(b"GIF89a....").unwrap().ext, "gif");
-        assert_eq!(sniff(b"BM........").unwrap().ext, "bmp");
+        assert_eq!(sniff(&bmp()).unwrap().ext, "bmp");
+        // 只有签名、没有头的东西不是图片：`BM` 两个字母会命中任何以它开头的文本
+        assert_eq!(sniff(b"BM........"), None);
+        assert_eq!(sniff(b"Budget report for Q3"), None);
+        assert_eq!(sniff(b"GIF8 not really a gif"), None);
         let mut w = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
         w.extend_from_slice(&[0u8; 8]);
         assert_eq!(sniff(&w).unwrap().ext, "webp");

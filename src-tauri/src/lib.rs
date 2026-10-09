@@ -150,23 +150,19 @@ where
     });
 }
 
-/// 后台跑一件只碰**派生数据**的活：拿句柄的一瞬锁主锁，之后立刻还回去。
+/// 后台补 `attachments` 那一行——纯派生数据，失败只记日志。
 ///
-/// 与 `reindex_async` 同一个形状，但不广播 `note://indexed`——附件登记行不是"哪篇笔记变了"，
-/// 前端没有任何东西需要因为它而刷新。失败只记日志：`attachments` 表随时能从字节重算，
-/// 为它把一次粘贴变成红色报错是撒谎（图片其实已经存好了）。
-fn bg_job(app: AppHandle, job: impl FnOnce(&Index) -> note_core::Result<()> + Send + 'static) {
+/// **索引句柄必须在发起命令那一刻就取好**：等任务真跑起来再去取"当前 hub"，用户在这个
+/// 窗口里换了库，A 库的 sha 与路径就登进 B 库的 `index.db` 了（`reindex_async` 之所以
+/// 只在锁里拿句柄、不在锁里干活，是同一条理由）。
+fn 登记附件(bg: std::sync::Arc<std::sync::Mutex<Index>>, 记录: assets::AssetOut) {
     tauri::async_runtime::spawn_blocking(move || {
-        let bg = app
-            .state::<Shared>()
-            .0
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|h| h.indexer()));
-        let Some(bg) = bg else { return };
-        let Ok(index) = bg.lock() else { return };
-        if let Err(e) = job(&index) {
-            log::warn!("附件登记没补上（不影响图片显示，重建索引会补）：{e}");
+        let Ok(index) = bg.lock() else {
+            log::warn!("附件登记跳过：索引那条连接被毒化（图片已在盘上，不影响显示）");
+            return;
+        };
+        if let Err(e) = assets::register(index.conn(), &记录, None) {
+            log::warn!("附件登记没补上（图片已在盘上，不影响显示）：{e}");
         }
     });
 }
@@ -486,13 +482,12 @@ fn note_create(
 /// 打字路径上；格式则由**字节本身**判（`assets::sniff`），不信文件名——剪贴板给的名字
 /// 永远是 `image.png`，用户改了什么名我们根本不知道。
 #[tauri::command]
-fn attachment_save(
-    app: AppHandle,
+async fn attachment_save(
     state: State<'_, Shared>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<assets::AssetOut, WriteErr> {
     let bytes = match request.body() {
-        tauri::ipc::InvokeBody::Raw(b) => b.clone(),
+        tauri::ipc::InvokeBody::Raw(b) => b,
         // 前端忘了走 raw（传了对象/数组）时给一句能看懂的话，而不是把 JSON 当图片存下来
         _ => {
             return Err(WriteErr {
@@ -501,12 +496,23 @@ fn attachment_save(
             })
         }
     };
-    let out = with_hub_write(&state, |h| assets::save_bytes(h.vault(), &bytes))?;
-    let 记录 = out.clone();
-    bg_job(app, move |index| {
-        assets::register(index.conn(), &记录, None)
-    });
-    Ok(out)
+    // 锁里只做"确认选了哪个库 + 拿一份句柄"，sha256、写文件与 fsync 全在锁外。
+    //
+    // 这条命令的开销**随图片大小走**（手机原图 5–8MB，本机实测光 sha256 就要 40–60ms），
+    // 压在 Hub 主锁上就是"粘一张图，期间列表与打开笔记全排队"——docs/03 记过一次
+    // 3.26 秒的同款形状。`Vault` 内部只是一个路径，克隆一份出来用，
+    // 拿法与 `reindex_async` 一致（只在锁里取句柄，不在锁里干活）。
+    let (vault, bg) = {
+        let guard = state.0.lock().map_err(werr_io)?;
+        let hub = guard.as_ref().ok_or_else(|| WriteErr {
+            kind: "error",
+            message: "尚未选择 Vault".into(),
+        })?;
+        (hub.vault().clone(), hub.indexer())
+    };
+    let 记录 = assets::save_bytes(&vault, bytes).map_err(werr)?;
+    登记附件(bg, 记录.clone());
+    Ok(记录)
 }
 
 #[tauri::command]
