@@ -1,15 +1,19 @@
 import type { LinkPanel, LinkRow } from "../ipc/types";
+import { 面板判定 } from "./backlinks";
 
 /**
  * 反链面板：正文下面那两段——谁链到我，以及我链到谁（含链空的）。
  *
- * 四条口径：
+ * 五条口径：
  * 1. **空了就不占位**。两半都空时整个面板不出现，正文下面不该永远挂两个空标题。
  * 2. **按对方分组**。真库里有一篇把同一个 `[[悬空写法]]` 重复了几十次（长文档性能夹具），
  *    不分组就是一屏重复行；Obsidian 也是按来源笔记归并的。
  * 3. **悬空的那条排前并且带原文**。面板要说的正是"这篇链到了一个不存在的东西"，
  *    `target` 就是为此才进 `links` 表（schema v3）的。它没有可打开的笔记，所以不做成按钮。
  * 4. 归档的来源照收，但标出来。归档是"不主动想起它"，不是"它不存在"。
+ * 5. **资产链接（`![[…]]`）说的是盘上的事实**：图在 `attachments/` 里就写"附件在库内"，
+ *    真没了才写"文件丢了"。哪一档都不许点开成一篇笔记——它没有对方笔记。
+ *    "在不在"由后端查盘算（`note_core::assets::exists`），这儿只负责措辞（`面板判定`）。
  */
 export function LinkPanelView({
   panel,
@@ -75,15 +79,17 @@ function LinkGroup({
       <ul className="mt-1.5 flex flex-col gap-1.5">
         {rows.map((g) => {
           const l = g.row;
+          const 判 = 面板判定(l);
           return (
             <li key={g.key}>
               <button
-                // 悬空的那条没有笔记可开。给它一个"点了没反应"的按钮比不给按钮更坏
-                disabled={l.broken || !l.rel}
+                // 悬空的那条没有笔记可开，资产那一条开的不是笔记。
+                // 给它一个"点了没反应"的按钮比不给按钮更坏
+                disabled={!判.可打开}
                 onClick={() => onOpen(l.rel, l.title)}
                 className={
                   "block w-full rounded-md border px-3 py-2 text-left text-sm transition-colors duration-(--dur-1) " +
-                  (l.broken
+                  (判.标红
                     ? "cursor-default border-danger bg-danger-soft"
                     : "border-line hover:bg-hover focus-visible:border-accent")
                 }
@@ -93,7 +99,15 @@ function LinkGroup({
                   {g.次数 > 1 ? (
                     <span className="shrink-0 font-mono text-xs text-fg-disabled">×{g.次数}</span>
                   ) : null}
-                  {l.broken ? <span className="shrink-0 text-xs text-danger">链空了</span> : null}
+                  {判.尾注 ? (
+                    <span
+                      className={
+                        "shrink-0 text-xs " + (判.标红 ? "text-danger" : "text-fg-disabled")
+                      }
+                    >
+                      {判.尾注}
+                    </span>
+                  ) : null}
                   {g.全到块 ? (
                     <span className="shrink-0 text-xs text-fg-disabled">到块</span>
                   ) : null}
@@ -104,9 +118,17 @@ function LinkGroup({
                     <span className="shrink-0 text-xs text-fg-disabled">待整理</span>
                   ) : null}
                 </span>
-                <span className="mt-0.5 block truncate text-xs text-fg-2">
-                  {l.broken ? `[[${l.target}]]` : l.snippet || l.rel}
-                </span>
+                {(() => {
+                  // 资产行的标题已经是那个路径了，再抄一遍就是两行一样的字
+                  const 副 = 判.是资产
+                    ? (l.rel === l.title ? "" : l.rel)
+                    : l.broken
+                      ? `[[${l.target}]]`
+                      : l.snippet || l.rel;
+                  return 副 ? (
+                    <span className="mt-0.5 block truncate text-xs text-fg-2">{副}</span>
+                  ) : null;
+                })()}
               </button>
             </li>
           );

@@ -27,6 +27,9 @@ const CHUNK_TARGET_CHARS: usize = 400;
 pub struct Index {
     conn: Connection,
     path: PathBuf,
+    /// 库根。链接解析要能查盘（资产链接的存在性按盘上事实判，docs/02 §资产引用格式），
+    /// 而索引层拿不到 `Vault`——只拿得到根路径，边界判据走 `vault::resolve_in` 那一份。
+    root: PathBuf,
 }
 
 static VEC_REGISTERED: std::sync::Once = std::sync::Once::new();
@@ -38,13 +41,13 @@ impl Index {
             path: dir.display().to_string(),
             source: e,
         })?;
-        Self::open_path(&dir.join("index.db"))
+        Self::open_path(&dir.join("index.db"), vault.root())
     }
 
     /// 第二条连接指向同一个库。后台索引拿它干活，读命令就不会排这把写锁
     /// （WAL 下读与写互不挡）。docs/03 §后端调用纪律 的"隐形预算"就是这么来的。
     pub fn fork(&self) -> Result<Self> {
-        Self::open_path(&self.path)
+        Self::open_path(&self.path, &self.root)
     }
 
     /// 一串写包进一个事务。rusqlite 的事务是**连接态**：`BEGIN` 之后这条连接上的
@@ -65,7 +68,7 @@ impl Index {
         }
     }
 
-    pub fn open_path(path: &Path) -> Result<Self> {
+    pub fn open_path(path: &Path, root: &Path) -> Result<Self> {
         VEC_REGISTERED.call_once(|| unsafe {
             // sqlite-vec 把入口点声明成无参无返回，而 SQLite 的 `auto_extension` 要的是
             // 三参 `xEntryPoint`（C ABI 下多传的参数被调用方忽略，所以转过去是安全的）。
@@ -96,6 +99,7 @@ impl Index {
         let me = Self {
             conn,
             path: path.to_path_buf(),
+            root: root.to_path_buf(),
         };
         me.ensure_schema()?;
         Ok(me)
@@ -192,7 +196,7 @@ impl Index {
                 }
             }
         }
-        let n = rebuild_links(&self.conn)?;
+        let n = rebuild_links(&self.conn, &self.root)?;
         tracing::info!("索引 schema v{from} → v{SCHEMA_VERSION}：重算链接图 {n} 条");
         Ok(())
     }
@@ -225,7 +229,43 @@ impl Index {
             let src = String::from_utf8_lossy(&vault.read(&f.rel)?).to_string();
             stats.merge(self.index_file(&f, &src)?);
         }
-        stats.links = rebuild_links(&self.conn)?;
+        // 附件登记表的重建：扫 `attachments/` 目录本身（docs/02 §资产引用格式）。
+        // 删掉 index.db 之后这张表今天真的能长回来了——这条是反链面板敢按"盘上有没有
+        // 这个文件"说话的前提，也是 AI 那档要用账本的前提。失败只记日志：这一张表
+        // 不影响任何显示（存在性直接查盘），把它算进重建的成败就是把派生数据当真相。
+        //
+        // `attachments` 不被 `notes` 的级联清掉（它没有外键），所以先**按盘上事实摘掉
+        // 已经不存在的那些行**：留着它们，下一次 `exists` 就会从一张写着"这有个人名文件"
+        // 的表里读到早已删掉的路径。仍存在的行原样保留——那一列 `orig_name` 记的是
+        // "第一次粘进来时它叫什么"，重建不该把它抹了。
+        let 还在: Vec<String> = {
+            let mut s = self.conn.prepare("SELECT path FROM attachments")?;
+            let 行 = s.query_map([], |r| r.get::<_, String>(0))?;
+            行.filter_map(|x| x.ok()).collect()
+        };
+        for 路 in 还在 {
+            let 在 = crate::vault::resolve_in(vault.root(), &路)
+                .map(|p| p.is_file())
+                .unwrap_or(false);
+            if !在 {
+                self.conn
+                    .execute("DELETE FROM attachments WHERE path=?1", [&路])?;
+            }
+        }
+        for a in crate::assets::scan(vault.root()) {
+            let 时候 = std::fs::metadata(vault.root().join(&a.rel))
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            if let Err(e) = crate::assets::register_at(&self.conn, &a, None, 时候) {
+                tracing::warn!("附件登记失败 {}：{e}（不影响显示，存在性按盘上判）", a.rel);
+            }
+        }
+        stats.links = rebuild_links(&self.conn, &self.root)?;
         stats.elapsed_ms = t0.elapsed().as_millis() as u64;
         Ok(stats)
     }
@@ -294,7 +334,7 @@ impl Index {
 
     /// 全量重解析链接图。删除/恢复会让别人的入链悬空，只有全量能把它退回 `broken=1`。
     pub fn rebuild_links(&self) -> Result<usize> {
-        rebuild_links(&self.conn)
+        rebuild_links(&self.conn, &self.root)
     }
 
     /// 把指向某篇笔记的入链标成悬空（而不是随 `notes` 行级联消失）。
@@ -409,6 +449,7 @@ impl Index {
             let to = find_target(&self.conn, &base)?;
             put_link(
                 &self.conn,
+                &self.root,
                 from,
                 target,
                 to.as_deref(),
@@ -902,6 +943,7 @@ fn link_lookup(conn: &Connection) -> Result<BTreeMap<String, String>> {
 /// UI 才标得出来并提示补上（docs/02 §块 ID）。
 fn insert_resolved(
     conn: &Connection,
+    root: &Path,
     lookup: &BTreeMap<String, String>,
     from_block: &str,
     target: &str,
@@ -911,6 +953,7 @@ fn insert_resolved(
     let base = target.split('#').next().unwrap_or(target).trim();
     put_link(
         conn,
+        root,
         from_block,
         target,
         lookup.get(base).map(String::as_str),
@@ -921,8 +964,13 @@ fn insert_resolved(
 
 /// 写一行解析结果。`to_note=None` 即悬空，此时 `target`（用户写下的那个 `[[…]]` 里的
 /// 原文）是界面上唯一还能显示的东西。
+///
+/// **资产链接（`kind='asset'` 且指不到任何笔记）是第三种事实**：它的目标本来就不是笔记，
+/// 所以 `to_note` 恒为 NULL，而"断没断"由盘上有没有那个文件判（`assets::exists`，唯一一份
+/// 判据）。不这么分就会写出今天这句谎：图就在 `attachments/` 里躺着，面板说"链空了"。
 fn put_link(
     conn: &Connection,
+    root: &Path,
     from_block: &str,
     target: &str,
     to_note: Option<&str>,
@@ -942,18 +990,17 @@ fn put_link(
         _ => None,
     };
     let anchor = anchor.as_deref();
-    match to_note {
-        Some(to) => conn.execute(
-            "INSERT INTO links(from_block,target,to_note,to_block,kind,provenance,broken)
-             VALUES(?1,?2,?3,?4,?5,'human',0)",
-            params![from_block, target, to, anchor, kind],
-        )?,
-        None => conn.execute(
-            "INSERT INTO links(from_block,target,to_note,to_block,kind,provenance,broken)
-             VALUES(?1,?2,NULL,?3,?4,'human',1)",
-            params![from_block, target, anchor, kind],
-        )?,
+    let 断链 = match to_note {
+        Some(_) => false,
+        // 这一份是**缓存**，读路径（`note_links`）会用同一个判据现算再覆盖它：
+        // 外部删附件不会惊动任何一篇 `.md`，只有现算才追得上盘上的事。
+        None => kind != "asset" || crate::assets::exists(root, conn, target).is_none(),
     };
+    conn.execute(
+        "INSERT INTO links(from_block,target,to_note,to_block,kind,provenance,broken)
+         VALUES(?1,?2,?3,?4,?5,'human',?6)",
+        params![from_block, target, to_note, anchor, kind, 断链 as i64],
+    )?;
     Ok(())
 }
 
@@ -995,7 +1042,7 @@ fn find_target(conn: &Connection, base: &str) -> Result<Option<String>> {
 }
 
 /// 全量解析链接图：把 `link_targets` 的原始写法映射到具体笔记。
-pub fn rebuild_links(conn: &Connection) -> Result<usize> {
+pub fn rebuild_links(conn: &Connection, root: &Path) -> Result<usize> {
     conn.execute("DELETE FROM links", [])?;
     let lookup = link_lookup(conn)?;
     let mut t = conn.prepare("SELECT from_block, target, to_block, kind FROM link_targets")?;
@@ -1013,7 +1060,15 @@ pub fn rebuild_links(conn: &Connection) -> Result<usize> {
         .collect();
     let mut n = 0usize;
     for (from_block, target, anchor, kind) in &targets {
-        insert_resolved(conn, &lookup, from_block, target, anchor.as_ref(), kind)?;
+        insert_resolved(
+            conn,
+            root,
+            &lookup,
+            from_block,
+            target,
+            anchor.as_ref(),
+            kind,
+        )?;
         n += 1;
     }
     Ok(n)
@@ -1405,6 +1460,11 @@ impl Index {
     /// - 悬空出链没有 `to_note`，此时 `target`（用户写下的原文）是唯一还能显示的信息，
     ///   所以 schema v3 把它抄进了 `links`。面板要说的正是"这篇链到了一个不存在的东西"。
     ///
+    /// **第四条：资产链接的存在性在这里现算**（`assets::exists`，docs/02 §资产引用格式）。
+    /// `links.broken` 里资产那一档是索引期算的缓存，只用来排序；屏幕上那句话以此刻的盘为准。
+    /// `to_note` 告诉前端这一行的对方是不是一篇笔记——`[[notes/乙.md]]` 的 `kind` 也是
+    /// `asset`（写法里有点），但它该能点开，而 `![[attachments/…]]` 不该。
+    ///
     /// 隐私位（`ai_private` / `no_ai`）**不过滤**：那条硬门管的是"别进 AI 上下文"
     /// （docs/04），而这是人自己在看自己的库。
     pub fn note_links(
@@ -1418,15 +1478,36 @@ impl Index {
         bool,
     )> {
         let 一行 = |r: &Row| {
+            let mut rel: String = r.get(0)?;
+            let mut title: String = r.get(1)?;
+            let mut broken = r.get::<_, i64>(7)? != 0;
+            let kind: String = r.get(5)?;
+            let target: String = r.get(6)?;
+            // **资产链接现算存在性**（docs/02 §资产引用格式 / docs/03 §反链面板）。
+            // 判据是 `assets::exists` 那一份，索引期写进 `links.broken` 的同一判据只是缓存：
+            // 外部删一个附件不会碰任何 `.md`（`watch::ignorable` 在攒批之前就把非 `.md` 挡了），
+            // 于是只有读路径现算才追得上盘上此刻的事。指得到笔记的（`[[notes/甲.md]]` 也会被
+            // 标成 asset，因为写法里有点）不重算——它的真值是那条笔记，不是盘上的文件名。
+            if rel.is_empty() && kind == "asset" {
+                match crate::assets::exists(&self.root, &self.conn, &target) {
+                    Some(文件) => {
+                        rel = 文件;
+                        title = target.clone();
+                        broken = false;
+                    }
+                    None => broken = true,
+                }
+            }
             Ok(crate::service::LinkRow {
-                rel: r.get(0)?,
-                title: r.get(1)?,
+                rel,
+                title,
                 status: r.get(2)?,
                 snippet: r.get(3)?,
                 to_block: r.get::<_, i64>(4)? != 0,
-                kind: r.get(5)?,
-                target: r.get(6)?,
-                broken: r.get::<_, i64>(7)? != 0,
+                to_note: r.get::<_, i64>(8)? != 0,
+                kind,
+                target,
+                broken,
             })
         };
         // 多取一条只为了知道"后面还有没有"：面板上那句「还有更多没列出」不能靠前端猜
@@ -1434,7 +1515,7 @@ impl Index {
         let 取 = limit + 1;
         let mut stmt = self.conn.prepare(
             "SELECT n.path, n.title, n.status, substr(b.text,1,140),
-                    (l.to_block IS NOT NULL), l.kind, l.target, 0
+                    (l.to_block IS NOT NULL), l.kind, l.target, 0, 1
              FROM links l
              JOIN blocks b ON b.id = l.from_block
              JOIN notes n ON n.id = b.note_id
@@ -1452,7 +1533,8 @@ impl Index {
         let mut stmt = self.conn.prepare(
             "SELECT COALESCE(n.path,''), COALESCE(n.title, l.target), COALESCE(n.status,'missing'),
                     substr(b.text,1,140),
-                    (l.to_block IS NOT NULL), l.kind, l.target, l.broken
+                    (l.to_block IS NOT NULL), l.kind, l.target, l.broken,
+                    (l.to_note IS NOT NULL)
              FROM links l
              JOIN blocks b ON b.id = l.from_block
              LEFT JOIN notes n ON n.id = l.to_note

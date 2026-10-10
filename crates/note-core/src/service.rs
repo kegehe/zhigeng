@@ -113,6 +113,10 @@ pub struct LinkRow {
     pub snippet: String,
     /// 这条链是不是指到某个具体块（`[[笔记#^b-xxx]]`），而不是整篇
     pub to_block: bool,
+    /// 对方是不是一篇笔记。资产行的 `rel` 装的是 `attachments/…` 的**文件路径**，
+    /// 不是笔记——面板要靠这一位决定"这一行能不能点开成一篇"。
+    /// 反过来 `[[notes/乙.md]]` 的 `kind` 也是 `asset`（写法里有点），但它当然是笔记。
+    pub to_note: bool,
     pub kind: String,
     /// 用户写下的原始写法。悬空时这是仅剩的信息
     pub target: String,

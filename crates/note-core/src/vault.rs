@@ -171,21 +171,7 @@ impl Vault {
     /// 前导 `/` 视为 **Vault 根相对**（docs/02 §资产引用格式 用的就是这个约定），
     /// 因此 `/attachments/x.png` 指向 Vault 内，而不是文件系统根。
     pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
-        let cleaned = rel.replace('\\', "/");
-        let cleaned = cleaned.trim_start_matches('/');
-        let mut out = self.root.clone();
-        for seg in cleaned.split('/') {
-            match seg {
-                "" | "." => continue,
-                ".." => return Err(Error::OutsideVault(rel.to_string())),
-                s if s.contains(':') => return Err(Error::OutsideVault(rel.to_string())),
-                s => out.push(s),
-            }
-        }
-        if out == self.root || !out.starts_with(&self.root) {
-            return Err(Error::OutsideVault(rel.to_string()));
-        }
-        Ok(out)
+        resolve_in(&self.root, rel)
     }
 
     /// 绝对路径 → Vault 内相对路径（正斜杠）。
@@ -548,6 +534,27 @@ pub fn is_indexable_rel(rel: &str) -> bool {
 /// 附件与资产：不产生 notes/blocks，但登记进 attachments 表。
 pub fn is_attachment_rel(rel: &str) -> bool {
     rel.replace('\\', "/").starts_with(ATTACHMENTS_DIR)
+}
+
+/// `Vault::resolve` 的自由函数形式：判据只有一份，而**资产链接的存在性判定只拿得到根路径**
+/// （`Index` 揣着 root，不揣着 Vault）。把它复制进 assets.rs 就是分叉的开始——分叉的
+/// 那一头是"用户可以写一行 `![[../../x]]`"，两个实现只要有一个松了口就漏出库目录。
+pub fn resolve_in(root: &Path, rel: &str) -> Result<PathBuf> {
+    let cleaned = rel.replace('\\', "/");
+    let cleaned = cleaned.trim_start_matches('/');
+    let mut out = root.to_path_buf();
+    for seg in cleaned.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => return Err(Error::OutsideVault(rel.to_string())),
+            s if s.contains(':') => return Err(Error::OutsideVault(rel.to_string())),
+            s => out.push(s),
+        }
+    }
+    if out == root || !out.starts_with(root) {
+        return Err(Error::OutsideVault(rel.to_string()));
+    }
+    Ok(out)
 }
 
 /// 目录推导状态。`archive/` 子树整体归档；`inbox/` 待整理；其余在用。

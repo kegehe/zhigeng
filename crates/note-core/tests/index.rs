@@ -63,7 +63,7 @@ fn 增量重建与全量重建逐表一致() {
         let src = String::from_utf8(v.read(&f.rel).unwrap()).unwrap();
         idx.index_file(&f, &src).unwrap();
     }
-    rebuild_links(idx.conn()).unwrap();
+    rebuild_links(idx.conn(), dir.path()).unwrap();
     let inc = idx.table_counts().unwrap();
     assert_eq!(full, inc, "增量与全量结果不一致");
     assert!(idx.orphan_counts().unwrap().is_clean());
@@ -400,6 +400,98 @@ fn 反链面板给出入链与出链且悬空那条带着原始写法() {
     assert!(!入[0].to_block, "对方链的是整篇");
     assert_eq!(出.len(), 1);
     assert!(出[0].to_block, "我链到对方的具体块");
+}
+
+/// 一张内容寻址的图落进 `attachments/`，返回库内相对路径。
+/// 字节随便写——这一档判的是"文件在不在"，不看内容（格式判定住在 `sniff`，粘贴那条路才用它）。
+fn 一张图(v: &Vault) -> String {
+    let 路 = format!("attachments/aa/{}.png", "a".repeat(64));
+    v.write_atomic(&路, b"\x89PNG\r\n\x1a\n").unwrap();
+    路
+}
+
+#[test]
+fn 资产链接在盘上_面板不说链空了() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let 图 = 一张图(&v);
+    v.write_atomic("notes/甲.md", format!("看图。\n\n![[{图}]]\n").as_bytes())
+        .unwrap();
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+
+    let (_, _, 出, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    assert_eq!(出.len(), 1, "{出:?}");
+    assert_eq!(出[0].kind, "asset");
+    assert!(!出[0].broken, "图就在盘上，面板不能说它空了");
+    assert_eq!(
+        出[0].rel, 图,
+        "对方是那个文件：同一张图的两种写法该归并进同一行"
+    );
+
+    // docs/03 欠的那条重建路径：删掉 index.db 之后 attachments 表要能自己长回来
+    let 数: i64 = idx
+        .conn()
+        .query_row("SELECT count(*) FROM attachments", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(数, 1, "重建全量时按 attachments/ 目录登记");
+}
+
+#[test]
+fn 附件被外部删掉_不重索引面板当场改口() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let 图 = 一张图(&v);
+    v.write_atomic("notes/甲.md", format!("看图。\n\n![[{图}]]\n").as_bytes())
+        .unwrap();
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+    let (_, _, 出, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    assert!(!出[0].broken);
+
+    // 资源管理器 / Obsidian / 同步盘把那张图删了。**中间不跑任何索引**：
+    // 外部删附件不会惊动任何一篇 `.md`，`watch::ignorable` 在攒批之前就把非 `.md` 挡了，
+    // 所以"面板追得上盘上"这件事只能由读路径现算来保证。
+    std::fs::remove_file(dir.path().join(&图)).unwrap();
+    let (_, _, 出, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    assert!(出[0].broken, "文件真没了才说没了");
+    assert_eq!(出[0].rel, "", "没有可打开的对方");
+    assert_eq!(出[0].target, 图, "原始写法是仅剩的信息");
+}
+
+#[test]
+fn 指得到笔记的带点写法不按盘上判() {
+    // `[[notes/乙.md]]` 会被 `link_kind` 标成 asset（写法里有点），但它的真值是那篇笔记：
+    // 要是也去按"文件名的后缀"猜，就会有一篇活得好好的笔记在面板上被叫成附件。
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic("notes/乙.md", "乙。\n".as_bytes()).unwrap();
+    v.write_atomic("notes/甲.md", "见 [[notes/乙.md]]。\n".as_bytes())
+        .unwrap();
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+    let (_, _, 出, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    assert_eq!(出[0].rel, "notes/乙.md");
+    assert!(!出[0].broken);
+}
+
+#[test]
+fn 真找不到的图还是说丢了() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic(
+        "notes/甲.md",
+        "看图。\n\n![[attachments/aa/不存在.png]]\n\n裸名 ![[也没有.png]]\n".as_bytes(),
+    )
+    .unwrap();
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+    let (_, _, 出, _) = idx.note_links("notes/甲.md", 50).unwrap();
+    assert_eq!(出.len(), 2, "{出:?}");
+    assert!(
+        出.iter().all(|l| l.broken),
+        "盘上没有就是丢了，两种写法都一样"
+    );
 }
 
 #[test]

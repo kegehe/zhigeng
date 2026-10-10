@@ -90,6 +90,8 @@ export type LinkRow = {
   snippet: string;
   /** 链的是具体块（`[[笔记#^b-xxx]]`）还是整篇 */
   toBlock: boolean;
+  /** 对方是不是一篇笔记。资产行的 `rel` 是 `attachments/…` 的文件路径，不是笔记路径 */
+  toNote: boolean;
   kind: string;
   /** 用户写下的原始写法。悬空时这是仅剩的信息 */
   target: string;
