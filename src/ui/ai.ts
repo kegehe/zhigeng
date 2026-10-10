@@ -14,6 +14,14 @@ export function 缺项(v: 齐): string[] {
 }
 
 /**
+ * 语义检索能不能走。**只看地址与嵌入模型**：对话模型是问答那一档的前提，
+ * 拿它去挡检索等于让一个用不上的格子决定另一件事能不能跑。
+ */
+export function 可检索(v: Pick<AiView, "baseUrl" | "embeddingModel">): boolean {
+  return !!v.baseUrl.trim() && !!v.embeddingModel.trim();
+}
+
+/**
  * 侧栏底部那枚入口的角标。`测过` 是这一次会话里连通测试的结论（null = 还没测）。
  *
  * 为什么"测过"不持久化：重启之后还挂着"已连通"，说的其实是上一次开机时的事实。

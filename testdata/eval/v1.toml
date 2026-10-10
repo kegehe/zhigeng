@@ -1,0 +1,83 @@
+# 评测集 v1（docs/04 §评测集）。跑法：`note eval <装了这份语料的库> --suite testdata/eval/v1.toml`
+# 语料在 testdata/eval/corpus/，路径清单在 corpus.list（有一条用例专门核对两者对得上）。
+# 负样本（expect_none）是必须有的：只量"找得回来"会鼓励硬答，而幻觉率 = 0 是 M2 的硬门。
+
+[[q]]
+q = "向量检索里合并两路用什么办法"
+expect_paths = ["notes/检索策略.md"]
+
+[[q]]
+q = "快照保留多少份"
+expect_paths = ["notes/备份纪律.md"]
+
+[[q]]
+q = "什么时候该打断用户"
+expect_paths = ["notes/打扰预算.md"]
+
+[[q]]
+q = "字节级往返为什么要覆盖改过一次之后"
+expect_paths = ["notes/块编辑器无损.md"]
+
+[[q]]
+q = "中文为什么要预分词"
+expect_paths = ["notes/中文分词.md"]
+
+[[q]]
+q = "反斜杠问号前缀什么时候加"
+expect_paths = ["notes/长路径.md"]
+
+[[q]]
+q = "API Key 存在哪里"
+expect_paths = ["notes/凭据存放.md"]
+
+[[q]]
+q = "窗口圆角为什么调试协议看不见"
+expect_paths = ["notes/窗口圆角.md"]
+
+[[q]]
+q = "表格里怎么跳格和加行"
+expect_paths = ["notes/表格网格.md"]
+
+[[q]]
+q = "代码块着色为什么要限视口"
+expect_paths = ["notes/代码块着色.md"]
+
+[[q]]
+q = "同一张图粘两次盘上有几份"
+expect_paths = ["notes/图片内容寻址.md"]
+
+[[q]]
+q = "恢复删掉的笔记走哪条路"
+expect_paths = ["notes/回收站.md"]
+
+[[q]]
+q = "导入会不会覆盖同名笔记"
+expect_paths = ["notes/导入避让.md"]
+
+[[q]]
+q = "监听器为什么每次保存都自己触发一轮"
+expect_paths = ["notes/监听收敛.md"]
+
+[[q]]
+q = "唯一副本为什么不算备份"
+expect_paths = ["notes/备份纪律.md"]
+
+[[q]]
+q = "红烧肉怎么炒糖色"
+expect_none = true
+
+[[q]]
+q = "深蹲一百公斤要练多久"
+expect_none = true
+
+[[q]]
+q = "航班改签手续费怎么算"
+expect_none = true
+
+[[q]]
+q = "洗牙能走医保报销吗"
+expect_none = true
+
+[[q]]
+q = "月季花后修剪留几个芽点"
+expect_none = true

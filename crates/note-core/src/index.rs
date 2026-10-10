@@ -472,9 +472,16 @@ impl Index {
     }
 
     /// 关键词检索：jieba 预分词后的 BM25。隐私过滤在这里（SQL 层）完成，不靠 prompt。
+    ///
+    /// **匹配式与召回共用一份**（`retrieve::匹配式`：各词 OR + 丢高频词）。分成两份的代价
+    /// 真机照出来过：同一次搜索里侧栏上面说"没有匹配的笔记"，下面的合并块说这一篇"两路都中"
+    /// ——因为一份是短语语义、一份是 OR 语义。
     pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<KeywordHit>> {
-        let seg = segment(query);
-        let match_expr = format!("\"{}\"", seg.replace('"', "\" \""));
+        let Some(match_expr) =
+            crate::retrieve::匹配式(&self.conn, "blocks_fts", "blocks", query)?
+        else {
+            return Ok(Vec::new());
+        };
         let mut stmt = self.conn.prepare(
             "SELECT b.id, b.note_id, substr(b.text,1,120), bm25(blocks_fts), n.path, n.title, b.type, n.status
              FROM blocks_fts f

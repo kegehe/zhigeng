@@ -1,9 +1,10 @@
-// 护栏：四件事必须在每次提交前成立（`node scripts/check.mjs` 把这一项接进去了）。
+// 护栏：五件事必须在每次提交前成立（`node scripts/check.mjs` 把这一项接进去了）。
 // 成本极低，但不做就会慢慢烂掉。
 // 1) 依赖方向：note-core / md-kernel / note-cli 不许链接 Tauri，md-kernel 不许链接 SQLite
 // 2) perf-budget.json 的键必须齐，且与 docs/03 §性能预算 对得上
 // 3) 样式禁止清单（docs/06 §4）：字面量颜色、裸 z-index、transition:all、去掉焦点环、联网取字体
 // 4) `[workspace.dependencies]` 里不许有"声明了没人引用"的依赖
+// 5) 带 `#[serde(rename_all)]` 的 DTO 字段名必须是 ASCII（derive 遇中文标识符会 panic）
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -169,8 +170,32 @@ for (const f of files) {
   }
 }
 
+// ---- 5) 带 `rename_all` 的 serde DTO 不许用中文字段名 ----
+// derive 会去切第一个字符找下划线，中文标识符直接 panic
+// （"end byte index 1 is not a char boundary"），而报错的行号只指着 derive 那一行。
+// 本仓库在三个不同的 struct 上踩了同一口坑，所以这条不再靠人记，交给护栏。
+const rustFiles = walk("crates").filter((f) => f.endsWith(".rs"));
+for (const f of rustFiles) {
+  const lines = readFileSync(f, "utf8").split("\n");
+  const norm = f.replace(/\\/g, "/");
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*#\[serde\(\s*rename_all/.test(lines[i])) continue;
+    for (let j = i + 1; j < Math.min(i + 40, lines.length); j++) {
+      if (/^\s*\}/.test(lines[j])) break;
+      const m = lines[j].match(/^\s*(?:pub\s+)?([^\s:]+)\s*:\s*/);
+      if (m && /[^\x00-\x7F]/.test(m[1])) {
+        fail.push(
+          `${norm}:${j + 1} 带 rename_all 的 DTO 用了非 ASCII 字段名「${m[1]}」——derive 会 panic，字段名走英文、注释留中文`,
+        );
+      }
+    }
+  }
+}
+
 if (fail.length) {
   console.error("护栏未通过：\n  " + fail.join("\n  "));
   process.exit(1);
 }
-console.log(`护栏通过：依赖方向 ✓ 预算键 ✓ 样式禁止清单 ✓（扫了 ${files.length} 个前端文件）`);
+console.log(
+  `护栏通过：依赖方向 ✓ 预算键 ✓ 样式禁止清单 ✓ serde 字段名 ✓（扫了 ${files.length} 个前端文件、${rustFiles.length} 个 Rust 文件）`,
+);

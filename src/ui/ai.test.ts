@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { 徽标, 徽标红, 缺项, 步骤名 } from "./ai";
+import { 可检索, 徽标, 徽标红, 缺项, 步骤名 } from "./ai";
 
 const 齐 = { baseUrl: "https://api.example.com/v1", chatModel: "gpt-x", embeddingModel: "emb-1" };
 
@@ -44,5 +44,17 @@ describe("AI 入口的角标", () => {
     expect(步骤名("chat")).toBe("对话模型");
     expect(步骤名("embeddings")).toBe("嵌入模型");
     expect(步骤名("config")).toBe("配置");
+  });
+});
+
+describe("语义那一路的门槛", () => {
+  it("只填了地址与嵌入模型就该允许检索", () => {
+    // 对话模型是问答那一档的前提。拿它去挡检索，等于一个用不上的格子决定另一件事能不能跑
+    expect(可检索({ baseUrl: "http://x/v1", embeddingModel: "e" })).toBe(true);
+  });
+
+  it("缺地址或缺嵌入模型就不打那一趟", () => {
+    expect(可检索({ baseUrl: "", embeddingModel: "e" })).toBe(false);
+    expect(可检索({ baseUrl: "http://x/v1", embeddingModel: "   " })).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import type {
   AssetOut,
   CapturedOut,
   EditDoc,
+  HybridResult,
   ImportEntry,
   ImportReport,
   ListNotes,
@@ -107,6 +108,11 @@ export const api = {
   aiSaveKey: (key: string) => invoke<AiView>("ai_save_key", { key }),
   /** 两个最小探针请求。发出去的是固定文本 "ping"，不含任何笔记内容 */
   aiTest: () => invoke<AiProbeReport>("ai_test"),
+  /**
+   * 混合检索（关键词 + 语义）。**含一次网络往返**，所以它是异步的补充结果：
+   * 侧栏那条关键词搜索照旧走 8ms 同步通路，这一路晚一点到就晚一点到。
+   */
+  searchHybrid: (query: string) => invoke<HybridResult>("search_hybrid", { query }),
 };
 
 /**

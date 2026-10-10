@@ -171,3 +171,23 @@ export type AiView = {
 export type AiStep = { stage: string; ok: boolean; ms: number; detail: string };
 
 export type AiProbeReport = { ok: boolean; steps: AiStep[] };
+
+/** 混合检索的一条命中。`from` 说的是这一条被哪几路捞上来——两路都中是最强的信号 */
+export type HybridHit = {
+  chunkId: number;
+  noteId: string;
+  path: string;
+  title: string;
+  headerPath: string;
+  snippet: string;
+  status: string;
+  from: ("keyword" | "semantic")[];
+  rrf: number;
+};
+
+export type HybridResult = {
+  hits: HybridHit[];
+  /** 语义那一路这次到底开没开。没开时 `hint` 会说要它做什么 */
+  semantic: boolean;
+  hint: string | null;
+};

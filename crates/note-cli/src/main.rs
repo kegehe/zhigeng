@@ -128,6 +128,15 @@ enum Cmd {
         #[command(subcommand)]
         命令: AiCmd,
     },
+    /// 跑评测集：recall@K 与"该空手却给了结果"的条数
+    Eval {
+        /// 装了评测语料的 Vault
+        path: PathBuf,
+        #[arg(long, default_value = "testdata/eval/v1.toml")]
+        suite: PathBuf,
+        #[arg(long, default_value_t = 8)]
+        k: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -139,6 +148,12 @@ enum AiCmd {
     },
     /// 看嵌了多少、还剩多少、多少永远不嵌
     Status,
+    /// 混合检索（关键词 + 语义）。**会打一次网络**把查询本身嵌成向量
+    Search {
+        query: String,
+        #[arg(short, long, default_value_t = 10)]
+        limit: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -179,6 +194,7 @@ fn main() -> Result<()> {
         Cmd::Capture { path, text, bench } => cmd_capture(&path, text.as_deref(), bench),
         Cmd::WriteBench { notes, iters } => cmd_write_bench(notes, iters),
         Cmd::WriteProfile { notes } => cmd_write_profile(notes),
+        Cmd::Eval { path, suite, k } => cmd_eval(path, suite, k),
         Cmd::Ai { path, 命令 } => cmd_ai(path, 命令),
         Cmd::EditDoc { file } => {
             let src = std::fs::read_to_string(&file)?;
@@ -416,6 +432,85 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                     );
                 }
             }
+        }
+        AiCmd::Search { query, limit } => {
+            let 中 = note_core::retrieve::混合(&vault, idx.conn(), &query)?;
+            if 中.is_empty() {
+                println!("没有命中：{query}");
+                return Ok(());
+            }
+            for (i, h) in 中.iter().take(limit).enumerate() {
+                let 来源: Vec<&str> = h
+                    .from
+                    .iter()
+                    .map(|r| match r {
+                        note_core::retrieve::路::Keyword => "关键词",
+                        note_core::retrieve::路::Semantic => "语义",
+                    })
+                    .collect();
+                println!(
+                    "{:>3}. {:>7.4} [{}] {}  {}",
+                    i + 1,
+                    h.rrf,
+                    来源.join("+"),
+                    h.path,
+                    h.snippet.replace('\n', " ")
+                );
+            }
+            println!(
+                "{} 条命中（关键词 + 语义两路合并，单篇最多 4 块）",
+                中.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 跑评测集。**语义那一路开没开要印在第一行旁边**：没配模型时这个数只反映关键词，
+/// 拿它当"AI 检索达标了"是假的（docs/04 §评测集 要的是 recall@8 ≥ 0.85 与幻觉率 = 0）。
+fn cmd_eval(path: PathBuf, suite: PathBuf, k: usize) -> Result<()> {
+    let 文本 =
+        std::fs::read_to_string(&suite).with_context(|| format!("读评测集 {}", suite.display()))?;
+    let 套 = note_core::retrieve::读套件(&文本)?;
+    let vault = Vault::open(&path)?;
+    let idx = note_core::index::Index::open(&vault)?;
+    let 成 = note_core::retrieve::评测(&vault, idx.conn(), &套, k)?;
+    println!(
+        "评测集 {} 条（正 {} / 负 {}），K={}；语义那一路：{}",
+        成.entries,
+        成.positives,
+        成.negatives,
+        成.k,
+        if 成.semantic {
+            "开"
+        } else {
+            "关（没配模型或没嵌过 → 这个数只反映关键词）"
+        }
+    );
+    println!(
+        "recall@{} = {:.1}%（{}/{}）",
+        成.k,
+        成.recall_at_k * 100.0,
+        成.hits,
+        成.positives
+    );
+    if 成.misses.is_empty() {
+        println!("没有漏。");
+    } else {
+        println!("漏掉 {} 条：", 成.misses.len());
+        for m in &成.misses {
+            println!("  - {m}");
+        }
+    }
+    if 成.negatives_with_candidates.is_empty() {
+        println!("负样本全部空手。");
+    } else {
+        println!(
+            "负样本里有 {} 条进了候选——召回层给候选是本职，判\"答不答\"是答案层的分数阈值：",
+            成.negatives_with_candidates.len()
+        );
+        for x in &成.negatives_with_candidates {
+            println!("  - {x}");
         }
     }
     Ok(())

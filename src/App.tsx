@@ -12,7 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
-import { 徽标, 徽标红, 缺项, 步骤名 } from "./ui/ai";
+import { 徽标, 徽标红, 可检索, 缺项, 步骤名 } from "./ui/ai";
 import {
   buildTree,
   dirsOf,
@@ -33,6 +33,8 @@ import type {
   ImportEntry,
   AiProbeReport,
   AiView,
+  HybridHit,
+  HybridResult,
   ImportReport,
   LinkPanel,
   ListNotes,
@@ -160,6 +162,15 @@ export function App() {
   const [aiReport, setAiReport] = useState<AiProbeReport | null>(null);
   const [aiBusy, setAiBusy] = useState<"save" | "key" | "test" | null>(null);
   const [ai测过, setAi测过] = useState<boolean | null>(null);
+  /**
+   * 语义那一路的结果。它**永远比关键词晚到**（含一次网络往返），所以单独一块，
+   * 不混进那张按 BM25 排的命中表——混进去会让人以为两批东西是同一把尺子量出来的。
+   * `ai就绪` 只判地址 + 嵌入模型：对话模型是问答那一档的前提，不该挡检索。
+   */
+  const [sem, setSem] = useState<HybridResult | null>(null);
+  const [semErr, setSemErr] = useState<string | null>(null);
+  const [semBusy, setSemBusy] = useState(false);
+  const [ai就绪, setAi就绪] = useState(false);
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
@@ -179,6 +190,12 @@ export function App() {
       setNotes(null);
       return;
     }
+    // AI 那一路的开关只问一次：读的是本地配置与凭据管理器，不在打字路径上。
+    // 没配就别让搜索框每次敲字都去打一趟注定失败的请求
+    api
+      .aiView()
+      .then((v) => setAi就绪(可检索(v)))
+      .catch(() => setAi就绪(false));
     try {
       setNotes(await api.listNotes(300));
       setError(null);
@@ -294,6 +311,42 @@ export function App() {
       api.searchKeyword(query, 30).then(setHits).catch((e) => setError(String(e)));
     }, 300);
   }, [query]);
+
+  /** 晚到的响应要认自己问的是哪句：不认就会把上一次查询的语义结果贴在当前查询下面 */
+  const 问的是 = useRef(query);
+  问的是.current = query;
+
+  /**
+   * 语义那一路：比关键词再晚一档（700ms），因为它含一次网络往返，而且它只是补充——
+   * 用户真正在等的永远是先出来的那批。没配模型就不打这一趟（`ai就绪` 在开库时问一次）。
+   */
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 1 || !inTauri() || !ai就绪) {
+      setSem(null);
+      setSemErr(null);
+      setSemBusy(false);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      setSemBusy(true);
+      api
+        .searchHybrid(q)
+        .then((r) => {
+          if (问的是.current.trim() !== q) return;
+          setSem(r);
+          setSemErr(null);
+          setSemBusy(false);
+        })
+        .catch((e) => {
+          if (问的是.current.trim() !== q) return;
+          setSem(null);
+          setSemErr(describeError(e).message);
+          setSemBusy(false);
+        });
+    }, 700);
+    return () => window.clearTimeout(t);
+  }, [query, ai就绪]);
 
   // 提示是过路信息，不该赖在界面上
   useEffect(() => {
@@ -1179,6 +1232,80 @@ export function App() {
                       </button>
                     );
                   })}
+              {/*
+                语义那一路。三条口径：
+                1. **单独一块，不混进上面那张表**——上面是 BM25 名次，这里是 RRF 名次，
+                   混排会让人以为一把尺子量出来的；
+                2. **按篇去重**：一个切片命中就把整篇列一次，同篇再来一个切片不占第二行；
+                3. 失败说失败、没开说没开。没配模型时这一整块不出现（`ai就绪` 挡在前面），
+                   而"配了但连不上"要把错误原文摆出来——那是"试过了"，不是"没这功能"。
+              */}
+              {searching && ai就绪 ? (
+                <div className="mt-2 border-t border-line pt-1.5">
+                  <div className="flex items-baseline justify-between px-3">
+                    <span className="text-xs text-fg-2">语义补充</span>
+                    <span className="text-xs text-fg-disabled">
+                      {semErr
+                        ? "这一路失败"
+                        : semBusy
+                          ? "问模型中…"
+                          : sem
+                            ? sem.semantic
+                              ? "关键词 + 语义"
+                              : "只有关键词"
+                            : ""}
+                    </span>
+                  </div>
+                  {semErr ? (
+                    <div className="px-3 py-1 text-xs text-danger">{semErr}</div>
+                  ) : null}
+                  {sem && !semErr
+                    ? (() => {
+                        const 新篇: HybridHit[] = [];
+                        const 见 = new Set(rows.map((r) => r.rel));
+                        for (const h of sem.hits) {
+                          if (见.has(h.path)) continue;
+                          见.add(h.path);
+                          新篇.push(h);
+                        }
+                        if (!新篇.length) {
+                          return (
+                            <div className="px-3 py-1 text-xs text-fg-disabled">
+                              {sem.hits.length
+                                ? "没有关键词之外的篇。"
+                                : "这一路没给出任何候选。"}
+                            </div>
+                          );
+                        }
+                        return 新篇.slice(0, 5).map((h) => (
+                          <button
+                            key={h.chunkId}
+                            onClick={() => void openNote(h.path, h.title)}
+                            className="block w-full px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover"
+                          >
+                            <span className="flex items-baseline gap-2">
+                              <span className="min-w-0 flex-1 truncate">{h.title}</span>
+                              <span className="shrink-0 text-xs text-fg-disabled">
+                                {h.from.length > 1
+                                  ? "两路都中"
+                                  : h.from[0] === "semantic"
+                                    ? "语义"
+                                    : "关键词"}
+                              </span>
+                            </span>
+                            <span className="block truncate text-xs text-fg-2">
+                              {h.headerPath ? h.headerPath + " › " : ""}
+                              {h.snippet}
+                            </span>
+                          </button>
+                        ));
+                      })()
+                    : null}
+                  {sem?.hint ? (
+                    <div className="px-3 py-1 text-xs text-fg-disabled">{sem.hint}</div>
+                  ) : null}
+                </div>
+              ) : null}
               {/* 侧栏只吃 listNotes(300)。不说的话，目录树上那个篇数就是在少报——
                   树把"少了多少"藏进了某个折叠目录，比平铺列表更需要这句提示 */}
               {!searching && notes?.truncated ? (
