@@ -550,6 +550,11 @@ impl Hub {
         Ok(hits.into_iter().map(Into::into).collect())
     }
 
+    /// 审计页：最近的生成记录（含失败的）。纯读，走主连接。
+    pub fn ai_runs(&self, limit: i64) -> Result<Vec<crate::answer::运行>> {
+        crate::answer::最近运行(self.index.conn(), limit)
+    }
+
     /// 反链面板：一篇的入链与出链。纯读命令，走主连接（GUI 里那条只读），
     /// 预算与 `read_note` 同档——它只查 `links_to_idx` 与本篇的块，代价与库的规模无关。
     pub fn note_links(&self, rel: &str, limit: usize) -> Result<LinkPanel> {

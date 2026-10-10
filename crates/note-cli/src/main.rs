@@ -154,6 +154,13 @@ enum AiCmd {
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
     },
+    /// 带引用的问答。**会打模型**；库里没有依据时一次都不打
+    Ask { query: String },
+    /// 最近的生成记录（含失败的）：引用了哪几块、多少 token、有没有重试过
+    Runs {
+        #[arg(short, long, default_value_t = 10)]
+        limit: i64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -416,6 +423,62 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                 "还剩 {} 个待嵌；{} 个因隐私位或视图身份永不嵌。中途失败就再跑一次，已嵌的不会重来。",
                 报.pending, 报.excluded
             );
+        }
+        AiCmd::Ask { query } => {
+            let 答 = note_core::answer::ask(&vault, idx.conn(), &query)?;
+            println!(
+                "模型 {}｜候选 {}｜in {} / out {} tokens｜{}ms{}",
+                答.model,
+                答.candidates,
+                答.in_tokens,
+                答.out_tokens,
+                答.ms,
+                if 答.retried {
+                    "｜引用违规后重生成过一次"
+                } else {
+                    ""
+                }
+            );
+            println!("\n{}\n", 答.text);
+            if 答.citations.is_empty() {
+                println!(
+                    "{}",
+                    if 答.insufficient {
+                        "没有可采信的引用（依据不足）。"
+                    } else {
+                        "回答里没带编号引用。"
+                    }
+                );
+            } else {
+                println!("引用：");
+                for c in &答.citations {
+                    println!(
+                        "  [{}] {}  ← {}",
+                        c.label,
+                        c.path,
+                        c.snippet.replace('\n', " ")
+                    );
+                }
+            }
+        }
+        AiCmd::Runs { limit } => {
+            let 行 = note_core::answer::最近运行(idx.conn(), limit)?;
+            if 行.is_empty() {
+                println!("还没有生成记录。");
+                return Ok(());
+            }
+            for r in 行 {
+                println!(
+                    "{}  {}  {}  in {} / out {}  引用 {} 个{}",
+                    r.id,
+                    if r.ok { "采纳  " } else { "未采纳" },
+                    r.model,
+                    r.in_tokens,
+                    r.out_tokens,
+                    r.cited.len(),
+                    if r.retried { "（重试过）" } else { "" }
+                );
+            }
         }
         AiCmd::Status => {
             let 模型 = note_core::ai::load(&vault)?

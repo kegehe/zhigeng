@@ -32,7 +32,9 @@ import type {
   EditDoc,
   ImportEntry,
   AiProbeReport,
+  AiRun,
   AiView,
+  Answer,
   HybridHit,
   HybridResult,
   ImportReport,
@@ -52,7 +54,16 @@ import { 读主题, 套主题, 写主题, 盯主题变化, type Theme } from "./
  * 所以"打开即可编辑"不多花一次解析、也不多一次挂载。"看一篇会不会写坏文件"这件事
  * 交给 `dirty` 判据守（没改过就不落盘），不再靠一个模式开关。
  */
-type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup" | "import" | "ai";
+type Mode =
+  "view"
+  | "inline"
+  | "source"
+  | "rename"
+  | "trash"
+  | "backup"
+  | "import"
+  | "ai"
+  | "ask";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
 
@@ -171,6 +182,11 @@ export function App() {
   const [semErr, setSemErr] = useState<string | null>(null);
   const [semBusy, setSemBusy] = useState(false);
   const [ai就绪, setAi就绪] = useState(false);
+  /** 问答面板：一次一问，答案连同"这次采信了哪几块"一起摆在原地 */
+  const [问, set问] = useState("");
+  const [答, set答] = useState<Answer | null>(null);
+  const [问busy, set问busy] = useState(false);
+  const [runs, setRuns] = useState<AiRun[]>([]);
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
@@ -194,7 +210,11 @@ export function App() {
     // 没配就别让搜索框每次敲字都去打一趟注定失败的请求
     api
       .aiView()
-      .then((v) => setAi就绪(可检索(v)))
+      .then((v) => {
+        setAi就绪(可检索(v));
+        setAiView(v);
+        setAiForm({ baseUrl: v.baseUrl, chatModel: v.chatModel, embeddingModel: v.embeddingModel });
+      })
       .catch(() => setAi就绪(false));
     try {
       setNotes(await api.listNotes(300));
@@ -959,6 +979,33 @@ export function App() {
     setAiForm({ baseUrl: v.baseUrl, chatModel: v.chatModel, embeddingModel: v.embeddingModel });
   };
 
+  const openAsk = async () => {
+    setMode("ask");
+    try {
+      const [v, 录] = await Promise.all([api.aiView(), api.aiRuns(8)]);
+      setAiView(v);
+      setAiForm({ baseUrl: v.baseUrl, chatModel: v.chatModel, embeddingModel: v.embeddingModel });
+      setRuns(录);
+    } catch (e) {
+      setError(describeError(e).message);
+    }
+  };
+
+  const ai问 = async () => {
+    const q = 问.trim();
+    if (!q) return;
+    set问busy(true);
+    set答(null);
+    try {
+      set答(await api.aiAsk(q));
+      setRuns(await api.aiRuns(8));
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      set问busy(false);
+    }
+  };
+
   const openAi = async () => {
     setMode("ai");
     try {
@@ -1019,6 +1066,7 @@ export function App() {
       { id: "a-import", group: "动作", label: "导入外部 Markdown", run: () => void openImport() },
       { id: "a-backup", group: "动作", label: "打开备份面板", run: () => void openBackup() },
       { id: "a-ai", group: "动作", label: "接入模型（AI 设置）", run: () => void openAi() },
+      { id: "a-ask", group: "动作", label: "问 AI（带引用）", run: () => void openAsk() },
       { id: "a-t1", group: "动作", label: "主题：跟随系统", run: () => setTheme("system") },
       { id: "a-t2", group: "动作", label: "主题：亮色", run: () => setTheme("light") },
       { id: "a-t3", group: "动作", label: "主题：暗色", run: () => setTheme("dark") },
@@ -1352,6 +1400,12 @@ export function App() {
                   </span>
                 ) : null}
               </button>
+              <button
+                className={btn + (mode === "ask" ? " bg-active" : "")}
+                onClick={() => void (mode === "ask" ? backToNote() : openAsk())}
+              >
+                问答
+              </button>
             </div>
           </aside>
 
@@ -1659,8 +1713,116 @@ export function App() {
                   </div>
                 ) : null}
                 <p className="mt-8 max-w-2xl text-sm text-fg-2">
-                  这一档只到"接上了"。带引用的问答、整理建议是下一档的活——配好之后先别找"问 AI"
-                  的入口，它还没长出来。
+                  配好之后左下角「问答」那一格就能问了（<span className="font-mono text-mono">Ctrl+K</span>{" "}
+                  里也有）。整理建议、自动打标还没做——那是 M3 的活。
+                </p>
+              </div>
+            ) : mode === "ask" ? (
+              <div className="px-6 py-8">
+                <h2 className="text-xl text-fg">问 AI</h2>
+                <p className="mt-2 max-w-2xl text-sm text-fg-2">
+                  答案只从检索出来的片段里组装：<span className="text-fg">模型引用了没给过的编号，
+                  这一条就不采信</span>；库里找不到依据时一次模型都不打，直接说没有。
+                  送出去的是片段摘录，不是整篇笔记；隐私位与视图根本不进候选。
+                </p>
+                <div className="mt-4 flex max-w-2xl gap-2">
+                  <input
+                    className="min-w-0 flex-1 rounded-md border border-line bg-base px-3 py-1.5 text-fg"
+                    value={问}
+                    placeholder="比如：备份为什么要放到第二个目录？"
+                    onChange={(e) => set问(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !问busy) void ai问();
+                    }}
+                  />
+                  <button
+                    className={btnPrimary}
+                    disabled={问busy || !问.trim() || !(aiView?.chatModel ?? "").trim()}
+                    onClick={() => void ai问()}
+                  >
+                    {问busy ? "生成中…" : "问"}
+                  </button>
+                </div>
+                {!(aiView?.chatModel ?? "").trim() ? (
+                  <p className="mt-2 text-xs text-fg-disabled">
+                    没填对话模型名，问不了。左下角「AI」那一格里填上——
+                    检索那一路不受它影响。
+                  </p>
+                ) : null}
+                {答 ? (
+                  <div
+                    className={
+                      "mt-5 max-w-2xl rounded-md border px-4 py-3 " +
+                      (答.insufficient ? "border-danger bg-danger-soft" : "border-line bg-raised")
+                    }
+                  >
+                    <div className="font-mono text-xs text-fg-disabled">
+                      {答.model}｜候选 {答.candidates}｜in {答.inTokens} / out {答.outTokens}
+                      {"｜"}
+                      {答.ms}ms
+                      {答.retried ? "｜引用违规后重生成过一次" : ""}
+                    </div>
+                    <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{答.text}</p>
+                    {答.citations.length ? (
+                      <div className="mt-3 flex flex-col gap-1">
+                        <span className="text-xs text-fg-2">
+                          采信的依据 {答.citations.length} 条
+                        </span>
+                        {答.citations.map((c) => (
+                          <button
+                            key={c.label}
+                            onClick={() => void openNote(c.path, c.title)}
+                            className="block rounded-md border border-line px-2.5 py-1.5 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover focus-visible:border-accent"
+                          >
+                            <span className="flex items-baseline gap-2">
+                              <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                                {c.label}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-fg">{c.crumb}</span>
+                            </span>
+                            <span className="mt-0.5 block truncate text-xs text-fg-2">
+                              {c.snippet}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs text-fg-disabled">
+                        {答.insufficient ? "没有可采信的引用。" : "回答里没带片段编号。"}
+                      </p>
+                    )}
+                  </div>
+                ) : null}
+                <h3 className="mt-8 text-sm text-fg-2">
+                  最近的生成
+                  <span className="ml-1.5 font-mono text-xs text-fg-disabled">{runs.length}</span>
+                </h3>
+                <div className="mt-2 flex max-w-2xl flex-col gap-1">
+                  {runs.length === 0 ? (
+                    <div className="text-sm text-fg-disabled">还没有记录。</div>
+                  ) : null}
+                  {runs.map((r) => (
+                    <div
+                      key={r.id}
+                      className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1.5 text-xs"
+                    >
+                      <span className={r.ok ? "text-fg" : "text-danger"}>
+                        {r.ok ? "采纳" : "未采纳"}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
+                        {r.model}｜引用 {r.cited.length}/{r.candidates}
+                        {r.retried ? "｜重试过" : ""}
+                        {r.semantic ? "" : "｜只有关键词"}
+                      </span>
+                      <span className="shrink-0 font-mono text-fg-disabled">
+                        {r.inTokens + r.outTokens} tok · {new Date(r.createdAt).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-6 max-w-2xl text-xs text-fg-disabled">
+                  审计记的是这个库问过什么、引用了哪几块、多少 token——失败与未采纳的那几次也在。
+                  token 数按回包原样记，对方不给就记 0，不猜。
                 </p>
               </div>
             ) : mode === "trash" ? (

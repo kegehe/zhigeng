@@ -717,6 +717,83 @@ async fn ai_test(state: State<'_, Shared>) -> Result<note_core::ai::Report, Writ
     .map_err(中断)?
 }
 
+/// 混合检索。**必然含一次网络往返**（把查询本身嵌成向量），所以它是 async 命令而不是
+/// 同步那一批——界面那条关键词搜索仍然走 8ms 的同步通路，这一路晚一点到就晚一点到。
+#[tauri::command]
+async fn search_hybrid(
+    state: State<'_, Shared>,
+    query: String,
+) -> Result<note_core::retrieve::检索结果, String> {
+    let vault = {
+        let guard = state.0.lock().map_err(|e| e.to_string())?;
+        guard
+            .as_ref()
+            .ok_or_else(|| "尚未选择 Vault".to_string())?
+            .vault()
+            .clone()
+    };
+    let 派生 = {
+        let guard = state.0.lock().map_err(|e| e.to_string())?;
+        guard
+            .as_ref()
+            .ok_or_else(|| "尚未选择 Vault".to_string())?
+            .indexer()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        // **分叉一条专用连接再干活**：这一趟里有一次网络往返，握着主锁或后台那条锁
+        // 打它，就是 docs/03 §后端调用纪律 里"保存后读命令等 3.26 秒"的同一种病。
+        // 开一条 SQLite 连接是毫秒级，摊在往返旁边不算成本。
+        let 专 = {
+            let 写锁 = 派生.lock().map_err(|e| e.to_string())?;
+            写锁.fork().map_err(|e| e.to_string())?
+        };
+        note_core::retrieve::混合或退回(&vault, 专.conn(), &query).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 带引用的问答。**可能两次网络往返**（引用违规会重生成一次），所以同样在锁外、
+/// 用一条分叉出来的连接干活；答案落 `ai_runs` 由 note-core 那一侧负责。
+#[tauri::command]
+async fn ai_ask(
+    state: State<'_, Shared>,
+    query: String,
+) -> Result<note_core::answer::答复, WriteErr> {
+    let (vault, 派生) = {
+        let guard = state.0.lock().map_err(werr_io)?;
+        let hub = guard.as_ref().ok_or_else(|| WriteErr {
+            kind: "error",
+            message: "尚未选择 Vault".into(),
+        })?;
+        (hub.vault().clone(), hub.indexer())
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let 专 = {
+            let 写锁 = 派生.lock().map_err(|_| WriteErr {
+                kind: "error",
+                message: "索引那条连接被毒化，问不了".into(),
+            })?;
+            写锁.fork().map_err(werr)?
+        };
+        note_core::answer::ask(&vault, 专.conn(), &query).map_err(werr)
+    })
+    .await
+    .map_err(|e| WriteErr {
+        kind: "error",
+        message: e.to_string(),
+    })?
+}
+
+/// 审计页：最近的生成记录（含未采纳的那几次）。
+#[tauri::command]
+fn ai_runs(
+    state: State<'_, Shared>,
+    limit: Option<i64>,
+) -> Result<Vec<note_core::answer::运行>, String> {
+    with_hub(&state, |h| h.ai_runs(limit.unwrap_or(20)))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -783,7 +860,10 @@ pub fn run() {
             ai_view,
             ai_save_config,
             ai_save_key,
-            ai_test
+            ai_test,
+            search_hybrid,
+            ai_ask,
+            ai_runs
         ])
         .setup(|app| {
             let handle = app.handle().clone();

@@ -191,3 +191,42 @@ export type HybridResult = {
   semantic: boolean;
   hint: string | null;
 };
+
+/** 一条可点击的引用。label 是给模型看的编号，path 才是能打开的东西 */
+export type Citation = {
+  label: string;
+  blockId: string;
+  path: string;
+  title: string;
+  crumb: string;
+  snippet: string;
+};
+
+/** 一次问答的结果。`insufficient` 为真时 `citations` 一定为空 */
+export type Answer = {
+  text: string;
+  citations: Citation[];
+  insufficient: boolean;
+  retried: boolean;
+  candidates: number;
+  inTokens: number;
+  outTokens: number;
+  ms: number;
+  model: string;
+};
+
+/** 审计页的一行（含未采纳的那几次） */
+export type AiRun = {
+  id: string;
+  model: string;
+  ok: boolean;
+  error: string | null;
+  inTokens: number;
+  outTokens: number;
+  durationMs: number;
+  cited: string[];
+  retried: boolean;
+  semantic: boolean;
+  candidates: number;
+  createdAt: number;
+};

@@ -5,6 +5,8 @@ import type {
   CapturedOut,
   EditDoc,
   HybridResult,
+  AiRun,
+  Answer,
   ImportEntry,
   ImportReport,
   ListNotes,
@@ -113,6 +115,13 @@ export const api = {
    * 侧栏那条关键词搜索照旧走 8ms 同步通路，这一路晚一点到就晚一点到。
    */
   searchHybrid: (query: string) => invoke<HybridResult>("search_hybrid", { query }),
+  /**
+   * 带引用的问答。**可能两次网络往返**（引用了没给过的编号会重生成一次），
+   * 库里没有依据时一次都不打。答案同时落 `ai_runs`。
+   */
+  aiAsk: (query: string) => invoke<Answer>("ai_ask", { query }),
+  /** 审计：最近的生成记录，含未采纳的那几次 */
+  aiRuns: (limit = 20) => invoke<AiRun[]>("ai_runs", { limit }),
 };
 
 /**

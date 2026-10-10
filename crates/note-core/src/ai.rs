@@ -518,6 +518,84 @@ pub fn embed(cfg: &AiConfig, 文本: &[String]) -> Result<Vec<Vec<f32>>> {
     Ok(出)
 }
 
+/// 一次 API 调用收发的大致量。`usage` 没回时记 0——**记 0 比猜一个数诚实**。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct 用量 {
+    pub in_tokens: usize,
+    pub out_tokens: usize,
+}
+
+/// 打一次 `<base>/chat/completions`。**只发系统提示 + 组装好的上下文**，
+/// 上下文里装的是检索出来的片段摘录（不是整篇笔记），所以送出去的量是可控的。
+pub fn chat(cfg: &AiConfig, 系统: &str, 内容: &str) -> Result<(String, 用量)> {
+    let base = 端点(cfg.base_url.as_deref().unwrap_or("")).map_err(Error::Invalid)?;
+    let 模型 = cfg
+        .chat_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Invalid("没填对话模型名".into()))?;
+    let url = format!("{base}/chat/completions");
+    let 客 = 客户端().map_err(|e| Error::Invalid(format!("建不出 HTTP 客户端：{e}")))?;
+    let 请 = 客.post(&url).json(&serde_json::json!({
+        "model": 模型,
+        "messages": [
+            { "role": "system", "content": 系统 },
+            { "role": "user", "content": 内容 },
+        ],
+    }));
+    let 请 = match 钥() {
+        Some(k) => 请.header("authorization", format!("Bearer {k}")),
+        None => 请,
+    };
+    let 答 = 请
+        .send()
+        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}")))?;
+    let 状 = 答.status();
+    let 文 = 答.text().unwrap_or_default();
+    if !状.is_success() {
+        return Err(Error::Invalid(format!(
+            "问答请求 HTTP {}：{}{}",
+            状.as_u16(),
+            原文截(&文),
+            if 建议补_v1(状.as_u16(), &base) {
+                "｜这个地址末尾可能要加 /v1"
+            } else {
+                ""
+            }
+        )));
+    }
+    let 解: serde_json::Value = serde_json::from_str(&文)
+        .map_err(|e| Error::Invalid(format!("问答回包不是 JSON（{e}）：{}", 原文截(&文))))?;
+    let 文本 = 解
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .map(str::trim)
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "问答回包里没有 choices[0].message.content：{}",
+                原文截(&文)
+            ))
+        })?;
+    let 量 = 解.get("usage");
+    Ok((
+        文本.to_string(),
+        用量 {
+            in_tokens: 量
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as usize,
+            out_tokens: 量
+                .and_then(|u| u.get("completion_tokens"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as usize,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

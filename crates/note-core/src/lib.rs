@@ -4,6 +4,7 @@
 //! 依赖方向：`src-tauri` / `note-cli` / `note-mcp` → `note-core` → `md-kernel`。
 
 pub mod ai;
+pub mod answer;
 pub mod assets;
 pub mod capture;
 pub mod config;
