@@ -7,6 +7,7 @@ pub mod ai;
 pub mod assets;
 pub mod capture;
 pub mod config;
+pub mod embed;
 pub mod hash;
 pub mod import;
 pub mod index;

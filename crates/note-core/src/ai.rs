@@ -263,11 +263,7 @@ pub fn probe(cfg: &AiConfig) -> Report {
             return 报;
         }
     };
-    let 客 = match reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-    {
+    let 客 = match 客户端() {
         Ok(c) => c,
         Err(e) => {
             报.收(Step {
@@ -279,9 +275,7 @@ pub fn probe(cfg: &AiConfig) -> Report {
             return 报;
         }
     };
-    let 钥 = 条目于(CRED_SERVICE, CRED_USER)
-        .ok()
-        .and_then(|条| 条.get_password().ok());
+    let 钥 = 钥();
     if 钥.is_none() {
         // 不带 Key 也照打：本地 Ollama 就是这么活的。这一句要出现在两步的详情里，
         // 否则"401 未授权"会被误读成"应用坏了"。
@@ -413,6 +407,115 @@ fn 打(
             detail: format!("回的不是 JSON（{e}）：{}{尾}", 原文截(&文)),
         },
     }
+}
+
+/// 超时口径：连接 5 秒、总 20 秒。嵌一整批也在 20 秒里——超了就报错，不悄悄加大超时，
+/// 因为"卡住不动"比"失败并说清"更难查。
+fn 客户端() -> std::result::Result<reqwest::blocking::Client, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+}
+
+fn 钥() -> Option<String> {
+    条目于(CRED_SERVICE, CRED_USER)
+        .ok()
+        .and_then(|条| 条.get_password().ok())
+}
+
+/// 打一次 `<base>/embeddings`。**回包按 `data[i].index` 排回去**：顺序错了就是把 A 段的
+/// 向量安到 B 段头上，而它在检索里只表现为"结果有点不对"，几乎不可能被归因到这一步。
+/// 缺条、重号、维度不齐一律报错——**半批落库比这批不嵌更坏**。
+pub fn embed(cfg: &AiConfig, 文本: &[String]) -> Result<Vec<Vec<f32>>> {
+    if 文本.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base = 端点(cfg.base_url.as_deref().unwrap_or("")).map_err(Error::Invalid)?;
+    let 模型 = cfg
+        .embedding_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Invalid("没填嵌入模型名，没法嵌".into()))?;
+    let url = format!("{base}/embeddings");
+    let 客 = 客户端().map_err(|e| Error::Invalid(format!("建不出 HTTP 客户端：{e}")))?;
+    let 请 = 客
+        .post(&url)
+        .json(&serde_json::json!({ "model": 模型, "input": 文本 }));
+    let 请 = match 钥() {
+        Some(k) => 请.header("authorization", format!("Bearer {k}")),
+        None => 请,
+    };
+    let 答 = 请
+        .send()
+        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}")))?;
+    let 状 = 答.status();
+    let 文 = 答.text().unwrap_or_default();
+    if !状.is_success() {
+        return Err(Error::Invalid(format!(
+            "嵌入请求 HTTP {}：{}{}",
+            状.as_u16(),
+            原文截(&文),
+            if 建议补_v1(状.as_u16(), &base) {
+                "｜这个地址末尾可能要加 /v1"
+            } else {
+                ""
+            }
+        )));
+    }
+    let 解: serde_json::Value = serde_json::from_str(&文)
+        .map_err(|e| Error::Invalid(format!("嵌入回包不是 JSON（{e}）：{}", 原文截(&文))))?;
+    let 项 = 解
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| Error::Invalid(format!("嵌入回包里没有 data 数组：{}", 原文截(&文))))?;
+    let mut 槽: Vec<Option<Vec<f32>>> = vec![None; 文本.len()];
+    for (顺, 条) in 项.iter().enumerate() {
+        let 序 = 条
+            .get("index")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(顺 as u64) as usize;
+        let Some(序) = (序 < 槽.len()).then_some(序) else {
+            return Err(Error::Invalid(format!(
+                "嵌入回包给了 index={序}，这批只有 {} 段文本——顺序不可信，整批不落库",
+                文本.len()
+            )));
+        };
+        let Some(v) = 条.get("embedding").and_then(|e| e.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_f64().map(|f| f as f32))
+                .collect::<Vec<f32>>()
+        }) else {
+            return Err(Error::Invalid(format!(
+                "嵌入回包第 {序} 条没有 embedding 数组：{}",
+                原文截(&文)
+            )));
+        };
+        if v.is_empty() {
+            return Err(Error::Invalid(format!("嵌入回包第 {序} 条是空向量")));
+        }
+        if 槽[序].is_some() {
+            return Err(Error::Invalid(format!(
+                "嵌入回包里 index={序} 出现了两次，整批不落库"
+            )));
+        }
+        槽[序] = Some(v);
+    }
+    let 出: Vec<Vec<f32>> = 槽.into_iter().collect::<Option<Vec<_>>>().ok_or_else(|| {
+        Error::Invalid(format!(
+            "嵌入回包缺条数：要 {} 条，只给了 {} 条",
+            文本.len(),
+            项.len()
+        ))
+    })?;
+    let 维 = 出[0].len();
+    if 出.iter().any(|v| v.len() != 维) {
+        return Err(Error::Invalid(
+            "同一批里向量维度不一致，这张表装不下".into(),
+        ));
+    }
+    Ok(出)
 }
 
 #[cfg(test)]

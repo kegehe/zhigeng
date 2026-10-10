@@ -34,6 +34,24 @@ pub struct Index {
 
 static VEC_REGISTERED: std::sync::Once = std::sync::Once::new();
 
+/// 注册 sqlite-vec。`open_path` 在建任何连接之前调它，测试里拿裸 `Connection` 也要先调
+/// （ADR-003：静态注册，全仓库禁止 `load_extension`）。
+pub fn 注册向量扩展() {
+    VEC_REGISTERED.call_once(|| unsafe {
+        // sqlite-vec 把入口点声明成无参无返回，而 SQLite 的 `auto_extension` 要的是
+        // 三参 `xEntryPoint`（C ABI 下多传的参数被调用方忽略，所以转过去是安全的）。
+        // 类型写全而不是裸 `transmute`：让编译器替我们盯住这个不匹配的签名。
+        type VecInit = unsafe extern "C" fn(
+            *mut rusqlite::ffi::sqlite3,
+            *mut *mut std::ffi::c_char,
+            *const rusqlite::ffi::sqlite3_api_routines,
+        ) -> std::ffi::c_int;
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<*const (), VecInit>(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    });
+}
+
 impl Index {
     pub fn open(vault: &Vault) -> Result<Self> {
         let dir = vault.meta_dir();
@@ -69,19 +87,7 @@ impl Index {
     }
 
     pub fn open_path(path: &Path, root: &Path) -> Result<Self> {
-        VEC_REGISTERED.call_once(|| unsafe {
-            // sqlite-vec 把入口点声明成无参无返回，而 SQLite 的 `auto_extension` 要的是
-            // 三参 `xEntryPoint`（C ABI 下多传的参数被调用方忽略，所以转过去是安全的）。
-            // 类型写全而不是裸 `transmute`：让编译器替我们盯住这个不匹配的签名。
-            type VecInit = unsafe extern "C" fn(
-                *mut rusqlite::ffi::sqlite3,
-                *mut *mut std::ffi::c_char,
-                *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> std::ffi::c_int;
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<*const (), VecInit>(
-                sqlite_vec::sqlite3_vec_init as *const (),
-            )));
-        });
+        注册向量扩展();
         let conn = Connection::open(path).map_err(|e| Error::Io {
             path: path.display().to_string(),
             source: std::io::Error::other(e),

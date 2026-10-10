@@ -65,7 +65,7 @@ Notion 的 zip 导入（MD/Obsidian 已可做）、导出、任何 AI 调用（M
 
 ```bash
 pnpm install
-node scripts/check.mjs          # 一条命令跑完所有门禁（159 项 Rust 测试 + clippy + tsc + 315 项 vitest + 护栏）
+node scripts/check.mjs          # 一条命令跑完所有门禁（169 项 Rust 测试 + clippy + tsc + 315 项 vitest + 护栏）
 node scripts/check.mjs --bench  # 再加性能门禁：ipc-bench / write-bench，超 8ms 即非零退出
 pnpm build                      # 前端类型检查 + 打包
 ```
@@ -197,7 +197,7 @@ scripts/        check.mjs：一条命令跑完所有门禁 · guard.mjs：护栏
 |---|---|---|
 | **M0** | 地基：块模型、索引与重建器、CLI、壳 | 完成，但欠四笔：安装器从没跑过（`bundle.active: false`）、`note-mcp` crate 不存在、**没有 CI**（没有远端，所以 workflow 文件是安慰剂；现在是一条命令 `node scripts/check.mjs` 加一个可选的 `scripts/hooks/pre-push`）、Spike B（Obsidian 真机互操作）与崩溃强杀一致性测试未做 |
 | **M1** | 能记能查（**全程无需 API Key**） | 进行中：捕获、编辑器（**打开即可编辑** + 气泡工具栏 + `/` 块菜单）、搜索、回收站、**每日快照备份**、**导入外部 Markdown**、**外部改动自动刷新**、**标签与属性入库**、**侧栏目录树**、**反链面板**、**命令面板**已好；标签/属性的**界面**（数据已经在库里）、导出待做 |
-| **M2** | 记忆层：混合检索 + 强制引用问答 + 评测集 | **已开工（2026-10-10）**：AI 档 0 —— 设置里能填 OpenAI 兼容端点与模型名，Key 进 Windows 凭据管理器，一键连通测试（真机四态验过）。检索底座本来就有（`chunks` + FTS5），缺的是向量、问答、审计与评测集 |
+| **M2** | 记忆层：混合检索 + 强制引用问答 + 评测集 | **已开工（2026-10-10）**：AI 档 0 —— 设置里能填 OpenAI 兼容端点与模型名，Key 进 Windows 凭据管理器，一键连通测试（真机四态验过）。检索底座本来就有（`chunks` + FTS5）。**档 1a 已落（2026-10-10）：嵌入落库**——`note ai embed` 把切片送去嵌进 `vec_<模型>` 表，隐私笔记在源头就不进待嵌清单（真机取证过），**这一档没有界面**，下一档做混合检索才看得见结果。缺的是：召回合并与 rerank、问答、审计与评测集 |
 | **M3** | 组织层：建议箱、自动整理、动态视图、图谱 | 未开始 |
 | **M4** | 主动层：定时整理、周期回顾、关联推送（差异化重心） | 未开始 |
 | **M5** | 生成层 + Agent + MCP Server 暴露 | 未开始 |

@@ -122,6 +122,23 @@ enum Cmd {
         #[arg(long)]
         check_canonical: bool,
     },
+    /// 模型接入：嵌入落库与进度（问答、建议箱还没做）
+    Ai {
+        path: PathBuf,
+        #[command(subcommand)]
+        命令: AiCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiCmd {
+    /// 把没嵌过的切片送去嵌入。隐私笔记与视图**不参与**；`--limit` 先试一小批
+    Embed {
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// 看嵌了多少、还剩多少、多少永远不嵌
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -162,6 +179,7 @@ fn main() -> Result<()> {
         Cmd::Capture { path, text, bench } => cmd_capture(&path, text.as_deref(), bench),
         Cmd::WriteBench { notes, iters } => cmd_write_bench(notes, iters),
         Cmd::WriteProfile { notes } => cmd_write_profile(notes),
+        Cmd::Ai { path, 命令 } => cmd_ai(path, 命令),
         Cmd::EditDoc { file } => {
             let src = std::fs::read_to_string(&file)?;
             println!(
@@ -361,6 +379,45 @@ fn cmd_search(path: PathBuf, query: &str, limit: usize) -> Result<()> {
         );
     }
     println!("{} 条命中", hits.len());
+    Ok(())
+}
+
+/// 嵌入落库与进度。**这一步会真的把切片文本发给云端 API**，所以：
+/// - 隐私位（`ai_private` / `no_ai`）与视图文件在 SQL 层就被排除，压根不进待嵌清单；
+/// - 没填嵌入模型名就直接报错，不猜一个默认值去烧 token。
+fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
+    use note_core::embed;
+    let vault = Vault::open(&path)?;
+    let idx = note_core::index::Index::open(&vault)?;
+    match 命令 {
+        AiCmd::Embed { limit } => {
+            let 报 = embed::补齐(&vault, idx.conn(), limit)?;
+            println!(
+                "模型 {}：这一轮嵌了 {} 个切片（{} 批），表 {}",
+                报.model, 报.embedded, 报.batches, 报.table
+            );
+            println!(
+                "还剩 {} 个待嵌；{} 个因隐私位或视图身份永不嵌。中途失败就再跑一次，已嵌的不会重来。",
+                报.pending, 报.excluded
+            );
+        }
+        AiCmd::Status => {
+            let 模型 = note_core::ai::load(&vault)?
+                .embedding_model
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty());
+            match 模型 {
+                None => println!("没填嵌入模型名（设置里那一格），所以没有向量表"),
+                Some(m) => {
+                    let 进 = embed::进度of(idx.conn(), &m)?;
+                    println!(
+                        "模型 {m} → 表 {}：已嵌 {}，待嵌 {}，不收（隐私位/视图）{}",
+                        进.table, 进.embedded, 进.pending, 进.excluded
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 
