@@ -156,3 +156,18 @@ export type CommandName =
   | "vault_default_path"
   | "vault_open"
   | "search_keyword";
+
+/** AI 档 0 的视图。**没有 key 字段**——明文 Key 不进 WebView（docs/03 §后端调用纪律） */
+export type AiView = {
+  baseUrl: string;
+  chatModel: string;
+  embeddingModel: string;
+  keySet: boolean;
+  /** 形如 `…ab12（32 位）`，只用来认出"是哪把 Key" */
+  keyHint: string | null;
+};
+
+/** 连通测试的一步。stage 是 "chat" / "embeddings" / "config" */
+export type AiStep = { stage: string; ok: boolean; ms: number; detail: string };
+
+export type AiProbeReport = { ok: boolean; steps: AiStep[] };

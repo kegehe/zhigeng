@@ -635,6 +635,88 @@ fn backup_restore(
     Ok(hash)
 }
 
+/// AI 档 0 的三条命令。共同点：**锁里只拿 `Vault` 句柄**，读文件、问凭据管理器、
+/// 打网络全在锁外做。`ai_test` 那一趟是几百毫秒到 20 秒的网络往返，
+/// 握着主锁做它等于把整个应用冻在那儿——与 docs/03 §后端调用纪律 里那个 3.26 秒同一种形状。
+fn vault_of(state: &State<'_, Shared>) -> Result<Vault, WriteErr> {
+    let guard = state.0.lock().map_err(werr_io)?;
+    let hub = guard.as_ref().ok_or_else(|| WriteErr {
+        kind: "error",
+        message: "尚未选择 Vault".into(),
+    })?;
+    Ok(hub.vault().clone())
+}
+
+fn 中断(e: impl std::fmt::Display) -> WriteErr {
+    WriteErr {
+        kind: "error",
+        message: format!("后台任务被中断：{e}"),
+    }
+}
+
+#[tauri::command]
+async fn ai_view(state: State<'_, Shared>) -> Result<note_core::ai::AiView, WriteErr> {
+    let vault = vault_of(&state)?;
+    tauri::async_runtime::spawn_blocking(move || note_core::ai::view(&vault).map_err(werr))
+        .await
+        .map_err(中断)?
+}
+
+/// 存配置。**空串就是"清空这一项"**（前端不需要另一条删除命令——两条命令管同一件事，
+/// 早晚一条改了另一条没改）。地址的校验在 `ai::端点`，这里不重复判。
+#[tauri::command]
+async fn ai_save_config(
+    state: State<'_, Shared>,
+    base_url: String,
+    chat_model: String,
+    embedding_model: String,
+) -> Result<note_core::ai::AiView, WriteErr> {
+    let vault = vault_of(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        note_core::ai::save(
+            &vault,
+            &note_core::ai::AiConfig {
+                base_url: Some(base_url),
+                chat_model: Some(chat_model),
+                embedding_model: Some(embedding_model),
+            },
+        )
+        .map_err(werr)?;
+        note_core::ai::view(&vault).map_err(werr)
+    })
+    .await
+    .map_err(中断)?
+}
+
+/// 存 / 清 Key（空串 = 删）。**返回的是视图，不是 Key 本身**——把明文带回 WebView
+/// 等于把 docs/03 §后端调用纪律 里"API Key 不进 WebView"那条从后门拆掉。
+#[tauri::command]
+async fn ai_save_key(
+    state: State<'_, Shared>,
+    key: String,
+) -> Result<note_core::ai::AiView, WriteErr> {
+    let vault = vault_of(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        note_core::ai::set_key(&key).map_err(werr)?;
+        note_core::ai::view(&vault).map_err(werr)
+    })
+    .await
+    .map_err(中断)?
+}
+
+/// 连通测试：两个最小探针请求（chat + embeddings）。**探针文本是固定的 `ping`，
+/// 不含任何笔记内容**——这句话要出现在界面上，本地优先的产品里用户真会问。
+#[tauri::command]
+async fn ai_test(state: State<'_, Shared>) -> Result<note_core::ai::Report, WriteErr> {
+    let vault = vault_of(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = note_core::ai::load(&vault).map_err(werr)?;
+        Ok(note_core::ai::probe(&cfg))
+    })
+    .await
+    .map_err(中断)?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -697,7 +779,11 @@ pub fn run() {
             backup_history,
             backup_restore,
             import_preview,
-            import_apply
+            import_apply,
+            ai_view,
+            ai_save_config,
+            ai_save_key,
+            ai_test
         ])
         .setup(|app| {
             let handle = app.handle().clone();

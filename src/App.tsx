@@ -12,6 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
+import { 徽标, 徽标红, 缺项, 步骤名 } from "./ui/ai";
 import {
   buildTree,
   dirsOf,
@@ -30,6 +31,8 @@ import type {
   AppInfo,
   EditDoc,
   ImportEntry,
+  AiProbeReport,
+  AiView,
   ImportReport,
   LinkPanel,
   ListNotes,
@@ -47,7 +50,7 @@ import { 读主题, 套主题, 写主题, 盯主题变化, type Theme } from "./
  * 所以"打开即可编辑"不多花一次解析、也不多一次挂载。"看一篇会不会写坏文件"这件事
  * 交给 `dirty` 判据守（没改过就不落盘），不再靠一个模式开关。
  */
-type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup" | "import";
+type Mode = "view" | "inline" | "source" | "rename" | "trash" | "backup" | "import" | "ai";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
 
@@ -146,6 +149,17 @@ export function App() {
   const [importPlan, setImportPlan] = useState<ImportEntry[] | null>(null);
   const [importResult, setImportResult] = useState<ImportReport | null>(null);
   const [importBusy, setImportBusy] = useState(false);
+  /**
+   * AI 设置面板。`aiView` 是后端给的视图（**里面没有 Key**）；`aiKey` 只是这一次按"存"
+   * 要发出去的那串字，存完立刻清空——界面上永不回显明文。
+   * `ai测过` 刻意不持久化：重启之后还挂着"已连通"，说的是上次开机时的事实。
+   */
+  const [aiView, setAiView] = useState<AiView | null>(null);
+  const [aiForm, setAiForm] = useState({ baseUrl: "", chatModel: "", embeddingModel: "" });
+  const [aiKey, setAiKey] = useState("");
+  const [aiReport, setAiReport] = useState<AiProbeReport | null>(null);
+  const [aiBusy, setAiBusy] = useState<"save" | "key" | "test" | null>(null);
+  const [ai测过, setAi测过] = useState<boolean | null>(null);
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
@@ -887,12 +901,71 @@ export function App() {
     window.addEventListener("keydown", on键);
     return () => window.removeEventListener("keydown", on键);
   }, [palette]);
+  const 填回 = (v: AiView) => {
+    setAiView(v);
+    setAiForm({ baseUrl: v.baseUrl, chatModel: v.chatModel, embeddingModel: v.embeddingModel });
+  };
+
+  const openAi = async () => {
+    setMode("ai");
+    try {
+      填回(await api.aiView());
+    } catch (e) {
+      setError(describeError(e).message);
+    }
+  };
+
+  /** 保存三格。探针读的是**盘上那份配置**，所以"测试连通"之前得先保存 */
+  const ai保存 = async () => {
+    setAiBusy("save");
+    try {
+      填回(await api.aiSaveConfig(aiForm.baseUrl, aiForm.chatModel, aiForm.embeddingModel));
+      setAiReport(null);
+      setAi测过(null);
+      setFlash("配置已存进这个库的 .note/config.toml");
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setAiBusy(null);
+    }
+  };
+
+  const ai存Key = async () => {
+    setAiBusy("key");
+    try {
+      const 是存 = aiKey.trim().length > 0;
+      填回(await api.aiSaveKey(aiKey));
+      setAiKey("");
+      setAiReport(null);
+      setAi测过(null);
+      setFlash(是存 ? "Key 已存进 Windows 凭据管理器" : "Key 已删掉");
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setAiBusy(null);
+    }
+  };
+
+  const ai测试 = async () => {
+    setAiBusy("test");
+    try {
+      const 报 = await api.aiTest();
+      setAiReport(报);
+      setAi测过(报.ok);
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setAiBusy(null);
+    }
+  };
+
   const 面板项 = (): PaletteItem[] => {
     const 动作: PaletteItem[] = [
       { id: "a-refresh", group: "动作", label: "重新读取索引与列表", run: () => void refresh() },
       { id: "a-trash", group: "动作", label: "打开回收站", run: () => void openTrash() },
       { id: "a-import", group: "动作", label: "导入外部 Markdown", run: () => void openImport() },
       { id: "a-backup", group: "动作", label: "打开备份面板", run: () => void openBackup() },
+      { id: "a-ai", group: "动作", label: "接入模型（AI 设置）", run: () => void openAi() },
       { id: "a-t1", group: "动作", label: "主题：跟随系统", run: () => setTheme("system") },
       { id: "a-t2", group: "动作", label: "主题：亮色", run: () => setTheme("light") },
       { id: "a-t3", group: "动作", label: "主题：暗色", run: () => setTheme("dark") },
@@ -1138,6 +1211,20 @@ export function App() {
                   <span className="ml-1 text-danger">· 没开</span>
                 ) : null}
               </button>
+              {/* AI 那一档的入口。角标只说"配齐没有 + 这次测过没有"，不吹成"能用了" */}
+              <button
+                className={btn + (mode === "ai" ? " bg-active" : "")}
+                onClick={() => void (mode === "ai" ? backToNote() : openAi())}
+              >
+                AI
+                {aiView && 徽标(aiForm, ai测过) ? (
+                  <span
+                    className={"ml-1 " + (徽标红(ai测过) ? "text-danger" : "text-fg-disabled")}
+                  >
+                    · {徽标(aiForm, ai测过)}
+                  </span>
+                ) : null}
+              </button>
             </div>
           </aside>
 
@@ -1322,6 +1409,132 @@ export function App() {
                     </div>
                   ))}
                 </div>
+              </div>
+            ) : mode === "ai" ? (
+              <div className="px-6 py-8">
+                <h2 className="text-xl text-fg">接入模型</h2>
+                <p className="mt-2 text-sm text-fg-2">
+                  填一个 <span className="font-mono text-mono">OpenAI 兼容</span>{" "}
+                  端点就行：OpenAI、DeepSeek、Kimi、通义，或本机的 Ollama（
+                  <span className="font-mono text-mono">http://localhost:11434/v1</span>
+                  ）都走这一套。地址一般填到 <span className="font-mono text-mono">/v1</span>{" "}
+                  为止。
+                </p>
+                <p className="mt-2 text-sm text-fg-2">
+                  <span className="text-fg">Key 存在 Windows 凭据管理器里</span>
+                  ：不落盘、不进这个库、也不回到界面脚本里，所以下面只显示末 4 位。换一台电脑要重输一次
+                  Key，笔记本身跟着库走。
+                </p>
+                <div className="mt-5 flex max-w-2xl flex-col gap-3">
+                  {(
+                    [
+                      ["接口地址 base_url", "baseUrl", "https://api.openai.com/v1"],
+                      ["对话模型 chat_model", "chatModel", "gpt-4o-mini"],
+                      ["嵌入模型 embedding_model", "embeddingModel", "text-embedding-3-small"],
+                    ] as const
+                  ).map(([标签, 键, 占位]) => (
+                    <label key={键} className="flex flex-col gap-1">
+                      <span className="text-xs text-fg-2">{标签}</span>
+                      <input
+                        className="rounded-md border border-line bg-base px-3 py-1.5 font-mono text-mono text-fg"
+                        value={aiForm[键]}
+                        spellCheck={false}
+                        placeholder={占位}
+                        onChange={(e) => setAiForm({ ...aiForm, [键]: e.target.value })}
+                      />
+                    </label>
+                  ))}
+                  <label className="mt-1 flex flex-col gap-1">
+                    <span className="text-xs text-fg-2">
+                      API Key
+                      {aiView?.keyHint ? (
+                        <span className="ml-2 font-mono text-mono text-fg-disabled">
+                          现在：{aiView.keyHint}
+                        </span>
+                      ) : (
+                        <span className="ml-2 text-fg-disabled">
+                          没填（本地模型不需要；云端多半会回 401）
+                        </span>
+                      )}
+                    </span>
+                    <div className="flex gap-2">
+                      <input
+                        className="min-w-0 flex-1 rounded-md border border-line bg-base px-3 py-1.5 font-mono text-mono text-fg"
+                        value={aiKey}
+                        type="password"
+                        spellCheck={false}
+                        placeholder={aiView?.keySet ? "留空并按「存 Key」= 删掉这把" : "sk-…"}
+                        onChange={(e) => setAiKey(e.target.value)}
+                      />
+                      <button
+                        className={btn}
+                        disabled={aiBusy !== null || !aiKey.trim()}
+                        onClick={() => void ai存Key()}
+                      >
+                        存 Key
+                      </button>
+                    </div>
+                  </label>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      className={btnPrimary}
+                      disabled={aiBusy !== null}
+                      onClick={() => void ai保存()}
+                    >
+                      {aiBusy === "save" ? "保存中…" : "保存配置"}
+                    </button>
+                    <button
+                      className={btn}
+                      disabled={aiBusy !== null || 缺项(aiForm).length > 0}
+                      onClick={() => void ai测试()}
+                    >
+                      {aiBusy === "test" ? "测试中…" : "测试连通"}
+                    </button>
+                    {缺项(aiForm).length > 0 ? (
+                      <span className="text-xs text-fg-disabled">
+                        还差：{缺项(aiForm).join(" / ")}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+                {aiReport ? (
+                  <div className="mt-7 flex max-w-2xl flex-col gap-1">
+                    <h3 className="text-sm text-fg-2">
+                      测试结果
+                      <span
+                        className={
+                          "ml-2 text-xs " + (aiReport.ok ? "text-ok" : "text-danger")
+                        }
+                      >
+                        {aiReport.ok ? "两个探针都通了" : "有一步不通"}
+                      </span>
+                    </h3>
+                    {aiReport.steps.map((r, i) => (
+                      <div
+                        key={i}
+                        className={
+                          "rounded-md border px-3 py-2 text-sm " +
+                          (r.ok ? "border-line" : "border-danger bg-danger-soft")
+                        }
+                      >
+                        <span className="text-fg">{步骤名(r.stage)}</span>
+                        <span className="ml-2 font-mono text-xs text-fg-disabled">
+                          {r.ms}ms
+                        </span>
+                        <div className="mt-0.5 break-words text-xs text-fg-2">{r.detail}</div>
+                      </div>
+                    ))}
+                    <p className="mt-1 text-xs text-fg-disabled">
+                      测试只发两个最小请求，内容是一段固定文本{" "}
+                      <span className="font-mono text-mono">ping</span>
+                      ，不会把任何笔记内容发出去。
+                    </p>
+                  </div>
+                ) : null}
+                <p className="mt-8 max-w-2xl text-sm text-fg-2">
+                  这一档只到"接上了"。带引用的问答、整理建议是下一档的活——配好之后先别找"问 AI"
+                  的入口，它还没长出来。
+                </p>
               </div>
             ) : mode === "trash" ? (
               <div className="px-6 py-8">

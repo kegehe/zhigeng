@@ -11,6 +11,8 @@ import type {
   NoteSource,
   SiblingOrder,
   SnapshotRow,
+  AiProbeReport,
+  AiView,
   TrashRow,
 } from "./types";
 
@@ -89,6 +91,22 @@ export const api = {
   /** 导入：预览只算计划，apply 才写盘并逐篇索引（走第二条连接，不挡读） */
   importPreview: (src: string) => invoke<ImportEntry[]>("import_preview", { src }),
   importApply: (src: string) => invoke<ImportReport>("import_apply", { src }),
+  /**
+   * AI 档 0。**三条命令都返回同一份视图 `AiView`，里面没有 Key**——明文一旦回到 WebView
+   * 就再也收不回来（任意页面脚本可读），所以界面上只能显示末 4 位（docs/03 §后端调用纪律）。
+   */
+  aiView: () => invoke<AiView>("ai_view"),
+  /**
+   * 参数名走 camelCase：Tauri 的 derive 把 Rust 侧的 `base_url` 认成 JS 侧的 `baseUrl`，
+   * 传下划线会直接报 `missing required key baseUrl`（真机照出来的，不是猜的）。
+   * 空串 = 清空这一项。地址与模型名的裁剪、`/` 收尾都在 Rust 侧一份判据里做。
+   */
+  aiSaveConfig: (baseUrl: string, chatModel: string, embeddingModel: string) =>
+    invoke<AiView>("ai_save_config", { baseUrl, chatModel, embeddingModel }),
+  /** 空串 = 删掉这把 Key */
+  aiSaveKey: (key: string) => invoke<AiView>("ai_save_key", { key }),
+  /** 两个最小探针请求。发出去的是固定文本 "ping"，不含任何笔记内容 */
+  aiTest: () => invoke<AiProbeReport>("ai_test"),
 };
 
 /**

@@ -3,8 +3,10 @@
 //! 只有本 crate 可以碰磁盘与 SQLite（docs/03 §后端 = 本地服务层）。
 //! 依赖方向：`src-tauri` / `note-cli` / `note-mcp` → `note-core` → `md-kernel`。
 
+pub mod ai;
 pub mod assets;
 pub mod capture;
+pub mod config;
 pub mod hash;
 pub mod import;
 pub mod index;

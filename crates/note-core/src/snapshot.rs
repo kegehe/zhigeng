@@ -36,11 +36,11 @@ pub const KEEP: usize = 30;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupConfig {
     /// 第二个目录（另一块盘 / NAS 挂载点）。绝对路径，按用户输入原样存。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<String>,
     /// 用户在首启里显式选了"我不备份"。与"还没引导过"必须可区分：
     /// 前者不再骚扰，后者每次启动都该提醒。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
 }
 
@@ -74,69 +74,25 @@ impl Snapshot {
     }
 }
 
-fn config_file(vault: &Vault) -> PathBuf {
-    vault.meta_dir().join("config.toml")
-}
-
 /// 读 `[backup]`。文件不存在或没有这一段都返回默认值（未引导）。
+///
+/// 段级读写本身在 `crate::config`——那个文件是全应用共享的配置面，
+/// "读整篇、只换自己那一段、写回"这条纪律只能有一份实现。
 pub fn load_config(vault: &Vault) -> Result<BackupConfig> {
-    let path = config_file(vault);
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(BackupConfig::default());
-    };
-    // 用 `toml::from_str` 而不是 `text.parse::<Value>()`：后者解析的是单个值而不是整篇
-    // 文档，带 `[表]` 头的正常配置会被判成坏档——于是每次写都把已有内容当空的丢掉。
-    let table: toml::Value = toml::from_str::<toml::Value>(&text).map_err(|e| Error::Io {
-        path: path.display().to_string(),
-        source: std::io::Error::other(e.to_string()),
-    })?;
-    let backup = table
-        .get("backup")
-        .cloned()
-        .unwrap_or(toml::Value::Table(Default::default()));
-    let cfg: BackupConfig = backup.try_into().map_err(|e| Error::Io {
-        path: path.display().to_string(),
-        source: std::io::Error::other(e.to_string()),
-    })?;
-    Ok(cfg)
+    Ok(crate::config::read段(vault, "backup")?.unwrap_or_default())
 }
 
-/// 写 `[backup]`，**其余键原样保留**。config.toml 是全应用共享的配置面，
-/// 快照这一侧不能因为重写就把别人将来写的键抹掉。
+/// 写 `[backup]`，**其余段原样保留**。
 pub fn save_config(vault: &Vault, cfg: &BackupConfig) -> Result<()> {
-    let path = config_file(vault);
-    let mut table = match fs::read_to_string(&path) {
-        Ok(text) => toml::from_str::<toml::Value>(&text)
-            .unwrap_or_else(|_| toml::Value::Table(Default::default())),
-        Err(_) => toml::Value::Table(Default::default()),
+    let 干净 = BackupConfig {
+        dir: cfg
+            .dir
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        disabled: cfg.disabled,
     };
-    // 手工建表而不是 `Value::try_from(&cfg)`：TOML 没有 null，`Option` 交给 serde 猜
-    // 会写出读不回来的文档。没设过的键干脆不写。
-    let mut backup = toml::Table::new();
-    if let Some(dir) = cfg.dir.as_ref().filter(|s| !s.trim().is_empty()) {
-        backup.insert("dir".into(), toml::Value::String(dir.clone()));
-    }
-    if cfg.disabled {
-        backup.insert("disabled".into(), toml::Value::Boolean(true));
-    }
-    table
-        .as_table_mut()
-        .expect("config.toml 的顶层不是表")
-        .insert("backup".into(), toml::Value::Table(backup));
-    let text = toml::to_string(&table).map_err(|e| Error::Io {
-        path: path.display().to_string(),
-        source: std::io::Error::other(e.to_string()),
-    })?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error::Io {
-            path: parent.display().to_string(),
-            source: e,
-        })?;
-    }
-    fs::write(&path, text).map_err(|e| Error::Io {
-        path: path.display().to_string(),
-        source: e,
-    })
+    crate::config::write段(vault, "backup", &干净)
 }
 
 /// 某个库在备份目录下的子目录名。带上库根路径的 hash 前缀：
@@ -600,7 +556,7 @@ mod tests {
     fn 写备份配置不会抹掉config里的其他键() {
         let d = tempfile::tempdir().unwrap();
         let v = vault_at(d.path());
-        let path = config_file(&v);
+        let path = v.meta_dir().join("config.toml");
         fs::create_dir_all(v.meta_dir()).unwrap();
         fs::write(
             &path,
