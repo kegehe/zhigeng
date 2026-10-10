@@ -12,7 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
-import { 徽标, 徽标红, 可检索, 缺项, 步骤名 } from "./ui/ai";
+import { 徽标, 徽标红, 可检索, 缺项, 步骤名, 探针结论 } from "./ui/ai";
 import {
   buildTree,
   dirsOf,
@@ -31,6 +31,7 @@ import type {
   AppInfo,
   EditDoc,
   ImportEntry,
+  AiDiscovery,
   AiProbeReport,
   AiRun,
   AiView,
@@ -171,8 +172,10 @@ export function App() {
   const [aiForm, setAiForm] = useState({ baseUrl: "", chatModel: "", embeddingModel: "" });
   const [aiKey, setAiKey] = useState("");
   const [aiReport, setAiReport] = useState<AiProbeReport | null>(null);
-  const [aiBusy, setAiBusy] = useState<"save" | "key" | "test" | null>(null);
+  const [aiBusy, setAiBusy] = useState<"save" | "key" | "test" | "models" | null>(null);
   const [ai测过, setAi测过] = useState<boolean | null>(null);
+  /** 「这家有哪些模型」的结果。它**不持久化**：清单是端点此刻的事实，重启就可能变了 */
+  const [ai发现, setAi发现] = useState<AiDiscovery | null>(null);
   /**
    * 语义那一路的结果。它**永远比关键词晚到**（含一次网络往返），所以单独一块，
    * 不混进那张按 BM25 排的命中表——混进去会让人以为两批东西是同一把尺子量出来的。
@@ -1022,6 +1025,8 @@ export function App() {
       填回(await api.aiSaveConfig(aiForm.baseUrl, aiForm.chatModel, aiForm.embeddingModel));
       setAiReport(null);
       setAi测过(null);
+      // 地址可能变了，上一份清单不再作数——留着它会让人照着过时的候选填
+      setAi发现(null);
       setFlash("配置已存进这个库的 .note/config.toml");
     } catch (e) {
       setError(describeError(e).message);
@@ -1053,6 +1058,22 @@ export function App() {
       setAiReport(报);
       setAi测过(报.ok);
     } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setAiBusy(null);
+    }
+  };
+
+  /**
+   * 问端点要一份模型清单，替用户把嵌入模型那一格填上。**读的是盘上那份地址**，
+   * 所以和"测试连通"一样要先保存——这一条不藏，界面上写明。
+   */
+  const ai发现模型 = async () => {
+    setAiBusy("models");
+    try {
+      setAi发现(await api.aiDiscover());
+    } catch (e) {
+      setAi发现(null);
       setError(describeError(e).message);
     } finally {
       setAiBusy(null);
@@ -1611,7 +1632,7 @@ export function App() {
                     [
                       ["接口地址 base_url", "baseUrl", "https://api.openai.com/v1"],
                       ["对话模型 chat_model", "chatModel", "gpt-4o-mini"],
-                      ["嵌入模型 embedding_model", "embeddingModel", "text-embedding-3-small"],
+                      ["嵌入模型 embedding_model（可留空）", "embeddingModel", "text-embedding-3-small"],
                     ] as const
                   ).map(([标签, 键, 占位]) => (
                     <label key={键} className="flex flex-col gap-1">
@@ -1671,13 +1692,78 @@ export function App() {
                     >
                       {aiBusy === "test" ? "测试中…" : "测试连通"}
                     </button>
+                    <button
+                      className={btn}
+                      disabled={aiBusy !== null || !aiForm.baseUrl.trim()}
+                      title="问这个端点要一份模型清单，把能当嵌入模型用的那些列出来。它只发一个 GET 请求，你的笔记一个字节都不出去。"
+                      onClick={() => void ai发现模型()}
+                    >
+                      {aiBusy === "models" ? "问端点中…" : "看看这家有哪些模型"}
+                    </button>
                     {缺项(aiForm).length > 0 ? (
                       <span className="text-xs text-fg-disabled">
                         还差：{缺项(aiForm).join(" / ")}
                       </span>
                     ) : null}
                   </div>
+                  <p className="text-xs text-fg-disabled">
+                    嵌入模型那一格<strong className="text-fg-2">可以留空</strong>
+                    ：DeepSeek、Anthropic 这类只有对话端点，Kimi 的嵌入要单独申请。留空不是
+                    "没配好"，是语义那一路不开、检索只走关键词与链接——问答照旧能用（它靠的是
+                    检索回来的片段）。这一格与"测试连通"读的都是
+                    <strong className="text-fg-2">已经存进盘上的那份地址</strong>
+                    ，改完先按「保存配置」。
+                  </p>
                 </div>
+                {ai发现 ? (
+                  <div className="mt-5 max-w-2xl rounded-md border border-line bg-raised px-4 py-3">
+                    <div className="font-mono text-xs text-fg-disabled">
+                      端点给了 {ai发现.all.length} 个模型｜{ai发现.ms}ms｜其中含
+                      <span className="mx-1">embed</span>的 {ai发现.embedCandidates.length} 个
+                    </div>
+                    {ai发现.embedCandidates.length > 0 ? (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-fg-2">可以填进嵌入模型那一格：</span>
+                        {ai发现.embedCandidates.map((m) => (
+                          <button
+                            key={m}
+                            className={
+                              "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors duration-(--dur-1) " +
+                              (aiForm.embeddingModel === m
+                                ? "border-accent text-fg"
+                                : "border-line text-fg-2 hover:bg-hover")
+                            }
+                            title="点一下就填进上面那一格（还要按「保存配置」才落盘）"
+                            onClick={() => setAiForm({ ...aiForm, embeddingModel: m })}
+                          >
+                            {m}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-sm text-fg-2">
+                        这一家<strong className="text-fg">没有</strong>名字里含
+                        <span className="mx-1 font-mono">embed</span>
+                        的模型，多半确实不提供嵌入接口。那就把上面那一格空着——
+                        检索走关键词与链接，问答照旧。
+                      </p>
+                    )}
+                    {ai发现.all.length > 0 ? (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs text-fg-disabled">
+                          它给的全部模型（{ai发现.all.length}）
+                        </summary>
+                        <div className="mt-1 flex flex-wrap gap-1.5">
+                          {ai发现.all.map((m) => (
+                            <span key={m} className="font-mono text-xs text-fg-2">
+                              {m}
+                            </span>
+                          ))}
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
+                ) : null}
                 {aiReport ? (
                   <div className="mt-7 flex max-w-2xl flex-col gap-1">
                     <h3 className="text-sm text-fg-2">
@@ -1687,7 +1773,7 @@ export function App() {
                           "ml-2 text-xs " + (aiReport.ok ? "text-ok" : "text-danger")
                         }
                       >
-                        {aiReport.ok ? "两个探针都通了" : "有一步不通"}
+                        {探针结论(aiReport.ok, aiReport.steps)}
                       </span>
                     </h3>
                     {aiReport.steps.map((r, i) => (
@@ -1706,7 +1792,7 @@ export function App() {
                       </div>
                     ))}
                     <p className="mt-1 text-xs text-fg-disabled">
-                      测试只发两个最小请求，内容是一段固定文本{" "}
+                      每个启用的探针只发一个最小请求，内容是一段固定文本{" "}
                       <span className="font-mono text-mono">ping</span>
                       ，不会把任何笔记内容发出去。
                     </p>

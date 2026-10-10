@@ -161,6 +161,8 @@ enum AiCmd {
         #[arg(short, long, default_value_t = 10)]
         limit: i64,
     },
+    /// 问端点「你家有哪些模型」，并挑出能当嵌入模型用的那些。**零请求体、不发笔记内容**
+    Models,
 }
 
 fn main() -> Result<()> {
@@ -477,6 +479,36 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                     r.out_tokens,
                     r.cited.len(),
                     if r.retried { "（重试过）" } else { "" }
+                );
+            }
+        }
+        AiCmd::Models => {
+            let cfg = note_core::ai::load(&vault)?;
+            if cfg.base_url.as_deref().unwrap_or("").trim().is_empty() {
+                println!("没填接口地址（设置里那一格），所以没地方可问");
+                return Ok(());
+            }
+            let 发 = note_core::ai::列模型(&cfg)?;
+            println!(
+                "这家给了 {} 个模型（{}ms）：{}",
+                发.all.len(),
+                发.ms,
+                if 发.all.is_empty() {
+                    "空清单".into()
+                } else {
+                    发.all.join(", ")
+                }
+            );
+            if 发.embed_candidates.is_empty() {
+                println!(
+                    "含 embed 的：0 个 —— 这一家多半没有嵌入接口（DeepSeek、Anthropic 就没有）。\
+                     语义那一路不开，检索走关键词与链接。"
+                );
+            } else {
+                println!(
+                    "含 embed 的：{} 个，可以填进嵌入模型那一格 → {}",
+                    发.embed_candidates.len(),
+                    发.embed_candidates.join(", ")
                 );
             }
         }

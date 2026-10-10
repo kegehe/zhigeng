@@ -2,14 +2,19 @@ import type { AiView } from "../ipc/types";
 
 export type 齐 = Pick<AiView, "baseUrl" | "chatModel" | "embeddingModel">;
 
-/** 还差哪几项。**不含 Key**：本地模型（Ollama）不需要它，把"没填 Key"算成没配好
- *  会逼着用户去填一个用不上的格子。 */
+/**
+ * 还差哪几项。**不含 Key**：本地模型（Ollama）不需要它，把"没填 Key"算成没配好
+ * 会逼着用户去填一个用不上的格子。
+ *
+ * **也不含嵌入模型**（档 A）：DeepSeek、Anthropic 这类只有对话端点，Kimi 的嵌入要单独申请。
+ * 留空不是"没配好"，是"语义那一路不开、检索只走关键词与链接"——一条正常配置。
+ * 这一份与 `crates/note-core/src/ai.rs` 的 `缺项` 必须同规则。
+ */
 export function 缺项(v: 齐): string[] {
   const 空 = (s: string) => !s || !s.trim();
   const 缺: string[] = [];
   if (空(v.baseUrl)) 缺.push("base_url");
   if (空(v.chatModel)) 缺.push("chat_model");
-  if (空(v.embeddingModel)) 缺.push("embedding_model");
   return 缺;
 }
 
@@ -31,7 +36,9 @@ export function 徽标(v: 齐, 测过: boolean | null): string | null {
   const 缺 = 缺项(v);
   if (缺.length) return "没配";
   if (测过 === false) return "不通";
-  if (测过 === true) return "通了";
+  // 测过之后分两档说：能检索（两个探针都过、语义路开着）与只对话（检索暂时只有关键词与
+  // 链接）。从前这里统一写"通了"，而它在嵌入模型留空时是一句半个谎——用户会以为搜索也在用模型。
+  if (测过 === true) return 可检索(v) ? "能检索" : "只对话";
   return null;
 }
 
@@ -44,5 +51,22 @@ export function 徽标红(测过: boolean | null): boolean {
 export function 步骤名(stage: string): string {
   if (stage === "chat") return "对话模型";
   if (stage === "embeddings") return "嵌入模型";
+  // 后端在嵌入模型留空时发这一步：请求根本没发，所以既不是通也不是不通
+  if (stage === "embeddings-off") return "嵌入模型（未启用）";
   return "配置";
+}
+
+/**
+ * 这一次真打了几个探针。**数出来而不是写死"两个"**——嵌入那一步可以整个不发，
+ * 而"两个探针都通了"在只打了一个的时候是一句谎。
+ */
+export function 探针数(steps: { stage: string }[]): number {
+  return steps.filter((s) => s.stage === "chat" || s.stage === "embeddings").length;
+}
+
+/** 报告标题那一句：通/不通由调用方判，这里只负责把"几个"说准 */
+export function 探针结论(ok: boolean, steps: { stage: string }[]): string {
+  if (!ok) return "有一步不通";
+  const n = 探针数(steps);
+  return n === 0 ? "没有可测的探针" : `${n} 个探针都通了`;
 }

@@ -3,6 +3,7 @@ import type {
   AppInfo,
   AssetOut,
   CapturedOut,
+  AiDiscovery,
   EditDoc,
   HybridResult,
   AiRun,
@@ -122,6 +123,11 @@ export const api = {
   aiAsk: (query: string) => invoke<Answer>("ai_ask", { query }),
   /** 审计：最近的生成记录，含未采纳的那几次 */
   aiRuns: (limit = 20) => invoke<AiRun[]>("ai_runs", { limit }),
+  /**
+   * 问端点「你家有哪些模型」。**零请求体、一个笔记字节都不发**——它问的是对方有什么。
+   * 用途只有一个：嵌入模型那一格不必让用户去查文档猜名字（DeepSeek 这类根本没有）。
+   */
+  aiDiscover: () => invoke<AiDiscovery>("ai_discover", {}),
 };
 
 /**

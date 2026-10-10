@@ -167,10 +167,16 @@ export type AiView = {
   keyHint: string | null;
 };
 
-/** 连通测试的一步。stage 是 "chat" / "embeddings" / "config" */
+/** 连通测试的一步。stage 是 "chat" / "embeddings" / "embeddings-off"（未启用，没发请求）/ "config" */
 export type AiStep = { stage: string; ok: boolean; ms: number; detail: string };
 
 export type AiProbeReport = { ok: boolean; steps: AiStep[] };
+
+/**
+ * 「看看这家有哪些模型」的结果。`all` 是端点给的全部 id（原样，界面上要能翻），
+ * `embedCandidates` 是其中含 `embed` 的那些——挑哪个是用户的事实，不是程序的猜测。
+ */
+export type AiDiscovery = { all: string[]; embedCandidates: string[]; ms: number };
 
 /** 混合检索的一条命中。`from` 说的是这一条被哪几路捞上来——两路都中是最强的信号 */
 export type HybridHit = {

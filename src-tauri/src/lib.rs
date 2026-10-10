@@ -717,6 +717,26 @@ async fn ai_test(state: State<'_, Shared>) -> Result<note_core::ai::Report, Writ
     .map_err(中断)?
 }
 
+/// 问端点「你家有哪些模型」。**不碰 SQLite，也就不碰任何锁**——它只要 `Vault` 里那份
+/// `[ai]` 配置（地址）与凭据管理器里的 Key。零请求体，笔记字节一个都不发。
+#[tauri::command]
+async fn ai_discover(state: State<'_, Shared>) -> Result<note_core::ai::发现, String> {
+    let vault = {
+        let guard = state.0.lock().map_err(|e| e.to_string())?;
+        guard
+            .as_ref()
+            .ok_or_else(|| "尚未选择 Vault".to_string())?
+            .vault()
+            .clone()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = note_core::ai::load(&vault).map_err(|e| e.to_string())?;
+        note_core::ai::列模型(&cfg).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 混合检索。**必然含一次网络往返**（把查询本身嵌成向量），所以它是 async 命令而不是
 /// 同步那一批——界面那条关键词搜索仍然走 8ms 的同步通路，这一路晚一点到就晚一点到。
 #[tauri::command]
@@ -861,6 +881,7 @@ pub fn run() {
             ai_save_config,
             ai_save_key,
             ai_test,
+            ai_discover,
             search_hybrid,
             ai_ask,
             ai_runs

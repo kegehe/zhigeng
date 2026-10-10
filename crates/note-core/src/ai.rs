@@ -152,7 +152,7 @@ fn 凭据失败(e: keyring::Error) -> Error {
     ))
 }
 
-/// 一次连通测试的两步结果。
+/// 一次连通测试的每一步结果。
 ///
 /// 字段名走英文：`#[serde(rename_all)]` 遇到单个汉字字段名会在字符边界上切片直接
 /// panic（derive 阶段的报错，比写错字段更难懂），而这个 crate 的 DTO 本来就是
@@ -160,7 +160,8 @@ fn 凭据失败(e: keyring::Error) -> Error {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Step {
-    /// "chat" / "embeddings" / "config"
+    /// `"chat"` / `"embeddings"` / `"embeddings-off"`（没填嵌入模型，这一步**没发请求**）
+    /// / `"config"`
     pub stage: String,
     pub ok: bool,
     pub ms: u64,
@@ -182,17 +183,23 @@ impl Report {
     }
 }
 
+/// 设置面板里那枚"问端点要清单"的按钮**文案**。后端在指引用户用它的时候必须逐字引用，
+/// 而 `src/ui/ai.test.ts` 有一条用例同时读这两个文件钉住等值——改一处就会红。
+pub const 发现按钮名: &str = "看看这家有哪些模型";
+
 /// 缺哪几项。空 = 齐了。**Key 不在里面**：本地模型（Ollama）不需要它。
+///
+/// **嵌入模型也不在里面**——这是档 A 的核心一条：DeepSeek 这类只有对话端点，Kimi 的嵌入要
+/// 单独申请，把"没填嵌入模型"算成"没配好"会逼用户去填一个他家根本没有的东西。留空的后果
+/// 不是"配置不完整"，而是"语义那一路不开、检索只走关键词与链接"，这是一条正常配置。
+/// 这一份与 `src/ui/ai.ts` 的 `缺项` 必须同规则：改一处要改两处，两边的用例各自钉着同一批事实。
 pub fn 缺项(cfg: &AiConfig) -> Vec<&'static str> {
     let mut 缺 = Vec::new();
-    if cfg.base_url.as_deref().unwrap_or("").is_empty() {
+    if cfg.base_url.as_deref().unwrap_or("").trim().is_empty() {
         缺.push("base_url");
     }
-    if cfg.chat_model.as_deref().unwrap_or("").is_empty() {
+    if cfg.chat_model.as_deref().unwrap_or("").trim().is_empty() {
         缺.push("chat_model");
-    }
-    if cfg.embedding_model.as_deref().unwrap_or("").is_empty() {
-        缺.push("embedding_model");
     }
     缺
 }
@@ -300,14 +307,31 @@ pub fn probe(cfg: &AiConfig) -> Report {
         }),
         钥.as_deref(),
     ));
-    报.收(打(
-        &客,
-        "embeddings",
-        &base,
-        "/embeddings",
-        &serde_json::json!({ "model": cfg.embedding_model, "input": "ping" }),
-        钥.as_deref(),
-    ));
+    let 嵌 = cfg.embedding_model.as_deref().unwrap_or("").trim();
+    if 嵌.is_empty() {
+        // 没填嵌入模型不是"这一步失败"，而是"这一路没开"。报 ok=true 是因为它确实不该红——
+        // 但必须单独占一步、说清少了什么，否则界面上会安静地变成"探针都通了"那句谎。
+        报.收(Step {
+            stage: "embeddings-off".into(),
+            ok: true,
+            ms: 0,
+            // 那句里点名的按钮文案要和界面上**一字不差**（真机第一版这里写的是
+            // 「看看这家有哪些嵌入模型」，而按钮叫「看看这家有哪些模型」，用户按着找就找不到）
+            detail: format!(
+                "没填嵌入模型：语义那一路没开，检索只走关键词与链接。这一家没有嵌入接口的话\
+                 （DeepSeek、Anthropic 就没有），这样才是对的；想开就点上面那个「{发现按钮名}」。"
+            ),
+        });
+    } else {
+        报.收(打(
+            &客,
+            "embeddings",
+            &base,
+            "/embeddings",
+            &serde_json::json!({ "model": 嵌, "input": "ping" }),
+            钥.as_deref(),
+        ));
+    }
     报
 }
 
@@ -407,6 +431,109 @@ fn 打(
             detail: format!("回的不是 JSON（{e}）：{}{尾}", 原文截(&文)),
         },
     }
+}
+
+/// 一次"看看这家有什么模型"的结果。
+///
+/// 字段名走英文（护栏第 5 条）。`all` 是对方给的全部 id，`embed_candidates` 是其中**能当嵌入
+/// 模型用的候选**——两者都交给界面，因为"挑哪一个"是用户的事实不是程序的猜测。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct 发现 {
+    pub all: Vec<String>,
+    pub embed_candidates: Vec<String>,
+    pub ms: u64,
+}
+
+/// 把 `/v1/models` 的回包解析成 id 清单。**纯函数**，所以"200 但形状不对"这种情况有用例。
+///
+/// OpenAI 的形状是 `{"data":[{"id":…}]}`；Ollama 的 `/v1/models` 也是这一套，但有些网关把
+/// 它放在 `models` 下、条目里只写 `name`。三种都认，认不出来就报错——**不返回空清单**，
+/// 因为"这家一个模型都没有"和"我没读懂它的回包"是两件必须分开的事
+/// （同 1b 那条"配了但连不上 ≠ 这一路没开"）。
+pub fn 解析模型清单(体: &str) -> Result<Vec<String>> {
+    let 解: serde_json::Value = serde_json::from_str(体)
+        .map_err(|e| Error::Invalid(format!("模型清单不是 JSON（{e}）：{}", 原文截(体))))?;
+    let 列 = 解
+        .get("data")
+        .or_else(|| 解.get("models"))
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "模型清单里没有 data[]（或 models[]）：{}",
+                原文截(体)
+            ))
+        })?;
+    let mut 出: Vec<String> = 列
+        .iter()
+        .filter_map(|m| {
+            m.get("id")
+                .or_else(|| m.get("name"))
+                .and_then(|i| i.as_str())
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    出.sort();
+    出.dedup();
+    Ok(出)
+}
+
+/// 从清单里挑出**像嵌入模型**的那些：id 里含 `embed`（不区分大小写），按字典序给回。
+///
+/// 为什么只认这一个词：各家命名虽乱（`text-embedding-3-small` / `bge-m3` / `nomic-embed-text`
+/// / `Embeddings-GPT`），但没有一家把嵌入模型起成不含 embed 的样子——`bge-m3` 是例外，
+/// 所以清单原样交给界面，用户可以自己填。**这里的判据宁可漏也不猜**：猜错一个
+/// `gpt-4o-embeddings-fake` 之类的东西，代价是用户花 token 嵌一整库然后发现维度对不上。
+pub fn 嵌入候选(清单: &[String]) -> Vec<String> {
+    let mut 候: Vec<String> = 清单
+        .iter()
+        .filter(|id| id.to_ascii_lowercase().contains("embed"))
+        .cloned()
+        .collect();
+    候.sort();
+    候.dedup();
+    候
+}
+
+/// 打一次 `<base>/models`。**零请求体、零笔记内容**——它问的是"你有什么"，不是"我有什么"。
+/// 在 `spawn_blocking` 里调，且不持任何连接锁。
+pub fn 列模型(cfg: &AiConfig) -> Result<发现> {
+    let base = 端点(cfg.base_url.as_deref().unwrap_or("")).map_err(Error::Invalid)?;
+    let url = format!("{base}/models");
+    let 客 = 客户端().map_err(|e| Error::Invalid(format!("建不出 HTTP 客户端：{e}")))?;
+    let 起 = std::time::Instant::now();
+    let 请 = 客.get(&url);
+    let 请 = match 钥() {
+        Some(k) => 请.header("authorization", format!("Bearer {k}")),
+        None => 请,
+    };
+    let 答 = 请
+        .send()
+        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}")))?;
+    let 状 = 答.status();
+    let 文 = 答
+        .text()
+        .map_err(|e| Error::Invalid(format!("读不回包：{e}")))?;
+    if !状.is_success() {
+        return Err(Error::Invalid(format!(
+            "列模型 HTTP {}：{}{}",
+            状.as_u16(),
+            原文截(&文),
+            if 建议补_v1(状.as_u16(), &base) {
+                "｜这个地址末尾可能要加 /v1"
+            } else {
+                ""
+            }
+        )));
+    }
+    let 全部 = 解析模型清单(&文)?;
+    let 候 = 嵌入候选(&全部);
+    Ok(发现 {
+        ms: 起.elapsed().as_millis() as u64,
+        embed_candidates: 候,
+        all: 全部,
+    })
 }
 
 /// 超时口径：连接 5 秒、总 20 秒。嵌一整批也在 20 秒里——超了就报错，不悄悄加大超时，
@@ -606,25 +733,41 @@ mod tests {
         assert!(!报.ok);
         assert_eq!(报.steps.len(), 1, "缺项时不该打网络: {:?}", 报.steps);
         assert_eq!(报.steps[0].stage, "config");
-        for 项 in ["base_url", "chat_model", "embedding_model"] {
+        for 项 in ["base_url", "chat_model"] {
             assert!(报.steps[0].detail.contains(项), "{} 要报出来", 项);
         }
+        assert!(
+            !报.steps[0].detail.contains("embedding_model"),
+            "嵌入模型不再是必填，缺项里不许出现它: {}",
+            报.steps[0].detail
+        );
     }
 
     #[test]
-    fn 缺项一项一项报() {
+    fn 缺项只盯地址与对话模型_嵌入留空是正常配置() {
         let 齐 = AiConfig {
             base_url: Some("http://x/v1".into()),
             chat_model: Some("a".into()),
             embedding_model: Some("b".into()),
         };
         assert!(缺项(&齐).is_empty());
-        assert_eq!(
+        // 档 A 的那条决定：嵌入模型没填**不算缺**——DeepSeek / Anthropic 就没有这个端点，
+        // 把它算成"没配好"等于逼用户去填一个他家不存在的东西
+        assert!(
             缺项(&AiConfig {
                 embedding_model: None,
                 ..齐.clone()
-            }),
-            ["embedding_model"]
+            })
+            .is_empty(),
+            "没填嵌入模型不该报缺项"
+        );
+        assert!(
+            缺项(&AiConfig {
+                embedding_model: Some("   ".into()),
+                ..齐.clone()
+            })
+            .is_empty(),
+            "只有空格的嵌入模型也不算填上"
         );
         assert_eq!(
             缺项(&AiConfig {
@@ -634,6 +777,87 @@ mod tests {
             }),
             ["base_url", "chat_model"]
         );
+    }
+
+    #[test]
+    fn 未启用那一步的指引与按钮同名() {
+        // 真机照出来的：指引写着「看看这家有哪些嵌入模型」，而按钮叫「看看这家有哪些模型」，
+        // 用户按着这句话找不到东西。**跨语言的等值由 `src/ui/ai.test.ts` 那条用例钉**
+        // （它同时读 App.tsx 与这里的 `发现按钮名`），这里只钉"这一步确实指了那枚按钮"
+        let 报 = probe(&AiConfig {
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            chat_model: Some("m".into()),
+            embedding_model: None,
+        });
+        let 步 = 报
+            .steps
+            .iter()
+            .find(|s| s.stage == "embeddings-off")
+            .expect("嵌入留空时必须有这一步");
+        assert!(步.ok, "没发请求的一步不该红");
+        assert!(
+            步.detail.contains(发现按钮名),
+            "指引要点名真实的按钮: {}",
+            步.detail
+        );
+    }
+
+    #[test]
+    fn 模型清单两种形状都认_读不懂就报错不返回空() {
+        let 开 = r#"{"data":[{"id":"gpt-4o"},{"id":"text-embedding-3-small"},{"id":"bge-m3"}]}"#;
+        let 全 = 解析模型清单(开).unwrap();
+        assert_eq!(
+            全,
+            [
+                "bge-m3".to_string(),
+                "gpt-4o".to_string(),
+                "text-embedding-3-small".to_string()
+            ],
+            "按字典序给回，界面才有稳定顺序"
+        );
+        // Ollama 等网关把清单放在 models 下，条目里甚至只写 name——只认 id 会把它读成
+        // "这家一个模型都没有"，那是把"没读懂"说成"没有"
+        let 另 = r#"{"models":[{"name":"x"},{"id":"nomic-embed-text"}]}"#;
+        assert_eq!(
+            解析模型清单(另).unwrap(),
+            ["nomic-embed-text".to_string(), "x".to_string()]
+        );
+        // 重号去掉（同一家挂两个别名会让清单看着像很多模型）
+        let 重 = r#"{"data":[{"id":"a"},{"id":"a"}]}"#;
+        assert_eq!(解析模型清单(重).unwrap(), ["a".to_string()]);
+        // "200 但形状不对" 与 "这家一个模型都没有" 必须分开：前者报错，后者是空清单
+        let 错 = 解析模型清单(r#"{"object":"list"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(错.contains("没有 data[]"), "{错}");
+        let 空 = 解析模型清单(r#"{"data":[]}"#).unwrap();
+        assert!(空.is_empty(), "对方明确说没有模型时给空清单，不编");
+        assert!(
+            解析模型清单("<html>登录</html>").is_err(),
+            "登录页不是 JSON"
+        );
+    }
+
+    #[test]
+    fn 嵌入候选只认含_embed_的_宁可漏也不猜() {
+        let 全 = [
+            "bge-m3".to_string(),
+            "gpt-4o".to_string(),
+            "text-embedding-3-large".to_string(),
+            "text-embedding-3-small".to_string(),
+            "EMBEDDINGS-V2".to_string(),
+        ];
+        assert_eq!(
+            嵌入候选(&全),
+            [
+                "EMBEDDINGS-V2".to_string(),
+                "text-embedding-3-large".to_string(),
+                "text-embedding-3-small".to_string()
+            ],
+            "大小写不敏感；`bge-m3` 这种不含 embed 的不猜（清单原样交给界面，用户自己填）"
+        );
+        assert!(嵌入候选(&["gpt-4o".to_string()]).is_empty());
+        assert!(嵌入候选(&[]).is_empty());
     }
 
     #[test]
