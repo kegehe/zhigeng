@@ -3,9 +3,9 @@ import { api } from "./ipc/commands";
 import type { AppInfo } from "./ipc/types";
 
 const btnPrimary =
-  "rounded-md bg-accent px-4 py-2 text-sm text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover disabled:bg-active disabled:text-fg-disabled";
+  "rounded-md bg-accent px-4 py-2 text-sm text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover active:translate-y-px disabled:opacity-55";
 const inputCls =
-  "mt-2 w-full rounded-md border border-line bg-base px-3 py-2 font-mono text-mono text-fg focus-visible:border-accent";
+  "mt-2 w-full rounded-md border border-line bg-page px-3 py-2 font-mono text-mono text-fg focus-visible:border-accent";
 
 /**
  * 首启界面。两步，都要用户亲手确认：
@@ -63,7 +63,7 @@ export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
 
   if (vault) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center bg-base px-6 py-8">
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-page px-6 py-8">
         <div className="w-full max-w-144 rounded-lg border border-line bg-raised p-8 shadow-2">
           <h1 className="text-2xl text-fg">再给备份挑一个目录</h1>
           <p className="mt-3 text-fg-2">
@@ -113,7 +113,7 @@ export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center bg-base px-6 py-8">
+    <div className="flex min-h-0 flex-1 items-center justify-center bg-page px-6 py-8">
       <div className="w-full max-w-144 rounded-lg border border-line bg-raised p-8 shadow-2">
         <h1 className="text-2xl text-fg">选一个目录放你的笔记</h1>
         <p className="mt-3 text-fg-2">笔记就是这个目录里的一堆 <span className="font-mono text-mono">.md</span> 文件，用任何编辑器打开都不会坏。</p>

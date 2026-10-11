@@ -97,6 +97,17 @@ const rules = [
   [/\boklch\(/, "oklch 字面量"],
   [/transition:\s*all/, "transition: all 会连带过渡布局属性，直接掉帧"],
   [/z-\[\d/, "裸 z-index 数字，请用 --z-* token"],
+  // 下面三条都是 2026-10-11 那轮样式复查补的：规范 [06] §4 写了，但护栏当时根本没查，
+  // 于是"逐条都有理由"变成"逐条都有例外"。
+  [/z-index:\s*-?[\d.]/, "CSS 里写裸 z-index 数字，请用 --z-* token（[06] §4）"],
+  [
+    /\boutline-none\b/,
+    "Tailwind 的 outline-none 与 outline: none 同等对待（[06] §4）：去掉描边要在同一处给另一种看得见的指示，那种指示得写在 CSS 里",
+  ],
+  [
+    /-(?:p|px|py|pt|pr|pb|pl|m|mx|my|mt|mr|mb|ml|gap|gap-x|gap-y|space-x|space-y)-[0-9]+\.5\b/,
+    "半格间距（2/6/10/14px）不在 4px 栅格上（[06] §2）",
+  ],
   [/https?:\/\/(?!127\.0\.0\.1|localhost)[^\s'"`)]*\.(?:woff2?|js|css)\b/, "联网取字体/脚本"],
   [/animate-\[[^\]]*(?:width|height|top|left|margin|padding)/, "动画布局属性"],
 ];

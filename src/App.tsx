@@ -9,6 +9,15 @@ import {
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import {
+  ChevronDown,
+  ChevronRight,
+  Minus,
+  Plus,
+  RotateCw,
+  Square,
+  X,
+} from "lucide-react";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
@@ -104,10 +113,22 @@ const baseOf = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1);
 /** 文件名去掉扩展名——改名框里不该让用户自己处理 `.md` */
 const stemOf = (rel: string) => baseOf(rel).replace(/\.markdown$/, "").replace(/\.md$/, "");
 
+/**
+ * 按钮基线。两条来自 [06] §3 而以前没落地的：
+ * - **禁用态降透明度，不降对比**——`disabled:text-fg-disabled` 那套写法把字与底一起调淡，
+ *   实测 2.88:1，比"降透明度"更糟的是它看着像"能点但很弱"而不是"不能点"。
+ * - **按下去要有 `translateY(1px)`**：动的是 transform，不触发布局（§动效那条允许）。
+ */
 const btn =
-  "rounded-md border border-line px-2 py-1 text-xs text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover";
+  "rounded-md border border-line px-2 py-1 text-xs text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover active:translate-y-px";
 const btnPrimary =
-  "rounded-md bg-accent px-3 py-1 text-xs text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover disabled:bg-active disabled:text-fg-disabled";
+  "rounded-md bg-accent px-3 py-1 text-xs text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover active:translate-y-px disabled:opacity-55";
+/**
+ * 侧栏底栏那一排入口的"当前开着哪一格"。选中那一格连字一起提到主色：
+ * 底色加深之后次要色压上去实测 6.2:1、主色 14.5:1——过线是过线，但"这一格开着"
+ * 是这一排唯一的定位信息，不该靠一层 1.46:1 的底色去猜。
+ */
+const btnOn = (开着: boolean) => btn + (开着 ? " bg-active text-fg" : "");
 
 export function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -1114,7 +1135,7 @@ export function App() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-base text-fg">
+    <div className="flex h-full flex-col bg-page text-fg">
       {palette ? (
         <CommandPalette
           标题="命令面板"
@@ -1125,7 +1146,7 @@ export function App() {
       ) : null}
       <header className="titlebar surface" data-tauri-drag-region>
         <span className="px-2 font-mono text-xs text-fg-2">
-          note<span className="text-fg-disabled"> {info?.version}</span>
+          note<span className="text-fg-2"> {info?.version}</span>
         </span>
         <span className="title" data-tauri-drag-region>
           {info?.vaultPath ?? ""}
@@ -1133,7 +1154,7 @@ export function App() {
         <label className="flex items-center gap-1 px-2 text-xs">
           <span>主题</span>
           <select
-            className="rounded-md border border-line bg-raised px-1 py-0.5 text-xs"
+            className="rounded-md border border-line bg-raised px-2 py-1 text-xs"
             value={theme}
             onChange={(e) => setTheme(e.target.value as Theme)}
           >
@@ -1143,13 +1164,23 @@ export function App() {
           </select>
         </label>
         <button className="win-btn" onClick={() => void refresh()} title="重新读取索引与列表">
-          {busy ? "…" : "↻"}
+          {busy ? "…" : <RotateCw aria-hidden="true" />}
         </button>
         {win ? (
           <>
-            <button className="win-btn" onClick={() => void win.minimize()}>─</button>
-            <button className="win-btn" onClick={() => void win.toggleMaximize()}>▢</button>
-            <button className="win-btn close" onClick={() => void win.close()}>✕</button>
+            <button className="win-btn" onClick={() => void win.minimize()} title="最小化">
+              <Minus aria-hidden="true" />
+            </button>
+            <button
+              className="win-btn"
+              onClick={() => void win.toggleMaximize()}
+              title="最大化 / 还原"
+            >
+              <Square aria-hidden="true" />
+            </button>
+            <button className="win-btn close" onClick={() => void win.close()} title="关闭">
+              <X aria-hidden="true" />
+            </button>
           </>
         ) : null}
       </header>
@@ -1167,24 +1198,24 @@ export function App() {
           <aside className="flex w-72 shrink-0 flex-col border-r border-line bg-raised">
             <div className="flex gap-2 p-2">
               <input
-                className="min-w-0 flex-1 rounded-md border border-line bg-base px-2 py-1.5 text-sm focus-visible:border-accent"
+                className="min-w-0 flex-1 rounded-md border border-line bg-page px-2 py-1 text-sm focus-visible:border-accent"
                 placeholder="搜索笔记（全文）"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
               <button
-                className={btn}
+                className={btn + " grid place-items-center"}
                 title="新建笔记"
                 onClick={() => setCreating((c) => !c)}
               >
-                ＋
+                <Plus aria-hidden="true" />
               </button>
             </div>
             {creating ? (
               <div className="px-2 pb-2">
                 <input
                   autoFocus
-                  className="w-full rounded-md border border-accent bg-base px-2 py-1.5 text-sm"
+                  className="w-full rounded-md border border-accent bg-page px-2 py-1 text-sm"
                   placeholder="标题，回车创建"
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
@@ -1217,13 +1248,13 @@ export function App() {
                         key={n.rel}
                         onClick={() => void openNote(n.rel, n.title)}
                         className={
-                          "block w-full px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) " +
+                          "block w-full px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) " +
                           (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
                         }
                       >
                         <span className="flex items-baseline gap-2">
                           <span className="min-w-0 flex-1 truncate">{n.title}</span>
-                          <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                          <span className="shrink-0 font-mono text-xs text-fg-2">
                             {relativeTime(n.ms)}
                           </span>
                         </span>
@@ -1234,8 +1265,11 @@ export function App() {
                     );
                   })
                 : sidebarRows.map((b) => {
-                    // 缩进走 token 而不是写死像素：[06] 定的是一级 16px，那个 16px 就是 --space-4
-                    const pad = { paddingInlineStart: `calc(0.75rem + ${b.depth} * var(--space-4))` };
+                    // 缩进走 token 而不是写死像素或 rem：[06] 定的是一级 16px，那个 16px
+                    // 就是 --space-4；起手的 12px 同样取 --space-3，不押"根字号一定是 16px"
+                    const pad = {
+                      paddingInlineStart: `calc(var(--space-3) + ${b.depth} * var(--space-4))`,
+                    };
                     if (b.kind === "dir") {
                       const folded = collapsed.has(b.path);
                       const 信 = 行信息(b);
@@ -1257,15 +1291,19 @@ export function App() {
                           aria-expanded={!folded}
                           style={pad}
                           className={
-                            "flex w-full cursor-grab items-baseline gap-1.5 px-3 py-1.5 text-left text-sm text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover" +
+                            "flex w-full cursor-grab items-baseline gap-1 px-3 py-1 text-left text-sm text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover" +
                             (移入 ? " tree-into" : "")
                           }
                         >
-                          <span className="w-3 shrink-0 font-mono text-xs text-fg-disabled">
-                            {folded ? "▸" : "▾"}
+                          <span className="flex w-3 shrink-0 items-center text-xs text-fg-disabled">
+                            {folded ? (
+                              <ChevronRight aria-hidden="true" />
+                            ) : (
+                              <ChevronDown aria-hidden="true" />
+                            )}
                           </span>
                           <span className="min-w-0 flex-1 truncate">{b.name}</span>
-                          <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                          <span className="shrink-0 font-mono text-xs text-fg-2">
                             {b.notes}
                           </span>
                         </button>
@@ -1288,14 +1326,14 @@ export function App() {
                         data-tree-self={信.自身}
                         style={pad}
                         className={
-                          "flex w-full cursor-grab items-baseline gap-1.5 px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) " +
+                          "flex w-full cursor-grab items-baseline gap-1 px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) " +
                           (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
                         }
                       >
                         {/* 与目录行的箭头占同一格，标题才对得齐 */}
                         <span className="w-3 shrink-0" />
                         <span className="min-w-0 flex-1 truncate">{b.title}</span>
-                        <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                        <span className="shrink-0 font-mono text-xs text-fg-2">
                           {relativeTime(b.ms)}
                         </span>
                       </button>
@@ -1310,7 +1348,7 @@ export function App() {
                    而"配了但连不上"要把错误原文摆出来——那是"试过了"，不是"没这功能"。
               */}
               {searching && ai就绪 ? (
-                <div className="mt-2 border-t border-line pt-1.5">
+                <div className="mt-2 border-t border-line pt-1">
                   <div className="flex items-baseline justify-between px-3">
                     <span className="text-xs text-fg-2">语义补充</span>
                     <span className="text-xs text-fg-disabled">
@@ -1350,11 +1388,11 @@ export function App() {
                           <button
                             key={h.chunkId}
                             onClick={() => void openNote(h.path, h.title)}
-                            className="block w-full px-3 py-1.5 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover"
+                            className="block w-full px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover"
                           >
                             <span className="flex items-baseline gap-2">
                               <span className="min-w-0 flex-1 truncate">{h.title}</span>
-                              <span className="shrink-0 text-xs text-fg-disabled">
+                              <span className="shrink-0 text-xs text-fg-2">
                                 {h.from.length > 1
                                   ? "两路都中"
                                   : h.from[0] === "semantic"
@@ -1384,22 +1422,25 @@ export function App() {
                 </div>
               ) : null}
             </nav>
-            <div className="border-t border-line p-2">
+            {/* flex + gap：这一排以前是裸的 inline-block，JSX 换行的空白被 React 丢掉，
+                五枚按钮之间实测 **0 间距**（边框两两贴合）。挂上徽标就换行，而换行后
+                行间距同样是 0——两排方框粘成一张格子。 */}
+            <div className="flex flex-wrap gap-1 border-t border-line p-2">
               <button
-                className={btn + (mode === "trash" ? " bg-active" : "")}
+                className={btnOn(mode === "trash")}
                 onClick={() => void (mode === "trash" ? backToNote() : openTrash())}
               >
                 回收站
               </button>
               <button
-                className={btn + (mode === "import" ? " bg-active" : "")}
+                className={btnOn(mode === "import")}
                 onClick={() => void (mode === "import" ? backToNote() : openImport())}
               >
                 导入
               </button>
               {/* 没备份是产品最坏的状态（docs/03：唯一副本 = 没有副本），入口上要看得见 */}
               <button
-                className={btn + (mode === "backup" ? " bg-active" : "")}
+                className={btnOn(mode === "backup")}
                 onClick={() => void (mode === "backup" ? backToNote() : openBackup())}
               >
                 备份
@@ -1409,20 +1450,20 @@ export function App() {
               </button>
               {/* AI 那一档的入口。角标只说"配齐没有 + 这次测过没有"，不吹成"能用了" */}
               <button
-                className={btn + (mode === "ai" ? " bg-active" : "")}
+                className={btnOn(mode === "ai")}
                 onClick={() => void (mode === "ai" ? backToNote() : openAi())}
               >
                 AI
                 {aiView && 徽标(aiForm, ai测过) ? (
                   <span
-                    className={"ml-1 " + (徽标红(ai测过) ? "text-danger" : "text-fg-disabled")}
+                    className={"ml-1 " + (徽标红(ai测过) ? "text-danger" : "text-fg-2")}
                   >
                     · {徽标(aiForm, ai测过)}
                   </span>
                 ) : null}
               </button>
               <button
-                className={btn + (mode === "ask" ? " bg-active" : "")}
+                className={btnOn(mode === "ask")}
                 onClick={() => void (mode === "ask" ? backToNote() : openAsk())}
               >
                 问答
@@ -1432,7 +1473,7 @@ export function App() {
 
           <main className="min-w-0 flex-1 overflow-y-auto">
             {mode === "import" ? (
-              <div className="px-6 py-8">
+              <div className="measure-ui px-6 py-8">
                 <h2 className="text-xl text-fg">导入外部笔记</h2>
                 <p className="mt-2 text-sm text-fg-2">
                   把一个目录里的 <span className="font-mono text-mono">.md</span>{" "}
@@ -1443,7 +1484,7 @@ export function App() {
                 </p>
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   <input
-                    className="min-w-64 flex-1 rounded-md border border-line bg-base px-3 py-1.5 font-mono text-mono text-fg"
+                    className="min-w-64 flex-1 rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
                     value={importSrc}
                     spellCheck={false}
                     placeholder="D:\\我的 Obsidian 库"
@@ -1479,9 +1520,9 @@ export function App() {
                       {importPlan.slice(0, 40).map((e) => (
                         <div
                           key={e.srcRel}
-                          className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1.5 text-xs"
+                          className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1 text-xs"
                         >
-                          <span className="w-14 shrink-0 text-fg-disabled">
+                          <span className="w-14 shrink-0 text-fg-2">
                             {e.alreadyThere ? "已存在" : e.markdown ? "笔记" : "附件"}
                           </span>
                           <span className="min-w-0 flex-1 truncate font-mono">{e.srcRel}</span>
@@ -1515,7 +1556,7 @@ export function App() {
                 ) : null}
               </div>
             ) : mode === "backup" ? (
-              <div className="px-6 py-8">
+              <div className="measure-ui px-6 py-8">
                 {/* flash 原本只在正文那一支渲染：结果"立即备份"的反馈在它自己的面板里看不见 */}
                 {flash ? <p className="mb-4 text-sm text-fg-2">{flash}</p> : null}
                 <h2 className="text-xl text-fg">备份与快照</h2>
@@ -1547,7 +1588,7 @@ export function App() {
                     立即备份
                   </button>
                   <input
-                    className="min-w-64 flex-1 rounded-md border border-line bg-base px-3 py-1.5 font-mono text-mono text-fg"
+                    className="min-w-64 flex-1 rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
                     value={backupDraft}
                     spellCheck={false}
                     placeholder="E:\\笔记备份"
@@ -1579,7 +1620,7 @@ export function App() {
                           className="flex items-baseline gap-3 rounded-md border border-line bg-raised px-3 py-2"
                         >
                           <span className="min-w-0 flex-1 truncate font-mono text-xs">{r.id}</span>
-                          <span className="shrink-0 text-xs text-fg-disabled">
+                          <span className="shrink-0 text-xs text-fg-2">
                             {new Date(r.takenAt).toLocaleString()}
                           </span>
                           <button
@@ -1605,7 +1646,7 @@ export function App() {
                       className="flex items-baseline gap-3 rounded-md border border-line px-3 py-2 text-sm"
                     >
                       <span className="min-w-0 flex-1 truncate font-mono text-xs">{r.id}</span>
-                      <span className="shrink-0 text-xs text-fg-disabled">
+                      <span className="shrink-0 text-xs text-fg-2">
                         {new Date(r.takenAt).toLocaleString()} · 增量 {r.copiedFiles} / 全库 {r.totalFiles}
                       </span>
                     </div>
@@ -1613,7 +1654,7 @@ export function App() {
                 </div>
               </div>
             ) : mode === "ai" ? (
-              <div className="px-6 py-8">
+              <div className="measure-ui px-6 py-8">
                 <h2 className="text-xl text-fg">接入模型</h2>
                 <p className="mt-2 text-sm text-fg-2">
                   填一个 <span className="font-mono text-mono">OpenAI 兼容</span>{" "}
@@ -1638,7 +1679,7 @@ export function App() {
                     <label key={键} className="flex flex-col gap-1">
                       <span className="text-xs text-fg-2">{标签}</span>
                       <input
-                        className="rounded-md border border-line bg-base px-3 py-1.5 font-mono text-mono text-fg"
+                        className="rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
                         value={aiForm[键]}
                         spellCheck={false}
                         placeholder={占位}
@@ -1650,7 +1691,7 @@ export function App() {
                     <span className="text-xs text-fg-2">
                       API Key
                       {aiView?.keyHint ? (
-                        <span className="ml-2 font-mono text-mono text-fg-disabled">
+                        <span className="ml-2 font-mono text-mono text-fg-2">
                           现在：{aiView.keyHint}
                         </span>
                       ) : (
@@ -1661,7 +1702,7 @@ export function App() {
                     </span>
                     <div className="flex gap-2">
                       <input
-                        className="min-w-0 flex-1 rounded-md border border-line bg-base px-3 py-1.5 font-mono text-mono text-fg"
+                        className="min-w-0 flex-1 rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
                         value={aiKey}
                         type="password"
                         spellCheck={false}
@@ -1717,7 +1758,7 @@ export function App() {
                 </div>
                 {ai发现 ? (
                   <div className="mt-5 max-w-2xl rounded-md border border-line bg-raised px-4 py-3">
-                    <div className="font-mono text-xs text-fg-disabled">
+                    <div className="font-mono text-xs text-fg-2">
                       端点给了 {ai发现.all.length} 个模型｜{ai发现.ms}ms｜其中含
                       <span className="mx-1">embed</span>的 {ai发现.embedCandidates.length} 个
                     </div>
@@ -1728,7 +1769,7 @@ export function App() {
                           <button
                             key={m}
                             className={
-                              "rounded-md border px-2.5 py-1 font-mono text-xs transition-colors duration-(--dur-1) " +
+                              "rounded-md border px-3 py-1 font-mono text-xs transition-colors duration-(--dur-1) " +
                               (aiForm.embeddingModel === m
                                 ? "border-accent text-fg"
                                 : "border-line text-fg-2 hover:bg-hover")
@@ -1750,10 +1791,10 @@ export function App() {
                     )}
                     {ai发现.all.length > 0 ? (
                       <details className="mt-2">
-                        <summary className="cursor-pointer text-xs text-fg-disabled">
+                        <summary className="cursor-pointer text-xs text-fg-2">
                           它给的全部模型（{ai发现.all.length}）
                         </summary>
-                        <div className="mt-1 flex flex-wrap gap-1.5">
+                        <div className="mt-1 flex flex-wrap gap-2">
                           {ai发现.all.map((m) => (
                             <span key={m} className="font-mono text-xs text-fg-2">
                               {m}
@@ -1770,7 +1811,7 @@ export function App() {
                       测试结果
                       <span
                         className={
-                          "ml-2 text-xs " + (aiReport.ok ? "text-ok" : "text-danger")
+                          "ml-2 text-xs " + (aiReport.ok ? "text-success" : "text-danger")
                         }
                       >
                         {探针结论(aiReport.ok, aiReport.steps)}
@@ -1785,10 +1826,10 @@ export function App() {
                         }
                       >
                         <span className="text-fg">{步骤名(r.stage)}</span>
-                        <span className="ml-2 font-mono text-xs text-fg-disabled">
+                        <span className="ml-2 font-mono text-xs text-fg-2">
                           {r.ms}ms
                         </span>
-                        <div className="mt-0.5 break-words text-xs text-fg-2">{r.detail}</div>
+                        <div className="mt-1 break-words text-xs text-fg-2">{r.detail}</div>
                       </div>
                     ))}
                     <p className="mt-1 text-xs text-fg-disabled">
@@ -1804,7 +1845,7 @@ export function App() {
                 </p>
               </div>
             ) : mode === "ask" ? (
-              <div className="px-6 py-8">
+              <div className="measure-ui px-6 py-8">
                 <h2 className="text-xl text-fg">问 AI</h2>
                 <p className="mt-2 max-w-2xl text-sm text-fg-2">
                   答案只从检索出来的片段里组装：<span className="text-fg">模型引用了没给过的编号，
@@ -1813,7 +1854,7 @@ export function App() {
                 </p>
                 <div className="mt-4 flex max-w-2xl gap-2">
                   <input
-                    className="min-w-0 flex-1 rounded-md border border-line bg-base px-3 py-1.5 text-fg"
+                    className="min-w-0 flex-1 rounded-md border border-line bg-page px-3 py-1 text-fg"
                     value={问}
                     placeholder="比如：备份为什么要放到第二个目录？"
                     onChange={(e) => set问(e.target.value)}
@@ -1842,7 +1883,7 @@ export function App() {
                       (答.insufficient ? "border-danger bg-danger-soft" : "border-line bg-raised")
                     }
                   >
-                    <div className="font-mono text-xs text-fg-disabled">
+                    <div className="font-mono text-xs text-fg-2">
                       {答.model}｜候选 {答.candidates}｜in {答.inTokens} / out {答.outTokens}
                       {"｜"}
                       {答.ms}ms
@@ -1858,15 +1899,15 @@ export function App() {
                           <button
                             key={c.label}
                             onClick={() => void openNote(c.path, c.title)}
-                            className="block rounded-md border border-line px-2.5 py-1.5 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover focus-visible:border-accent"
+                            className="block rounded-md border border-line px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover focus-visible:border-accent"
                           >
                             <span className="flex items-baseline gap-2">
-                              <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                              <span className="shrink-0 font-mono text-xs text-fg-2">
                                 {c.label}
                               </span>
                               <span className="min-w-0 flex-1 truncate text-fg">{c.crumb}</span>
                             </span>
-                            <span className="mt-0.5 block truncate text-xs text-fg-2">
+                            <span className="mt-1 block truncate text-xs text-fg-2">
                               {c.snippet}
                             </span>
                           </button>
@@ -1881,7 +1922,7 @@ export function App() {
                 ) : null}
                 <h3 className="mt-8 text-sm text-fg-2">
                   最近的生成
-                  <span className="ml-1.5 font-mono text-xs text-fg-disabled">{runs.length}</span>
+                  <span className="ml-1 font-mono text-xs text-fg-2">{runs.length}</span>
                 </h3>
                 <div className="mt-2 flex max-w-2xl flex-col gap-1">
                   {runs.length === 0 ? (
@@ -1890,7 +1931,7 @@ export function App() {
                   {runs.map((r) => (
                     <div
                       key={r.id}
-                      className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1.5 text-xs"
+                      className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1 text-xs"
                     >
                       <span className={r.ok ? "text-fg" : "text-danger"}>
                         {r.ok ? "采纳" : "未采纳"}
@@ -1900,7 +1941,7 @@ export function App() {
                         {r.retried ? "｜重试过" : ""}
                         {r.semantic ? "" : "｜只有关键词"}
                       </span>
-                      <span className="shrink-0 font-mono text-fg-disabled">
+                      <span className="shrink-0 font-mono text-fg-2">
                         {r.inTokens + r.outTokens} tok · {new Date(r.createdAt).toLocaleTimeString()}
                       </span>
                     </div>
@@ -1912,7 +1953,7 @@ export function App() {
                 </p>
               </div>
             ) : mode === "trash" ? (
-              <div className="px-6 py-8">
+              <div className="measure-ui px-6 py-8">
                 <h2 className="text-xl text-fg">回收站</h2>
                 <p className="mt-2 text-sm text-fg-2">
                   删掉的笔记存在 <span className="font-mono text-mono">.note/trash/</span>，恢复即移回原路径。清空这个目录才是真删。
@@ -1927,7 +1968,7 @@ export function App() {
                       className="flex items-baseline gap-3 rounded-md border border-line bg-raised px-3 py-2"
                     >
                       <span className="min-w-0 flex-1 truncate text-sm">{stemOf(t.rel)}</span>
-                      <span className="shrink-0 font-mono text-xs text-fg-disabled">
+                      <span className="shrink-0 font-mono text-xs text-fg-2">
                         {t.rel} · {relativeTime(t.updatedMs)}
                       </span>
                       <button className={btnPrimary} onClick={() => void restore(t)}>
@@ -1946,7 +1987,7 @@ export function App() {
                         <>
                           <input
                             autoFocus
-                            className="min-w-0 flex-1 rounded-md border border-accent bg-base px-2 py-1 text-sm"
+                            className="min-w-0 flex-1 rounded-md border border-accent bg-page px-2 py-1 text-sm"
                             value={nameDraft}
                             onChange={(e) => setNameDraft(e.target.value)}
                             onKeyDown={(e) => {
@@ -1963,13 +2004,13 @@ export function App() {
                         </>
                       ) : (
                         <>
-                          <span className="min-w-0 shrink truncate font-mono text-fg-disabled">
+                          <span className="min-w-0 shrink truncate font-mono text-fg-2">
                             {selected.rel}
                           </span>
                           {/* 没有"编辑/完成"了：打开就是可编辑的。管理动作压在右上角，
                               平时半透明，指针靠近或拿到键盘焦点才实——它们不是正文的一部分，
                               但也不该在用户写字时占住注意力。 */}
-                          <span className="ml-auto flex shrink-0 items-center gap-1 opacity-55 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
+                          <span className="ml-auto flex shrink-0 items-center gap-1 opacity-90 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
                             <button className={btn} onClick={() => void switchSurface()}>
                               {mode === "source" ? "所见即所得" : "源码"}
                             </button>
@@ -2038,11 +2079,13 @@ export function App() {
                         className="h-[60vh] w-full resize-y rounded-md border border-line bg-sunken p-4 font-mono text-mono leading-body text-fg"
                       />
                     ) : (
-                      // 装载中：既不给上一篇留着，也不闪一个空框——骨架意味着"路上有东西"
-                      <div className="flex flex-col gap-2">
-                        <div className="skeleton h-4 w-2/3" />
-                        <div className="skeleton h-3 w-full" />
-                        <div className="skeleton h-3 w-5/6" />
+                      // 装载中：既不给上一篇留着，也不闪一个空框——骨架意味着"路上有东西"。
+                      // 尺寸照真实内容：一级标题 28px×1.3≈36px → h-9，正文行 23.25px → h-6，
+                      // 段间距 1.15em≈17.8px → gap-4（[06] §3"骨架抖动=布局错误的信号"）
+                      <div className="flex flex-col gap-4">
+                        <div className="skeleton h-9 w-2/3" />
+                        <div className="skeleton h-6 w-full" />
+                        <div className="skeleton h-6 w-5/6" />
                       </div>
                     )}
                     {links && selected ? (
@@ -2057,7 +2100,7 @@ export function App() {
                         冲突不走这里：那是要用户做决定的，用上面那条横幅。 */}
                     {saveState === "saving" || saveState === "saved" ? (
                       <div
-                        className="pointer-events-none fixed right-5 bottom-5 z-(--z-toast) rounded-full border border-line bg-raised px-3 py-1.5 text-xs text-fg-2 shadow-2"
+                        className="pointer-events-none fixed right-5 bottom-5 z-(--z-toast) rounded-full border border-line bg-raised px-3 py-1 text-xs text-fg-2 shadow-2"
                         aria-live="polite"
                       >
                         {saveState === "saving" ? "保存中…" : "已自动保存"}
@@ -2065,22 +2108,31 @@ export function App() {
                     ) : null}
                   </>
                 ) : (
-                  <div className="flex flex-col items-start gap-2 text-fg-2">
+                  <div className="flex flex-col items-start gap-4 text-fg-2">
                     <div className="text-lg">
                       {flash ? (
                         flash
                       ) : notes && notes.notes.length === 0 ? (
-                        "还没有笔记。按 Alt+Shift+N 记一条，或用左上的 ＋ 建一篇。"
+                        "还没有笔记。按 Alt+Shift+N 记一条，或者建一篇来写。"
                       ) : (
                         "选一篇笔记，或者从左边搜一个词。"
                       )}
                     </div>
-                    {/* 骨架屏只在真的有东西在路上时出现：常驻骨架=在骗人 */}
+                    {/* [06] §3：空态是"文案 + 一个主操作"，不是插画满屏。空态是最容易被
+                        忘掉的界面——这里以前只有一句话，用户站在这儿不知道下一步按什么 */}
+                    {info && !flash ? (
+                      <button className={btnPrimary} onClick={() => setCreating(true)}>
+                        新建一篇
+                      </button>
+                    ) : null}
+                    {/* 骨架屏只在真的有东西在路上时出现：常驻骨架=在骗人。
+                        高度对齐一行正文（15.5px × 1.5 = 23.25px → h-6），以前是 h-3=12px，
+                        装载完内容一落到原位就是一次跳 */}
                     {!info ? (
                       <>
-                        <div className="skeleton h-3 w-64" />
-                        <div className="skeleton h-3 w-80" />
-                        <div className="skeleton h-3 w-48" />
+                        <div className="skeleton h-6 w-64" />
+                        <div className="skeleton h-6 w-80" />
+                        <div className="skeleton h-6 w-48" />
                       </>
                     ) : null}
                   </div>

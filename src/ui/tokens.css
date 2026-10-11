@@ -14,9 +14,13 @@
   /* ---- 面 ---- */
   --bg-base: oklch(98.5% 0.002 260);
   --bg-raised: oklch(99.6% 0.001 260);
-  --bg-sunken: oklch(96.2% 0.004 260);
-  --bg-hover: oklch(97.2% 0.003 260);
-  --bg-active: oklch(94.6% 0.005 260);
+  /* 沉底色要一眼是"凹下去的一块"：96.2% 时它与页面底只差 1.07:1，
+     行内码与代码块等于没底色（骨架屏那档同一条，见 base.css .skeleton） */
+  --bg-sunken: oklch(92.5% 0.005 260);
+  /* 交互反馈底：hover 1.07:1、active 1.16:1 时"鼠标在这行""这格开着"都看不出来，
+     压到 1.14 / 1.35（亮）与 1.18 / 1.45（暗）。这两档是列表唯一的选中语言 */
+  --bg-hover: oklch(95% 0.004 260);
+  --bg-active: oklch(89.5% 0.007 260);
   --bg-backdrop: oklch(20% 0.01 260 / 0.32);
 
   /* ---- 文 ---- */
@@ -28,7 +32,8 @@
   /* ---- 强调与状态 ---- */
   --accent: oklch(55% 0.17 265);
   --accent-hover: oklch(61% 0.17 265);
-  --accent-soft: oklch(55% 0.17 265 / 0.1);
+  /* 选中态（当前行 / 框住的格子 / ::selection）只有这一层颜色，10% 时与底差 1.14:1 */
+  --accent-soft: oklch(55% 0.17 265 / 0.18);
   --success: oklch(55% 0.13 155);
   --warning: oklch(66% 0.14 78);
   --danger: oklch(55% 0.2 25);
@@ -48,8 +53,9 @@
   --code-var: oklch(46% 0.09 320);
 
   /* ---- 线与环 ---- */
-  --border-subtle: oklch(90% 0.005 260);
-  --border-strong: oklch(80% 0.008 260);
+  /* 亮面下卡片与页面底只差 1.03:1，边界几乎全靠这条线承担：90% 时它自己也只有 1.29:1 */
+  --border-subtle: oklch(87% 0.006 260);
+  --border-strong: oklch(76% 0.009 260);
   --focus-ring: oklch(55% 0.17 265 / 0.55);
 
   /* ---- 字阶（行高不对称，正文 1.75 是排版底线）---- */
@@ -62,6 +68,10 @@
   --text-mono: 13.5px;
   --leading-body: 1.75;
   --leading-ui: 1.5;
+  /* 代码块的行高。[06] 的字阶表把它记在 `--text-mono` 名下，实际不是字号的事：
+     行内码跟着段落走，只有整块代码用这一档。以前 `.prose-note pre` 写死 1.7、
+     而块编辑器那三处写的是 `--leading-body`（1.75）——同一件事两个值，行号与代码会漂开 */
+  --leading-code: 1.7;
   --font-ui: "Inter Variable", "Inter", "Noto Sans SC", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
 
@@ -78,6 +88,9 @@
 
   /* ---- 排版约束 ---- */
   --measure: min(72rem, 100%); /* 中文一行 ~74 字，见 [06] §正文排版细则 */
+  /* 面板里那些 13px 的说明段与列表：照 72rem 排就是 88 字一行，比 [06] 要的 65–75 还宽。
+     56rem = 896px，13px 的字一行约 69 字，落回同一个区间 */
+  --measure-ui: min(56rem, 100%);
   --gap-para: 1.15em;
   --gap-list: 0.35em;
   --gap-h-top: 1.8em;
@@ -94,8 +107,10 @@
   --shadow-2: 0 6px 20px -6px oklch(20% 0.02 260 / 0.22);
   --shadow-3: 0 24px 60px -12px oklch(20% 0.02 260 / 0.34);
 
-  /* ---- 层级：禁止组件里写裸数字 ---- */
+  /* ---- 层级：禁止组件里写裸数字（CSS 里也一样，护栏同步盯着）---- */
   --z-base: 0;
+  /* 落位线这类"贴在行上的标记"：定位元素本来就压在静态行之上，给 1 只是为了读得懂意图 */
+  --z-marker: 1;
   --z-sticky: 100;
   --z-overlay: 500;
   --z-popover: 600;
@@ -115,9 +130,11 @@
 
   --bg-base: oklch(17% 0.006 260);
   --bg-raised: oklch(21% 0.007 260);
-  --bg-sunken: oklch(14% 0.006 260);
-  --bg-hover: oklch(24% 0.008 260);
-  --bg-active: oklch(27.5% 0.009 260);
+  /* 暗面往下沉能拿到的对比很有限（WCAG 那个 +0.05 在近黑处吃掉了一切），14%→11.5% 只从
+     1.04 走到 1.07：所以"看得见的标记"在暗面一律往上提（骨架屏用 --bg-active），不往下挖 */
+  --bg-sunken: oklch(11.5% 0.006 260);
+  --bg-hover: oklch(27% 0.009 260);
+  --bg-active: oklch(33% 0.011 260);
   --bg-backdrop: oklch(8% 0.01 260 / 0.5);
 
   --text-primary: oklch(93% 0.004 260);
@@ -127,7 +144,7 @@
 
   --accent: oklch(70% 0.14 265);
   --accent-hover: oklch(76% 0.14 265);
-  --accent-soft: oklch(70% 0.14 265 / 0.14);
+  --accent-soft: oklch(70% 0.14 265 / 0.22);
   --success: oklch(72% 0.12 155);
   --warning: oklch(78% 0.12 78);
   --danger: oklch(68% 0.16 25);
@@ -158,7 +175,11 @@
 /* 让 Tailwind 工具类引用语义 token：inline 保证生成的是 var(...)，
    换主题时不必重新构建 */
 @theme inline {
-  --color-base: var(--bg-base);
+  /* 这一族叫 `page` 不叫 `base`：Tailwind 的 `text-<名>` 会同时被字号与颜色两个命名空间抢，
+     而**颜色赢**。以前登记 `--color-base` 时，`text-base` 实测生成的是
+     `color: var(--bg-base)`——把字刷成页面底色，字号一个像素都不给。改名成 `bg-page` 之后
+     `text-base` 回到 Tailwind 本来的意思（15.5px 正文），地雷从根上拆掉。 */
+  --color-page: var(--bg-base);
   --color-raised: var(--bg-raised);
   --color-sunken: var(--bg-sunken);
   --color-hover: var(--bg-hover);
@@ -188,9 +209,24 @@
   --text-2xl: var(--text-2xl);
   --text-mono: var(--text-mono);
 
+  /* 行高**必须跟着字号一起登记**。只登记字号时 Tailwind 会把自己那套
+     `--text-*--line-height` 默认值漏进来：实测 `text-xs` 12px/16px = 1.33、
+     `text-sm` 13px/18.57px = 1.43、`text-mono` 干脆没有行高（继承 1.5）——
+     与 [06] §2 字阶表里的 1.5 / 1.6 / 1.7 三档全对不上，中文界面就挤在这一层皮上。 */
+  --text-xs--line-height: 1.5;
+  --text-sm--line-height: 1.6;
+  --text-lg--line-height: 1.6;
+  --text-xl--line-height: 1.4;
+  --text-2xl--line-height: 1.3;
+  /* `--text-mono` **故意不登记行高**：等宽这档有两个用处——代码块（要 1.7，见 `--leading-code`）
+     与段落里的行内码（必须跟着所在段落的行高走）。行内码一旦自带更大的行高，
+     它所在的那一行会被撑开，一段话就变成"一行高一行低"。 */
+  --text-base--line-height: var(--leading-body);
+
   /* 不登记这两个，`leading-body` / `leading-ui` 就是查无此类的空类名 */
   --leading-body: var(--leading-body);
   --leading-ui: var(--leading-ui);
+  --leading-code: var(--leading-code);
 
   --font-ui: var(--font-ui);
   --font-mono: var(--font-mono);

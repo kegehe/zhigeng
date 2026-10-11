@@ -60,7 +60,7 @@ export function CommandPalette({
 
   return (
     <div
-      className="palette-scrim fixed inset-0 z-(--z-modal) flex justify-center bg-backdrop px-4 pt-[12vh]"
+      className="fixed inset-0 z-(--z-modal) flex justify-center bg-backdrop px-4 pt-[12vh]"
       onMouseDown={(e) => {
         // 点在遮罩上关，点在面板里不关
         if (e.target === e.currentTarget) onClose();
@@ -98,7 +98,7 @@ export function CommandPalette({
               onClose();
             }
           }}
-          className="w-full border-b border-line bg-transparent px-4 py-3 text-base text-fg outline-none placeholder:text-fg-disabled"
+          className="palette-input w-full border-b border-line bg-transparent px-4 py-3 text-base text-fg placeholder:text-fg-disabled"
         />
         {/* ARIA 的 owned-by 规则：option 必须是 listbox 的**直接**后代（中间只允许 role=group）。
             原先 option 挂在 li 里的 button 上，读屏按 ARIA 走树的时候找不到它——
@@ -107,7 +107,7 @@ export function CommandPalette({
           id="palette-list"
           role="listbox"
           aria-label="结果"
-          className="min-h-0 flex-1 overflow-y-auto p-1.5"
+          className="min-h-0 flex-1 overflow-y-auto p-1"
         >
           {出.length === 0 ? (
             <p className="px-3 py-6 text-center text-sm text-fg-disabled">没有匹配的笔记或动作</p>

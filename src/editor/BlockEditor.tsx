@@ -376,7 +376,22 @@ export function BlockEditor({
       if (off === start) index = i;
     });
     const r = dom.getBoundingClientRect();
-    return { top: dom.offsetTop, height: dom.offsetHeight, start, index, 上半: y < r.top + r.height / 2 };
+    /**
+     * `top` 必须相对 `.editor-wrap`——手柄、落位线、菜单都挂在那儿定位。
+     * 以前用的是 `dom.offsetTop`，而它的参考系是 `.ProseMirror`（`base.css` 为了焦点竖线
+     * 给它加了 `position: relative`），两者之间还压着一整条 sticky 工具栏：
+     * 同一份 CSS 搭的几何夹具量出来，块相对 wrap 是 116px、offsetTop 只有 45px，
+     * **手柄比它指的块高 71px**（工具栏 59 + 外边距 12）。选区气泡与 `/` 菜单一直是
+     * 按 rect 算的，所以只有这两样错位——也正因为只有它们两个用了另一个参考系。
+     */
+    const 宿主 = wrap.current?.getBoundingClientRect();
+    return {
+      top: r.top - (宿主?.top ?? 0),
+      height: r.height,
+      start,
+      index,
+      上半: y < r.top + r.height / 2,
+    };
   };
 
   const applyType = (id: BlockTypeId) => {
@@ -435,7 +450,15 @@ export function BlockEditor({
       setDrop(null);
       if (!moved) {
         const dom = editor.view.nodeDOM(from.start);
-        if (dom instanceof HTMLElement) setMenu({ top: dom.offsetTop + dom.offsetHeight + 4, left: 0, start: from.start });
+        if (dom instanceof HTMLElement) {
+          // 与 `blockAt` 同一个参考系：菜单要贴在这一块的下沿，就得按 rect 相对 wrap 算
+          const r = dom.getBoundingClientRect();
+          setMenu({
+            top: r.bottom - (wrap.current?.getBoundingClientRect().top ?? 0) + 4,
+            left: 0,
+            start: from.start,
+          });
+        }
         return;
       }
       if (!target) return;

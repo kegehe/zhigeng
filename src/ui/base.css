@@ -40,6 +40,13 @@
     user-select: text;
   }
 
+  /* 主区是"读一篇笔记"的地方：报错原文、路径、模型名、引用片段都在这里。
+     body 上那条 user-select:none 是为了防"拖一下把整面选蓝"，但它把这些**能看见却复制不了**
+     的文字一起锁住了——桌面产品里这等于缺一块基本能力。侧栏与标题栏仍然不选。 */
+  main {
+    user-select: text;
+  }
+
   button {
     font: inherit;
     color: inherit;
@@ -47,6 +54,16 @@
     border: none;
     padding: 0;
     cursor: default;
+  }
+
+  /* 图标尺寸随字阶（[06] §技术选型 给 Lucide 定的那条），颜色走 currentColor：
+     hover / `.on` / `:disabled` 改的都是 color，图标自己会跟着变。
+     写在 base 层是因为这条不分区域——标题栏、侧栏、编辑器工具栏、代码卡上的复制键
+     都用同一套；以前它只写在 `.block-editor .toolbar` 里，于是标题栏那几枚只能拿字符顶。 */
+  button svg {
+    display: block;
+    width: 1em;
+    height: 1em;
   }
 
   /* 焦点：绝不用 outline:none 一去了之（docs/06 §4） */
@@ -80,6 +97,12 @@
   /* 正文排版：行长与不对称间距是观感的七成来源 */
   .measure {
     max-inline-size: var(--measure);
+    margin-inline: auto;
+  }
+  /* 面板（导入 / 备份 / AI / 问答 / 回收站）那一支的行长。它们不是正文，字是 13px，
+     照 --measure 排会到 88 字一行——同一个"65–75 字"的规则换成这个字号得换个上限 */
+  .measure-ui {
+    max-inline-size: var(--measure-ui);
     margin-inline: auto;
   }
   .prose-note p {
@@ -136,7 +159,7 @@
     border-radius: var(--radius-md);
     padding: var(--space-4);
     overflow-x: auto; /* 代码块超宽横向滚动，不换行 */
-    line-height: 1.7;
+    line-height: var(--leading-code);
   }
   .prose-note pre code {
     background: none;
@@ -172,7 +195,10 @@
   .block-editor .ProseMirror::before {
     content: "";
     position: absolute;
-    left: -14px;
+    /* 页边只有 24px 宽，而行首手柄占的就是 -24..-4 那一段：竖线再留在 -14 就等于
+       画在手柄底下（手柄一 hover 就有底色，正好把它盖掉）。挪到手边外侧一格，
+       两样东西各占一段，"焦点在哪一块"与"要点哪一块改类型"才同时看得见 */
+    left: calc(var(--space-1) * -1);
     top: var(--focus-top, 0px);
     height: var(--focus-h, 0px);
     width: 2px;
@@ -354,12 +380,12 @@
   .block-editor .md-view .codeblock code {
     font-family: var(--font-mono);
     font-size: var(--text-mono);
-    line-height: var(--leading-body);
+    line-height: var(--leading-code);
   }
   .block-editor .md-view .codeblock .lang {
     display: block;
     margin-bottom: var(--space-1);
-    color: var(--text-disabled);
+    color: var(--text-secondary);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
   }
@@ -402,10 +428,11 @@
     /* 与代码同一套字与行高，否则数字会一路漂开 */
     font-family: var(--font-mono);
     font-size: var(--text-mono);
-    line-height: var(--leading-body);
+    line-height: var(--leading-code);
     text-align: right;
     white-space: pre;
-    color: var(--text-disabled);
+    /* 行号是"数得出来的东西"，不是水印：sunken 底上 disabled 只有 2.7:1（亮） */
+    color: var(--text-secondary);
     /* 它是装饰：不许被选中、不许进剪贴板、读屏也不念一串数字（aria-hidden 在 JS 那边设） */
     user-select: none;
   }
@@ -422,10 +449,10 @@
     align-items: center;
     padding: 0;
     cursor: pointer;
-    color: var(--text-disabled);
+    color: var(--text-secondary);
   }
   .block-editor .md-opaque[data-md-code] .md-copy:hover {
-    color: var(--text-secondary);
+    color: var(--text-primary);
   }
   .block-editor .md-opaque[data-md-code] .md-copy .md-copy-ok {
     display: none;
@@ -461,7 +488,7 @@
     border-left: 3px solid transparent;
     border-right: 3px solid transparent;
     border-top: 4px solid currentColor;
-    color: var(--text-disabled);
+    color: var(--text-secondary);
   }
   .block-editor .md-opaque[data-md-code] .md-lang {
     padding: 0;
@@ -469,7 +496,10 @@
     appearance: none;
     -webkit-appearance: none;
     background: none;
-    color: var(--text-disabled);
+    /* 语言牌上那个词是**内容**（它决定这块代码怎么着色、怎么落盘），不是占位符：
+       压在 sunken 底上时 `--text-disabled` 只有 2.7:1（亮），[06] §4 那条"豁免位不得用在
+       真内容上"就是这个意思。复制图标同理——它是非文本控件，底线 3:1。 */
+    color: var(--text-secondary);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     cursor: pointer;
@@ -481,7 +511,7 @@
   }
   .block-editor .md-opaque[data-md-code] .md-lang-box:hover .md-lang,
   .block-editor .md-opaque[data-md-code] .md-lang-box:hover::after {
-    color: var(--text-secondary);
+    color: var(--text-primary);
   }
   .block-editor .md-opaque[data-md-code] .md-lang[data-guessed] {
     font-style: italic; /* 猜出来的与写进去的要能一眼分辨（title 里写了为什么） */
@@ -497,7 +527,7 @@
   .block-editor .md-opaque[data-md-code] .md-src code {
     font-family: var(--font-mono);
     font-size: var(--text-mono);
-    line-height: var(--leading-body);
+    line-height: var(--leading-code);
   }
   /*
    * 图片块（docs/02 §资产引用格式、docs/03 §图片）。**屏幕上只有这一面**：
@@ -714,9 +744,27 @@
     box-shadow: inset 0 0 0 1px var(--accent);
   }
   /* 命令面板。只动 transform / opacity（[06] §动效），reduced-motion 由 tokens.css 全局归零。
-     遮罩不做淡入：它一出现就该是"挡住了"，动画会让第一次按键落在半透明层上。 */
+     遮罩不做淡入：它一出现就该是"挡住了"，动画会让第一次按键落在半透明层上。
+     时长走 token——以前这里写死 160ms，而 [06] 的动效表只有 120/180/240 三档 */
   .palette-panel {
-    animation: palette-in 160ms var(--ease-out);
+    animation: palette-in var(--dur-2) var(--ease-out);
+  }
+  /* 输入框那条全局描边环在这里没有落点：面板是 overflow-hidden 的，2px offset 的环
+     会被上圆角裁掉半圈。去掉它必须给另一种看得见的指示（[06] §4），所以替代的那一条
+     写在**同一条前缀选择器**上——护栏认的就是这个绑定。 */
+  .palette-input {
+    outline: none;
+  }
+  .palette-input:focus-visible {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  /* [06] §3 要当前项有左侧 2px accent 条。只有 1.4:1 的底色时，键盘上下走的人问的
+     是"到底停在哪一条"，那一层底答不了。透明边框先占位，切换时文字不会左右跳 */
+  .palette-panel [role="option"] {
+    border-inline-start: 2px solid transparent;
+  }
+  .palette-panel [role="option"][aria-selected="true"] {
+    border-inline-start-color: var(--accent);
   }
   @keyframes palette-in {
     from {
@@ -756,7 +804,7 @@
   /* 菜单分成「类型 / 插入」两组：组标签不能长得像可点的项，否则 13 行看着像 13 个操作 */
   .block-editor .slash .grp {
     padding: var(--space-1) var(--space-2) 0;
-    color: var(--text-disabled);
+    color: var(--text-secondary);
     font-size: var(--text-xs);
   }
   .block-editor .slash button + .grp {
@@ -777,14 +825,7 @@
     text-align: start;
     cursor: pointer;
   }
-  /* 图标尺寸随字阶（[06] §技术选型 给 Lucide 定的那条就是"尺寸随字阶"），颜色走 currentColor：
-     hover / `.on` / `:disabled` 改的都是 color，图标自己会跟着变，不需要各写一份 */
-  .block-editor .bubble button svg,
-  .block-editor .toolbar button svg {
-    display: block;
-    width: 1em;
-    height: 1em;
-  }
+  /* 尺寸那条挪到 base 层的 `button svg` 去了（同一条规则不该在两处各写一份） */
   .block-editor .bubble button:hover,
   .block-editor .slash button:hover,
   .block-editor .toolbar button:hover:not(:disabled) {
@@ -911,12 +952,6 @@
     font-size: var(--text-sm);
   }
 
-  /* Windows 材质（Mica/Acrylic）在降级档下关闭；也用于旧机器掉帧时的兜底 */
-  [data-effects="off"] .surface {
-    background: var(--bg-raised) !important;
-    backdrop-filter: none;
-  }
-
   .surface {
     background: color-mix(in oklab, var(--bg-raised) 72%, transparent);
   }
@@ -934,7 +969,7 @@
     border-radius: var(--radius-full);
     background: var(--focus-ring);
     pointer-events: none;
-    z-index: 1;
+    z-index: var(--z-marker);
   }
   .tree-into {
     background: var(--bg-hover);
@@ -976,12 +1011,19 @@
     color: var(--text-on-accent);
   }
 
+  /*
+   * 骨架屏。以前用 `--bg-sunken`：暗面 14% 压在 17% 的页面底上是 **1.04:1**，
+   * 亮面 1.07:1——意思是"在路上"的那几帧其实什么都没有，用户以为界面卡住了。
+   * 暗面往下挖拿不到对比（近黑处 WCAG 的 +0.05 吃掉一切），所以改成往上提 `--bg-active`：
+   * 暗 1.57:1、亮 1.31:1。高度与间距照 [06] §3"与真实内容同尺寸同间距"：
+   * 一行正文是 15.5px × 1.5 = 23.25px → `h-6`(24px)，段间 1.15em ≈ 17.8px → `gap-4`(16px)。
+   */
   .skeleton {
     background: linear-gradient(
       90deg,
-      var(--bg-sunken),
-      color-mix(in oklab, var(--bg-sunken) 60%, var(--bg-raised)),
-      var(--bg-sunken)
+      var(--bg-active),
+      color-mix(in oklab, var(--bg-active) 55%, var(--bg-hover)),
+      var(--bg-active)
     );
     background-size: 200% 100%;
     animation: shimmer 1.4s var(--ease-out) infinite;

@@ -74,9 +74,9 @@ function LinkGroup({
     <div>
       <h3 className="text-sm text-fg-2">
         {label}
-        <span className="ml-1.5 font-mono text-xs text-fg-disabled">{rows.length}</span>
+        <span className="ml-1 font-mono text-xs text-fg-2">{rows.length}</span>
       </h3>
-      <ul className="mt-1.5 flex flex-col gap-1.5">
+      <ul className="mt-1 flex flex-col gap-1">
         {rows.map((g) => {
           const l = g.row;
           const 判 = 面板判定(l);
@@ -97,25 +97,25 @@ function LinkGroup({
                 <span className="flex items-baseline gap-2">
                   <span className="min-w-0 flex-1 truncate text-fg">{l.title}</span>
                   {g.次数 > 1 ? (
-                    <span className="shrink-0 font-mono text-xs text-fg-disabled">×{g.次数}</span>
+                    <span className="shrink-0 font-mono text-xs text-fg-2">×{g.次数}</span>
                   ) : null}
                   {判.尾注 ? (
                     <span
                       className={
-                        "shrink-0 text-xs " + (判.标红 ? "text-danger" : "text-fg-disabled")
+                        "shrink-0 text-xs " + (判.标红 ? "text-danger" : "text-fg-2")
                       }
                     >
                       {判.尾注}
                     </span>
                   ) : null}
                   {g.全到块 ? (
-                    <span className="shrink-0 text-xs text-fg-disabled">到块</span>
+                    <span className="shrink-0 text-xs text-fg-2">到块</span>
                   ) : null}
                   {l.status === "archived" ? (
-                    <span className="shrink-0 text-xs text-fg-disabled">已归档</span>
+                    <span className="shrink-0 text-xs text-fg-2">已归档</span>
                   ) : null}
                   {l.status === "inbox" ? (
-                    <span className="shrink-0 text-xs text-fg-disabled">待整理</span>
+                    <span className="shrink-0 text-xs text-fg-2">待整理</span>
                   ) : null}
                 </span>
                 {(() => {
@@ -126,7 +126,7 @@ function LinkGroup({
                       ? `[[${l.target}]]`
                       : l.snippet || l.rel;
                   return 副 ? (
-                    <span className="mt-0.5 block truncate text-xs text-fg-2">{副}</span>
+                    <span className="mt-1 block truncate text-xs text-fg-2">{副}</span>
                   ) : null;
                 })()}
               </button>
@@ -135,7 +135,7 @@ function LinkGroup({
         })}
       </ul>
       {截断 ? (
-        <p className="mt-1.5 px-3 text-xs text-fg-disabled">还有更多没列出来。</p>
+        <p className="mt-1 px-3 text-xs text-fg-disabled">还有更多没列出来。</p>
       ) : null}
     </div>
   );

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { X } from "lucide-react";
 import type { CapturedOut } from "./ipc/types";
 import { 套主题, 盯主题变化, 读主题 } from "./ui/theme";
 
@@ -79,8 +80,12 @@ export function Capture() {
         data-tauri-drag-region
       >
         <span data-tauri-drag-region>速记 · 存到 inbox/</span>
-        <button className="rounded-sm px-1 hover:bg-hover" onClick={close} title="隐藏（Esc）">
-          ✕
+        <button
+          className="grid place-items-center rounded-sm px-1 hover:bg-hover"
+          onClick={close}
+          title="隐藏（Esc）"
+        >
+          <X aria-hidden="true" />
         </button>
       </div>
 
@@ -102,7 +107,7 @@ export function Capture() {
             close();
           }
         }}
-        className="min-h-0 flex-1 resize-none bg-raised px-4 pb-2 font-ui text-base leading-body text-fg placeholder:text-fg-disabled"
+        className="min-h-0 flex-1 resize-none bg-raised px-4 pt-2 pb-2 font-ui text-base text-fg placeholder:text-fg-disabled"
       />
 
       <div className="flex h-9 shrink-0 items-center justify-between px-4 text-xs">
@@ -110,7 +115,7 @@ export function Capture() {
           {phase === "error" ? (err ?? "出错") : phase === "saved" ? `已存 ${saved?.rel ?? ""}` : "Alt+Shift+N 随时唤起"}
         </span>
         <button
-          className="rounded-sm border border-line px-2 py-0.5 hover:bg-hover disabled:text-fg-disabled"
+          className="rounded-sm border border-line px-2 py-1 hover:bg-hover disabled:opacity-55"
           disabled={phase === "saving" || !text.trim()}
           onClick={() => void submit()}
         >
