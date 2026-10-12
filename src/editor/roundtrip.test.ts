@@ -3056,6 +3056,13 @@ describe("整块删除：点到卡片身上与手柄菜单那一项", () => {
     expect(editor.state.selection, "点到卡片身上就该是整块").toBeInstanceOf(NodeSelection);
     expect((editor.state.selection as NodeSelection).from).toBe(块.pos);
     /**
+     * 选区对了还不算——**必须在 DOM 上留得下标记**，否则没有一条 CSS 认得出"这块被选了"，
+     * 用户看到的就是"选中是选中了，但什么都没变"。PM 的默认做法是加
+     * `ProseMirror-selectednode` 那个类，而配套样式表我们没 import，所以那条路是空的：
+     * 这一条断言钉的是 `OpaqueView.selectNode` 真的被 PM 调到了。
+     */
+    expect(壳.hasAttribute("data-md-sel"), "选中没在 DOM 上留标记 = 看不见的那一档").toBe(true);
+    /**
      * 反面：点在 `<pre>` 上要的还是插入符。jsdom 没有 `elementFromPoint`，PM 的默认
      * mousedown 一路会撞上去（异常从 jsdom 的事件派发里漏出来，测试收不到），所以这里
      * 把它桩成"量不到坐标"——PM 什么都不做，于是这一条判的是**我们有没有抢这一击**：
@@ -3066,6 +3073,7 @@ describe("整块删除：点到卡片身上与手柄菜单那一项", () => {
     按(壳.querySelector(".md-src"));
     expect(editor.state.selection, "点正文不该变成整块选中").not.toBeInstanceOf(NodeSelection);
     expect(editor.state.selection.$from.depth).toBeGreaterThan(0);
+    expect(壳.hasAttribute("data-md-sel"), "换回文字光标就得把标记摘掉，不然它永远亮着").toBe(false);
     editor.destroy();
   });
 });

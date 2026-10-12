@@ -689,6 +689,22 @@ class OpaqueView implements NodeView {
   }
 
   /**
+   * 选中整块的 DOM 标记。**必须自己实现这两条**：PM 的默认做法是给 `dom` 加
+   * `ProseMirror-selectednode` 那个类，而它配套的 `prosemirror-view/style/prosemirror.css`
+   * 我们根本没 import（构建产物里查无 `.ProseMirror pre` 与 `selectednode` 两条规则）——
+   * 于是"选区确实是 NodeSelection、屏幕上却什么都没有"。图片那一档早就踩过并给出了答案
+   * （`ImageView.selectNode`）：只加一个 DOM 标记，不重画、不发事务。
+   *
+   * 用同一个 `data-md-sel`：图片卡与代码卡在选中时该是同一副样子，两套属性名就是两套语言。
+   */
+  selectNode(): void {
+    this.dom.dataset.mdSel = "";
+  }
+  deselectNode(): void {
+    delete this.dom.dataset.mdSel;
+  }
+
+  /**
    * 把这一整块变成选区（NodeSelection）。
    *
    * `mdOpaque` 不是 atom，但 PM 照样允许给它发 NodeSelection（`isSelectable` 判的是

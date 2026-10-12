@@ -608,16 +608,16 @@
     overflow-wrap: anywhere;
   }
   /*
-   * 整块选中（点到卡片头那一行 / 行号栏 / 块自己的内边距）。PM 自己往被选中的节点 DOM 上
-   * 挂 `data-node-selected`。
+   * 整块选中（点到卡片头那一行 / 行号栏 / 块自己的内边距）。标记是 `OpaqueView.selectNode`
+   * 写的 `data-md-sel`——与图片卡同一个属性名，同一副样子。
    *
    * **[06] §2 那条"选中态要比未选中态重一档"在这里落地**：未选中是 sunken 底 + subtle 边，
    * 选中是 accent-soft 底 + accent 边 + 一圈 inset 描边——两层信号叠在同一条边上，
-   * 读出来就是"这一条边比别的重"。只换底色在暗面不够（底色差 1.49:1，而边 5:1 以上）；
-   * 而只给 inset 描边又照顾不到没有边框的那些变体（引用 / 公式的源文本形），所以两个都上。
+   * 读出来就是"这一条边比别的重"。只换底色在暗面不够（底色差 1.49:1，而边 5.06:1）；
+   * 只给 inset 描边又照顾不到没有边框的那些变体（引用 / 公式的源文本形），所以两个都上。
    * 加粗边框（1px→2px）会把块里的内容顶偏一两个像素，与图片卡那条同一判据：不改几何。
    */
-  .block-editor .md-opaque[data-node-selected] {
+  .block-editor .md-opaque[data-md-sel] {
     background: var(--accent-soft);
     border-color: var(--accent);
     box-shadow: inset 0 0 0 1px var(--accent);
