@@ -1,4 +1,5 @@
 import { undo, redo, undoDepth, redoDepth } from "@tiptap/pm/history";
+import { NodeSelection } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
 import { useEffect, useState } from "react";
 import {
@@ -67,7 +68,16 @@ export function Toolbar({ editor }: { editor: Editor }) {
 
   const { $from } = editor.state.selection;
   const node = $from.depth > 0 ? $from.parent : null;
-  const typeName = node ? node.type.name : "";
+  /**
+   * 整块被选中时（点到卡片头 / 行号栏、或图片那种原子块）`$from.depth` 是 0，
+   * **那一块自己就是选区**。不接这一支，工具栏会在"明明选中了一块"的时候说
+   * "没有可改的块"——那句话本来该留给"光标在两个块之间什么都没落"的情况。
+   *
+   * 只喂给下拉，不改 `node`：`node` 还管着"清除格式"的禁用态，整块选中时那一枚
+   * 仍然该是灰的（对着一整块 unsetMark 没有一致的含义）。
+   */
+  const 整块 = editor.state.selection instanceof NodeSelection ? editor.state.selection.node : null;
+  const typeName = 整块 ? 整块.type.name : node ? node.type.name : "";
   const opaque = typeName === "mdOpaque";
   const 当前类型: BlockTypeId =
     typeName === "mdHeading"
@@ -171,6 +181,11 @@ export function Toolbar({ editor }: { editor: Editor }) {
               {b.标签}
             </option>
           ))}
+        </select>
+      ) : typeName === "mdImage" ? (
+        // 图片块没有"类型"可转：那一行引用整体就是它的字节，能改的只有图注
+        <select aria-label="块类型" value="image" disabled>
+          <option value="image">图片块（能改的只有图注）</option>
         </select>
       ) : (
         <select aria-label="块类型" value="none" disabled>
