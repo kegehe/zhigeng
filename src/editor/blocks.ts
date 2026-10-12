@@ -605,6 +605,64 @@ export function moveBlock(state: EditorState, from: number, to: number): Transac
 }
 
 /**
+ * 光标所在、或整块被选中的那一个**顶层块**的起点；没有可指的块给 -1。
+ *
+ * 原子块与"点到卡片身上"的整块选中，`$from.depth` 都是 0——那一块自己就是选区，
+ * 下面没有可落的文本位置。不接这一支，"选中一张图按 Alt+↓"就什么都不会发生——
+ * 手柄 `⋮` 能拖，键盘不能做，正是这个项目被报过两次的那类缺口。
+ */
+export function 顶层块起点(state: EditorState): number {
+  const { $from } = state.selection;
+  if ($from.depth) return $from.before(1);
+  return state.selection instanceof NodeSelection ? state.selection.from : -1;
+}
+
+/**
+ * 删掉 `起` 处那一个顶层块，返回带着**已放回光标**的事务。
+ *
+ * 为什么要有它：代码块 / 引用 / 表格这些块，"把里面的字全选上删掉"留下的是一个
+ * **空围栏**（实测：```` ```rust ```` 与闭栏还在，块锚点也还在），而用户要的"这块没了"
+ * 只有连节点一起删掉才成立。整块删除走 PM 的 NodeSelection + `deleteSelection` 是干净的，
+ * 缺的从来不是能力，是入口。
+ *
+ * 落脚点那一步不是装饰：删的是文档里最后一块时，人站在一片什么都没有的地方，
+ * 键盘再也回不来（`图片下出口` 那段注释记着同一类死局被报过两次）。
+ */
+export function 删块在(state: EditorState, 起: number): Transaction | null {
+  const 块 = state.doc.nodeAt(起);
+  if (!块) return null;
+  /**
+   * 文档里就剩这一块时不是"删掉"而是"换成一个空段落"：走 `delete` 会得到一个零块的
+   * 文档，而 doc 的内容规不答应——PM 在 `fillBefore` 里自己造默认节点，实测直接
+   * `Maximum call stack size exceeded`（栈整个在 prosemirror-model 里，看不出是谁的锅）。
+   * 落脚点这一步不是装饰：删的是最后一块时，人站在一片什么都没有的地方，键盘再也回不来
+   * （`图片下出口` 那段注释记着同一类死局被报过两次）。
+   */
+  const 独块 = state.doc.childCount === 1;
+  const 段 = 独块 ? state.schema.nodes.mdParagraph?.create() : null;
+  const tr =
+    段 && 独块
+      ? state.tr.replaceWith(起, 起 + 块.nodeSize, 段)
+      : state.tr.delete(起, 起 + 块.nodeSize);
+  // 光标落回删掉的那个位置：往前是上一块的末尾，往后是顶上来的那一块，都接得住
+  return tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(起, tr.doc.content.size))));
+}
+
+/**
+ * 删掉"当前这一块"。与 `moveCurrentBlock` 问的是同一个块，所以手柄菜单与
+ * 选中整块之后按 `Delete` 说的是同一件事。
+ *
+ * 选区是**一段文字**时返回 null：那时"这一块"没有一致的含义（它可能盖住五块，
+ * 而 Ctrl+A 之后按删除菜单应当删五块还是删一块？），交回 `deleteSelection` 处理。
+ */
+export function 删当前块(state: EditorState): Transaction | null {
+  const 选 = state.selection;
+  if (!(选 instanceof NodeSelection) && !选.empty) return null;
+  const 起 = 顶层块起点(state);
+  return 起 < 0 ? null : 删块在(state, 起);
+}
+
+/**
  * 把光标所在的整块上移 / 下移一格，返回带着**已放回选区**的事务。
  *
  * 键盘（`Alt+↑/↓`）与工具栏的上下移按钮共用这一个函数。放回选区不是锦上添花：
@@ -617,16 +675,7 @@ export function moveBlock(state: EditorState, from: number, to: number): Transac
 export function moveCurrentBlock(state: EditorState, delta: number): Transaction | null {
   const { $from } = state.selection;
   if (delta === 0) return null;
-  /**
-   * 顶层块的起点。**原子块（图片）被选中时 `depth` 是 0**：那一块自己就是选区，
-   * 下面没有可落的文本位置。不接这一支，"选中一张图按 Alt+↓"就什么都不会发生——
-   * 手柄 `⋮` 能拖，键盘不能做，正是这个项目被报过两次的那类缺口。
-   */
-  const 起点 = $from.depth
-    ? $from.before(1)
-    : state.selection instanceof NodeSelection && $from.depth === 0
-      ? state.selection.from
-      : -1;
+  const 起点 = 顶层块起点(state);
   if (起点 < 0) return null;
   let index = -1;
   let i = 0;

@@ -38,6 +38,8 @@ import {
   removeRow,
   对所齐所选,
   填充所选,
+  删块在,
+  删当前块,
   删所选列,
   删所选行,
   清场所选,
@@ -2951,6 +2953,119 @@ describe("图片块：写侧必须跑同一份判据（第六轮复查）", () =
     const 壳 = 面孔(editor, 图块位(editor)[0]!)!;
     expect(壳.hasAttribute("data-md-miss")).toBe(true);
     expect(壳.querySelector(".md-img-miss")!.textContent).toBe("x.png");
+    editor.destroy();
+  });
+});
+
+/**
+ * 整块删除。用户报的是"选不中代码块，删不掉"，量出来的根因是：`mdOpaque` 不是 atom，
+ * 但 PM 允许给它发 NodeSelection，而**没有任何交互会发**——点哪儿都落回插入符，
+ * 于是"删掉这一块"只剩"把字删干净"那条路，留下一个空围栏。
+ * 这组测试钉的就是那三件事：删干净、留落脚点、别在跨块选区上乱删。
+ */
+describe("整块删除：点到卡片身上与手柄菜单那一项", () => {
+  const 三块 = (): EditDoc => ({
+    frontMatter: "",
+    trailingGap: "",
+    blocks: [
+      { kind: "paragraph", id: null, raw: "上面那句\n", gapBefore: "", content: "上面那句", level: null, checked: null, fields: [], children: [] },
+      { kind: "code", id: null, raw: "```py\nx = 1\n```\n", gapBefore: "\n", content: "x = 1", level: null, checked: null, fields: [], children: [] },
+      { kind: "paragraph", id: null, raw: "下面那句\n", gapBefore: "\n", content: "下面那句", level: null, checked: null, fields: [], children: [] },
+    ],
+  });
+
+  it("夹具合法：装载后逐字节等于源文件", () => {
+    const d = 三块();
+    const editor = createTestEditor(d);
+    expect(docToMarkdown(editor.state.doc, d)).toBe(reassemble(d));
+    editor.destroy();
+  });
+
+  it("反面：把块里的字删干净，留下的还是空围栏——所以要的是删块，不是删字", () => {
+    const d = 三块();
+    const editor = createTestEditor(d);
+    const 块 = 不透明块(editor)[0]!;
+    放进(editor, 块.pos);
+    const 范 = 块内范围(editor.state)!;
+    editor.view.dispatch(
+      editor.state.tr.setSelection(
+        new TextSelection(editor.state.doc.resolve(范.起), editor.state.doc.resolve(范.止))
+      )
+    );
+    editor.commands.deleteSelection();
+    const 出 = docToMarkdown(editor.state.doc, d);
+    expect(出).toContain("```py");
+    expect(出).not.toContain("x = 1");
+    editor.destroy();
+  });
+
+  it("删块在：围栏整块走，前后两块逐字节不动", () => {
+    const d = 三块();
+    const editor = createTestEditor(d);
+    const 块 = 不透明块(editor)[0]!;
+    const tr = 删块在(editor.state, 块.pos);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe("上面那句\n\n下面那句\n");
+    expect(editor.state.selection.$from.depth, "删完光标要站在某个块里").toBeGreaterThan(0);
+    editor.destroy();
+  });
+
+  it("删的是文档里最后一块：留一个空段落当落脚点，不给键盘死局", () => {
+    const d = 一块({ kind: "code", raw: "```py\nx = 1\n```\n" });
+    const editor = createTestEditor(d);
+    const tr = 删块在(editor.state, 不透明块(editor)[0]!.pos)!;
+    editor.view.dispatch(tr);
+    expect(editor.state.doc.childCount).toBe(1);
+    expect(editor.state.doc.child(0).type.name).toBe("mdParagraph");
+    expect(editor.state.selection.$from.depth).toBeGreaterThan(0);
+    expect(docToMarkdown(editor.state.doc, d)).toBe("");
+    editor.destroy();
+  });
+
+  it("整块选中（NodeSelection）之后：删当前块删的就是那一块", () => {
+    const d = 三块();
+    const editor = createTestEditor(d);
+    const 块 = 不透明块(editor)[0]!;
+    editor.view.dispatch(
+      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 块.pos))
+    );
+    const tr = 删当前块(editor.state);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, d)).toBe("上面那句\n\n下面那句\n");
+    editor.destroy();
+  });
+
+  it("选区是一段跨块的文字：删当前块返回 null，不猜要删几块", () => {
+    const d = 三块();
+    const editor = createTestEditor(d);
+    editor.commands.setTextSelection({ from: 3, to: editor.state.doc.content.size - 3 });
+    expect(删当前块(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
+  it("点在卡片头那一行 = 选中整块；点在代码文字上不会被抢成整块", () => {
+    const d = 三块();
+    const editor = createTestEditor(d);
+    const 块 = 不透明块(editor)[0]!;
+    const 壳 = 面孔(editor, 块.pos)!;
+    const 按 = (元: Element | null) =>
+      元!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    按(壳.querySelector(".md-card-head"));
+    expect(editor.state.selection, "点到卡片身上就该是整块").toBeInstanceOf(NodeSelection);
+    expect((editor.state.selection as NodeSelection).from).toBe(块.pos);
+    /**
+     * 反面：点在 `<pre>` 上要的还是插入符。jsdom 没有 `elementFromPoint`，PM 的默认
+     * mousedown 一路会撞上去（异常从 jsdom 的事件派发里漏出来，测试收不到），所以这里
+     * 把它桩成"量不到坐标"——PM 什么都不做，于是这一条判的是**我们有没有抢这一击**：
+     * 先把选区放成文字光标，再点一次，它必须还是文字光标。
+     */
+    (document as unknown as { elementFromPoint: () => Element | null }).elementFromPoint = () => null;
+    放进(editor, 块.pos);
+    按(壳.querySelector(".md-src"));
+    expect(editor.state.selection, "点正文不该变成整块选中").not.toBeInstanceOf(NodeSelection);
+    expect(editor.state.selection.$from.depth).toBeGreaterThan(0);
     editor.destroy();
   });
 });

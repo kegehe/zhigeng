@@ -603,6 +603,16 @@
     overflow-wrap: anywhere;
   }
   /*
+   * 整块选中（点到卡片头那一行 / 行号栏 / 块自己的内边距）。底色 + inset 描边，与表格
+   * 框选同一套语言：只给底色在暗面分不出边界，而"选了却看不见"等于让用户盲删——
+   * 这条描边是那一击唯一的反馈。`data-node-selected` 由 ProseMirror 自己挂在被选中的
+   * 节点 DOM 上。写在 `[data-md-code]` 那几条之后：同特异度，后到的赢（选中要盖住沉底）。
+   */
+  .block-editor .md-opaque[data-node-selected] {
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  /*
    * 代码着色的类 → 语义映射（docs/03 §块渲染）。
    *
    * 颜色一律走 tokens.css 的 `--code-*`：护栏禁字面量颜色，而双主题本来就该由 token 承担，

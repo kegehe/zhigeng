@@ -11,6 +11,7 @@ import {
   moveBlock,
   replaceBlockWithSource,
   stampSignatures,
+  删块在,
   格坐标At,
   type BlockTypeId,
   type EditDoc,
@@ -424,6 +425,22 @@ export function BlockEditor({
   };
 
   /**
+   * 手柄 / `/` 菜单上的"删掉这一块"。删的是**菜单从哪一块开着的**（`menu.start`），
+   * 不是光标所在那一块：手柄跟着鼠标走，插入符可能还停在别的块里，按光标删会删错地方。
+   *
+   * 为什么是一句提示而不是一个确认框：撤销在同一个编辑器实例里是可靠的（PM 的历史栈），
+   * 而"删掉这一块"在 Notion / 语雀 那套肌肉记忆里本来就不该有第二道问。
+   */
+  const 删块 = () => {
+    if (!menu) return;
+    const tr = 删块在(editor.state, menu.start);
+    setMenu(null);
+    if (!tr) return;
+    editor.view.dispatch(tr.scrollIntoView());
+    noticeRef.current?.("已删掉这一块 · Ctrl+Z 撤销");
+  };
+
+  /**
    * 手柄按下：挪动超过 5px 算拖拽，否则算点击开类型菜单。
    *
    * 用 pointer 事件而不是 HTML5 拖放：一是拖放要在 contenteditable 里和 ProseMirror
@@ -543,7 +560,7 @@ export function BlockEditor({
           style={{ top: menu.top, left: menu.left }}
           onMouseDown={(e) => e.preventDefault()}
           role="menu"
-          aria-label="块类型"
+          aria-label="块类型与操作"
         >
           <span className="grp">类型</span>
           {BLOCK_TYPES.map((b) => (
@@ -562,6 +579,12 @@ export function BlockEditor({
               {b.标签}
             </button>
           ))}
+          {/* 删块在这一排：代码块 / 表格 / 引用这些"整块"的东西，把里面的字删干净
+              留下的是空围栏，只有连节点一起删才是没了——而那一条路以前没有入口 */}
+          <span className="grp">操作</span>
+          <button type="button" role="menuitem" onClick={删块}>
+            删掉这一块
+          </button>
         </div>
       ) : null}
     </div>

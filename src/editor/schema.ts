@@ -1,6 +1,6 @@
 import { Extension, Mark, Node, type Attributes, type Editor } from "@tiptap/core";
 import type { Node as PmNode, Schema } from "@tiptap/pm/model";
-import { Plugin, PluginKey, TextSelection, type Transaction, type EditorState } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction, type EditorState } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { EditorView, NodeView, ViewMutationRecord } from "@tiptap/pm/view";
 import { history, redo, undo } from "@tiptap/pm/history";
@@ -183,11 +183,27 @@ const 渲染实例 = new WeakMap<HTMLElement, OpaqueView>();
  */
 export type 岛上鼠标 = "退源码" | "扩选" | "交回";
 
-export function 分派岛上鼠标(ev: Event): 岛上鼠标 {
-  if (ev.type !== "mousedown") return "交回";
+/**
+ * 岛上的"那一击"：左键、没按修饰键。`分派岛上鼠标` 与"点到卡片身上选整块"共用这一个
+ * 判据——两处各写一份的话，早晚一处认 shift 扩选、另一处把 shift 也当成换目标。
+ *
+ * `含Shift` 是给扩选那条路开的口子：shift 不是"另一个目标"，是"在同一个目标上扩"。
+ */
+function 击是那一击(ev: Event, 含Shift = false): boolean {
   const 击 = ev as MouseEvent;
-  if (击.button !== 0 || 击.altKey || 击.ctrlKey || 击.metaKey) return "交回";
-  return 击.shiftKey ? "扩选" : "退源码";
+  return (
+    ev.type === "mousedown" &&
+    击.button === 0 &&
+    !击.altKey &&
+    !击.ctrlKey &&
+    !击.metaKey &&
+    (含Shift || !击.shiftKey)
+  );
+}
+
+export function 分派岛上鼠标(ev: Event): 岛上鼠标 {
+  if (!击是那一击(ev, true)) return "交回";
+  return (ev as MouseEvent).shiftKey ? "扩选" : "退源码";
 }
 
 /**
@@ -605,6 +621,22 @@ class OpaqueView implements NodeView {
      * 走 `进源码()` 会把用户从下拉里踢出来、或者把插入符甩到块首。
      */
     if (目标.closest(".md-lang") || 目标.closest(".md-copy")) return true;
+    /**
+     * 点在**卡片自己身上**——卡片头那一行（语言牌与复制键之外的那段）、行号栏、块自己的
+     * 内边距——要的是"这一块"，不是块里的某个字符。PM 的默认行为会把这一击折进块内放一个
+     * 插入符，于是整块选中没有任何鼠标路径；而"把这块删掉"只有拿到 NodeSelection 才干净
+     * （选中块内文字再删留下的是空围栏，见 `删块在`）。
+     *
+     * 只认"左键、没按修饰键"的 mousedown：对每一个事件都返回 true 会把 `mouseup` /
+     * `dblclick` / shift-点击一起吃掉，那正是下面宿主那一段已经栽过一次的错。
+     */
+    const 块级落点 =
+      目标 === this.dom ||
+      !!(目标.closest(".md-card-head") || 目标.closest(".md-gutter"));
+    if (块级落点 && this.dom.contains(目标) && !this.host?.contains(目标) && 击是那一击(ev)) {
+      this.选整块();
+      return true;
+    }
     if (!this.host?.contains(目标)) return false;
     if (目标.closest(".cal-head")) {
       if (ev.type === "mousedown") {
@@ -653,6 +685,27 @@ class OpaqueView implements NodeView {
       TextSelection.near(this.view.state.doc.resolve(pos + 1)),
     );
     this.view.dispatch(tr.scrollIntoView());
+    this.view.focus();
+  }
+
+  /**
+   * 把这一整块变成选区（NodeSelection）。
+   *
+   * `mdOpaque` 不是 atom，但 PM 照样允许给它发 NodeSelection（`isSelectable` 判的是
+   * `spec.selectable !== false`），而 `deleteSelection` 对它是**连节点一起删**——
+   * 这正是"整块删除"要的那一条：把块里的字全选上删掉，留下的是空围栏与块锚点。
+   */
+  private 选整块(): void {
+    let pos: number | undefined;
+    try {
+      pos = this.位置();
+    } catch {
+      return; // 节点已经不在文档里了
+    }
+    const 块 = pos === undefined ? null : this.view.state.doc.nodeAt(pos);
+    if (!块 || pos === undefined || !NodeSelection.isSelectable(块)) return;
+    const { state } = this.view;
+    this.view.dispatch(state.tr.setSelection(NodeSelection.create(state.doc, pos)));
     this.view.focus();
   }
 }
