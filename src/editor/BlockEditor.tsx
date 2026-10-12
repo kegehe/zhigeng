@@ -1,5 +1,5 @@
 import { EditorContent, useEditor } from "@tiptap/react";
-import { TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   applyBlockType,
@@ -283,10 +283,14 @@ export function BlockEditor({
       const { from, empty } = editor.state.selection;
       const host = wrap.current?.getBoundingClientRect();
       /**
-       * 框了格子就不出选区气泡：那时"选中"的是几**格**，不是几个字，
-       * 气泡上的加粗/行内码对着整片格子没有一致的含义（真机上拖完会看见它挂在表右侧）。
+       * 框了格子、或**整块被选中**时都不出选区气泡：那时"选中"的是几**格**或一整块，
+       * 不是几个字，气泡上的加粗 / 行内码对着它没有一致的含义。整块选中时浏览器留下的
+       * 那段 DOM 选区还在上一行文字上，量出来的位置会挂在**别的那一块**上面
+       * （真机截图照出来过：气泡压在代码卡上方那一段的中缝里）。
        */
-      const rect = empty || !editor.isEditable || 矩形of(editor.state) ? null : anchorRect();
+      const 不是字 =
+        empty || !editor.isEditable || 矩形of(editor.state) || editor.state.selection instanceof NodeSelection;
+      const rect = 不是字 ? null : anchorRect();
       if (!host || !rect) {
         setSel(null);
         return;
