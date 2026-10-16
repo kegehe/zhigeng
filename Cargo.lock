@@ -2480,24 +2480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "note-app"
-version = "0.1.0"
-dependencies = [
- "log",
- "md-kernel",
- "note-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-log",
- "tauri-plugin-single-instance",
- "thiserror 2.0.20",
- "window-vibrancy 0.8.0",
-]
-
-[[package]]
 name = "note-cli"
 version = "0.1.0"
 dependencies = [
@@ -5958,6 +5940,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "zhigeng"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "md-kernel",
+ "note-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-log",
+ "tauri-plugin-single-instance",
+ "thiserror 2.0.20",
+ "window-vibrancy 0.8.0",
 ]
 
 [[package]]

@@ -1145,9 +1145,7 @@ export function App() {
         />
       ) : null}
       <header className="titlebar surface" data-tauri-drag-region>
-        <span className="px-2 font-mono text-xs text-fg-2">
-          note<span className="text-fg-2"> {info?.version}</span>
-        </span>
+        <span className="px-2 text-xs text-fg-2">知更 {info?.version}</span>
         <span className="title" data-tauri-drag-region>
           {info?.vaultPath ?? ""}
         </span>

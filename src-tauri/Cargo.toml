@@ -1,16 +1,16 @@
 [package]
-name = "note-app"
+name = "zhigeng"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "note 桌面壳：窗口、托盘、IPC 注册。业务逻辑一律在 note-core。"
+description = "知更 桌面壳：窗口、托盘、IPC 注册。业务逻辑一律在 note-core。"
 
 # 壳不参与默认构建：否则每次 cargo build 都要编译整个 Tauri 依赖树。
-# 用 cargo build -p note-app 显式构建。
+# 用 cargo build -p zhigeng 显式构建。
 
 [lib]
-name = "note_app_lib"
+name = "zhigeng_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

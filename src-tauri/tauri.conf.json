@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "note",
+  "productName": "知更",
   "version": "0.1.0",
-  "identifier": "dev.note.service",
+  "identifier": "dev.zhigeng",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://127.0.0.1:1425",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "note",
+        "title": "知更",
         "width": 1240,
         "height": 780,
         "minWidth": 720,
