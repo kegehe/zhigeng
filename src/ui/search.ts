@@ -30,7 +30,7 @@ export function 来源徽章(from: string[]): string {
 
 /**
  * 这一趟走了哪几路。**与 Rust 那份同序、同名、同分隔符**：关键词 → 链接 → 语义。
- * 面板右上角那句话、CLI 那行总结、审计行后面那个尾巴，都该是这么拼出来的，
+ * 面板右上角那句话、CLI 那行总结、hint 那句话都该是这么拼出来的，
  * 而不是各自写一句"关键词 + 语义两路合并"。
  */
 export function 走了哪几路(semantic: boolean, graph: boolean): string {
@@ -38,6 +38,18 @@ export function 走了哪几路(semantic: boolean, graph: boolean): string {
   if (graph) 名.push("链接");
   if (semantic) 名.push("语义");
   return 名.join(" + ");
+}
+
+/**
+ * 重排生效时加在后面那一段。**与 Rust 的 `重排尾巴` 逐字相等**（`search.test.ts` 比的就是
+ * 这个），因为界面上右上角与 CLI 那行总结必须说同一句话。
+ * 重排不是"一路"——它是合并之后的一道工序，所以不进上面那句话的主体。
+ */
+export const 重排尾巴 = " · 已重排";
+
+/** 面板右上角与审计行读的那一句。三个布尔都是后端给的事实，不猜 */
+export function 走了那句(semantic: boolean, graph: boolean, reranked: boolean): string {
+  return 走了哪几路(semantic, graph) + (reranked ? 重排尾巴 : "");
 }
 
 /**

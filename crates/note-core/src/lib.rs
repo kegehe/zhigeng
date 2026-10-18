@@ -13,6 +13,7 @@ pub mod hash;
 pub mod import;
 pub mod index;
 pub mod meta;
+pub mod rerank;
 pub mod retrieve;
 pub mod schema;
 pub mod service;

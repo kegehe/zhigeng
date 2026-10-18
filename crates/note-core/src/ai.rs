@@ -41,6 +41,11 @@ pub struct AiConfig {
     pub chat_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
+    /// 检索时多打一趟模型把候选排一遍。**默认关**：那是每次搜索一次付费，
+    /// 不能替用户决定。`skip_serializing_if` 让"没开"这件事不在 config.toml 里留一行——
+    /// 老库的配置因此一个字节都不变。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rerank: bool,
 }
 
 /// 给界面的那一份：**结构里没有 Key 这个字段**，只有"有没有"与末 4 位。
@@ -52,6 +57,8 @@ pub struct AiView {
     pub base_url: String,
     pub chat_model: String,
     pub embedding_model: String,
+    /// 重排开没开。界面上那格勾选框的初值就是它
+    pub rerank: bool,
     pub key_set: bool,
     /// 形如 `…ab12（32 位）`。界面上认出"是哪把 Key"用，别拿它当身份。
     pub key_hint: Option<String>,
@@ -82,6 +89,7 @@ pub fn view(vault: &Vault) -> Result<AiView> {
         base_url: cfg.base_url.unwrap_or_default(),
         chat_model: cfg.chat_model.unwrap_or_default(),
         embedding_model: cfg.embedding_model.unwrap_or_default(),
+        rerank: cfg.rerank,
         key_set: 有.is_some(),
         key_hint: 有,
     })
@@ -749,6 +757,7 @@ mod tests {
             base_url: Some("http://x/v1".into()),
             chat_model: Some("a".into()),
             embedding_model: Some("b".into()),
+            ..Default::default()
         };
         assert!(缺项(&齐).is_empty());
         // 档 A 的那条决定：嵌入模型没填**不算缺**——DeepSeek / Anthropic 就没有这个端点，
@@ -788,6 +797,7 @@ mod tests {
             base_url: Some("http://127.0.0.1:9/v1".into()),
             chat_model: Some("m".into()),
             embedding_model: None,
+            ..Default::default()
         });
         let 步 = 报
             .steps
@@ -916,6 +926,7 @@ mod tests {
                 base_url: Some("https://api.example.com/v1///".into()),
                 chat_model: Some(" 某模型 ".into()),
                 embedding_model: None,
+                ..Default::default()
             },
         )
         .unwrap();

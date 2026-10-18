@@ -158,6 +158,13 @@ enum AiCmd {
         query: String,
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
+        /// **对照档**：这一趟强制让模型把候选排一遍（配置里那一格默认关）。
+        /// 量重排的增益必须有这个开关，不然看到的永远是"没重排"的那一版
+        #[arg(long)]
+        rerank: bool,
+        /// 反方向的对照档：这一趟**不**重排，哪怕配置里开着
+        #[arg(long)]
+        no_rerank: bool,
     },
     /// 带引用的问答。**会打模型**；库里没有依据时一次都不打
     Ask { query: String },
@@ -213,7 +220,15 @@ fn main() -> Result<()> {
             suite,
             k,
             no_graph,
-        } => cmd_eval(path, suite, k, !no_graph),
+        } => cmd_eval(
+            path,
+            suite,
+            k,
+            note_core::retrieve::跑法 {
+                开图: !no_graph,
+                重排: None,
+            },
+        ),
         Cmd::Ai { path, 命令 } => cmd_ai(path, 命令),
         Cmd::EditDoc { file } => {
             let src = std::fs::read_to_string(&file)?;
@@ -538,15 +553,34 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                 }
             }
         }
-        AiCmd::Search { query, limit } => {
-            let 结 = note_core::retrieve::混合或退回(&vault, idx.conn(), &query)?;
-            let 走了 = 结.走了();
+        AiCmd::Search {
+            query,
+            limit,
+            rerank,
+            no_rerank,
+        } => {
+            let 法 = note_core::retrieve::跑法 {
+                开图: true,
+                重排: match (rerank, no_rerank) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    _ => None,
+                },
+            };
+            let 结 = note_core::retrieve::检索(&vault, idx.conn(), &query, 法)?;
+            let 走了 = 结.走了那句();
+            let 钱 = 结.rerank_in + 结.rerank_out;
+            let 钱话 = if 钱 > 0 {
+                format!("，重排那一趟 {} tok", 钱)
+            } else {
+                String::new()
+            };
             if let Some(h) = &结.hint {
                 println!("  {h}");
             }
             let 中 = 结.hits;
             if 中.is_empty() {
-                println!("没有命中：{query}（这一趟走【{走了}】）");
+                println!("没有命中：{query}（这一趟走【{走了}】{钱话}）");
                 return Ok(());
             }
             for (i, h) in 中.iter().take(limit).enumerate() {
@@ -561,7 +595,7 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                 );
             }
             println!(
-                "{} 条命中（这一趟走【{走了}】，单篇最多 {} 块）",
+                "{} 条命中（这一趟走【{走了}】，单篇最多 {} 块{钱话}）",
                 中.len(),
                 note_core::retrieve::每篇配额
             );
@@ -572,13 +606,15 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
 
 /// 跑评测集。**语义那一路开没开要印在第一行旁边**：没配模型时这个数只反映关键词，
 /// 拿它当"AI 检索达标了"是假的（docs/04 §评测集 要的是 recall@8 ≥ 0.85 与幻觉率 = 0）。
-fn cmd_eval(path: PathBuf, suite: PathBuf, k: usize, 开图: bool) -> Result<()> {
+fn cmd_eval(
+    path: PathBuf, suite: PathBuf, k: usize, 法: note_core::retrieve::跑法
+) -> Result<()> {
     let 文本 =
         std::fs::read_to_string(&suite).with_context(|| format!("读评测集 {}", suite.display()))?;
     let 套 = note_core::retrieve::读套件(&文本)?;
     let vault = Vault::open(&path)?;
     let idx = note_core::index::Index::open(&vault)?;
-    let 成 = note_core::retrieve::评测(&vault, idx.conn(), &套, k, 开图)?;
+    let 成 = note_core::retrieve::评测(&vault, idx.conn(), &套, k, 法)?;
     println!(
         "评测集 {} 条（正 {} / 负 {}），K={}；这一趟走【{}】",
         成.entries,
@@ -593,6 +629,14 @@ fn cmd_eval(path: PathBuf, suite: PathBuf, k: usize, 开图: bool) -> Result<()>
     if !成.graph {
         println!("  对照档：图扩展那一路被 `--no-graph` 摘掉了，这个数是拿它当基线的。");
     }
+    println!(
+        "  重排：{}",
+        if 成.reranked {
+            "这一轮至少有一趟真被模型重排过"
+        } else {
+            "这一轮没有任何一趟被重排（配置里那格关着、没配对话模型，或回包读不出）"
+        }
+    );
     println!(
         "recall@{} = {:.1}%（{}/{}）",
         成.k,

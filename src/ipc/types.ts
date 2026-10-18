@@ -162,6 +162,8 @@ export type AiView = {
   baseUrl: string;
   chatModel: string;
   embeddingModel: string;
+  /** 检索时多打一趟模型把候选排一遍。**默认关**——那是每次搜索一次付费 */
+  rerank: boolean;
   keySet: boolean;
   /** 形如 `…ab12（32 位）`，只用来认出"是哪把 Key" */
   keyHint: string | null;
@@ -200,6 +202,14 @@ export type HybridResult = {
    * 所以今天恒真——但界面上那句话是从这两个布尔拼出来的，不是写死的
    */
   graph: boolean;
+  /**
+   * 这一趟的**顺序**是不是模型重排过的。false 有两种原因（没开 / 开了但没成），
+   * 哪一种都在 `hint` 里说着——"没重排"与"重排失败"不是一回事
+   */
+  reranked: boolean;
+  /** 重排那一趟的 token。搜索不落 `ai_runs`，但问答会把它并进那一笔账 */
+  rerankIn: number;
+  rerankOut: number;
   hint: string | null;
 };
 
@@ -240,6 +250,8 @@ export type AiRun = {
   semantic: boolean;
   /** 2026-10-18 之前那几笔没有这个键，后端读成 false——那几次确实没开，不是猜的 */
   graph: boolean;
+  /** 这一趟真被模型重排过没有。**开着开关但回包读不出**，这里也是 false */
+  reranked: boolean;
   candidates: number;
   createdAt: number;
 };

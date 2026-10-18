@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
-import { 来源徽章, 走了哪几路, 路名, 面板标题 } from "./search";
+import { 来源徽章, 走了哪几路, 走了那句, 重排尾巴, 路名, 面板标题 } from "./search";
 
 /**
  * 后端那份判据的原文。跨语言比对靠它，不靠我记得去改两处。
@@ -102,6 +102,21 @@ describe("这一趟走了哪几路", () => {
     expect(走了哪几路(false, true)).toBe("关键词 + 链接");
     expect(走了哪几路(false, false)).toBe("关键词");
     expect(走了哪几路(true, true)).toBe("关键词 + 链接 + 语义");
+  });
+
+  it("重排那段尾巴两边逐字相等", () => {
+    // 右上角那句话与 CLI 那行总结共用它。改了 Rust 那份而没改这里，界面上就会出现
+    // 另一句"· 重排过"之类对不上的话
+    const 常 = 段(检索源, /pub const 重排尾巴: &str = "[^"]*";/, "重排尾巴");
+    expect(常.match(/= "([^"]*)";/)![1]).toBe(重排尾巴);
+  });
+
+  it("重排是尾巴，不是第四路", () => {
+    expect(走了那句(false, true, false)).toBe("关键词 + 链接");
+    expect(走了那句(false, true, true)).toBe("关键词 + 链接 · 已重排");
+    expect(走了那句(true, true, true)).toBe("关键词 + 链接 + 语义 · 已重排");
+    // 反面：一个模型都没打时不许带尾巴（"配了开关"不等于"生效了"）
+    expect(走了那句(true, true, false)).not.toContain("重排");
   });
 });
 

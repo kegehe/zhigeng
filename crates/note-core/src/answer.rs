@@ -249,6 +249,10 @@ pub fn ask(vault: &Vault, conn: &Connection, 问题: &str) -> Result<答复> {
     // 零依据时 `生成` 会在打网络之前返回"依据不足"，所以这里不必分两条路
     let mut 发问者 = |内容: &str| crate::ai::chat(&cfg, 系统提示, 内容);
     let mut 答复 = 生成(&依据, 问题, &mut 发问者)?;
+    // 重排那一趟的钱要并进同一笔账：用户看到的是"这次问 AI 花了多少"，
+    // 把重排的 token 丢掉等于账面上少一笔真实支出
+    答复.in_tokens += 检索.rerank_in;
+    答复.out_tokens += 检索.rerank_out;
     答复.model = 模型.to_string();
     let 记 = 落审计 {
         conn,
@@ -256,6 +260,7 @@ pub fn ask(vault: &Vault, conn: &Connection, 问题: &str) -> Result<答复> {
         候选: 依据.len(),
         语义路: 检索.semantic,
         图路: 检索.graph,
+        重排: 检索.reranked,
     };
     if let Err(e) = 记.写(&答复) {
         // 审计写失败不能把答案吞掉：答案已经生成完了，钱也花完了。
@@ -286,6 +291,9 @@ pub struct 运行 {
     /// 这一趟图扩展那一路开没开。**旧记录缺这个键时按 false 读**——那几次它确实还没做，
     /// 不是"读不出来所以猜一个"
     pub graph: bool,
+    /// 这一趟真被模型重排过没有。**开着开关但回包读不出**，这里也是 false——
+    /// "配了"与"生效了"在审计页上必须是两栏
+    pub reranked: bool,
     pub candidates: i64,
     pub created_at: i64,
 }
@@ -322,6 +330,10 @@ pub fn 最近运行(conn: &Connection, limit: i64) -> Result<Vec<运行>> {
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false),
             graph: 解.get("graph").and_then(|x| x.as_bool()).unwrap_or(false),
+            reranked: 解
+                .get("reranked")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             candidates: 解.get("candidates").and_then(|x| x.as_i64()).unwrap_or(0),
             created_at: r.get(8)?,
         })
@@ -337,6 +349,8 @@ struct 落审计<'a> {
     /// 两个同类型 bool 挨着传，早晚会有一次传反
     语义路: bool,
     图路: bool,
+    /// 这一趟的顺序是不是模型重排过的（"配了开关"与"生效了"是两件事）
+    重排: bool,
 }
 
 impl 落审计<'_> {
@@ -364,6 +378,7 @@ impl 落审计<'_> {
                     "retried": 答.retried,
                     "semantic": self.语义路,
                     "graph": self.图路,
+                    "reranked": self.重排,
                 }))
                 .map_err(|e| Error::Invalid(format!("审计的引用清单序列化失败：{e}")))?,
                 时候,
@@ -592,6 +607,7 @@ mod tests {
             候选: 依.len(),
             语义路: true,
             图路: true,
+            重排: true,
         }
         .写(&答)
         .unwrap();

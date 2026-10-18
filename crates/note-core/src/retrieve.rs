@@ -75,6 +75,10 @@ pub fn 走了哪几路(开了: &[路]) -> String {
         .join(" + ")
 }
 
+/// 重排生效时加在"走了哪几路"后面那一段。**界面上与 CLI 共用这一份**；
+/// `src/ui/search.ts` 里那份镜像由 `search.test.ts` 逐字比对（改了这边忘了那边就红）。
+pub const 重排尾巴: &str = " · 已重排";
+
 /// 从两个"可开关"的标志还原这一趟开了哪几路。`检索结果`、`成绩`、CLI 与评测都读它——
 /// 两边各写一份 filter，早晚会拼出两句不一样的话
 pub fn 开了的(语义: bool, 图: bool) -> Vec<路> {
@@ -490,12 +494,36 @@ pub fn 取详情(conn: &Connection, 排好: &[(i64, f64, Vec<路>)]) -> Result<V
     Ok(出)
 }
 
-/// 一趟完整的混合检索：查询 → （可能一次网络）嵌入 → 三路 → 合并。
+/// 一趟完整的混合检索：查询 → （可能一次网络）嵌入 → 三路 → 合并 → （可选）重排。
 /// **含网络往返时别放在同步命令里**（G6 的 8ms 是给本地查询的，docs/03 §后端调用纪律）。
 ///
 /// 2026-10-18 起这一条是**唯一一份**实现。原先这里还有个严格版 `混合`（没配嵌入模型就报错），
 /// 而图扩展接上之后"没配嵌入模型"不再等于"这一趟跑不了"——留着两条路径，早晚一条改了
 /// 一条没改，评测量的就不是界面上跑的那一趟了。
+///
+/// 这一趟怎么跑。开关放结构体里而不是位置参数上：`跑一趟(v, c, q, true, false)` 那种调用
+/// 没人读得懂，而这两个开关传反一次就是一句谎或一次白花钱。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct 跑法 {
+    /// 图扩展那一路开不开。false 只给 `note eval --no-graph` 当对照档
+    pub 开图: bool,
+    /// 覆盖配置里的重排开关：`None` = 听配置（界面上与问答里都走这条）
+    pub 重排: Option<bool>,
+}
+
+/// 常规跑法：三路全开，重排听配置。
+pub const 常规: 跑法 = 跑法 {
+    开图: true,
+    重排: None,
+};
+
+/// 对照档：摘掉图扩展那一路。量新增那一路的增益必须有一个"没有它"的数。
+pub const 对照无图: 跑法 = 跑法 {
+    开图: false,
+    重排: None,
+};
+
+/// 界面上、问答里跑的那一趟。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct 检索结果 {
@@ -506,13 +534,31 @@ pub struct 检索结果 {
     /// 但界面上那句话是从这两个布尔拼出来的，不是写死的（档 A 的教训：
     /// "两个探针都通了"那种写死的话会在下一次改动里变成谎）
     pub graph: bool,
+    /// 这一趟的**顺序**是不是模型重排过的。false 有两种原因（没开 / 开了但没成），
+    /// 哪一种都得由 `hint` 说清——"没重排"与"重排失败"不是一回事
+    pub reranked: bool,
+    /// 重排那一趟的 token。**回包读不出也要记账**：那一趟模型确实答过、钱确实花了，
+    /// 说"没重排"不能顺带把数字抹掉。搜索本身不落 `ai_runs`，但问答会把这两个数并进去
+    pub rerank_in: usize,
+    pub rerank_out: usize,
     pub hint: Option<String>,
 }
 
 impl 检索结果 {
-    /// 界面上、CLI 上那句"这一趟走了哪几路"。**由两个布尔拼出来，不写死**
+    /// 界面上、CLI 上那句"这一趟走了哪几路"。**由两个布尔拼出来，不写死**；
+    /// 重排不是"一路"，是合并之后的一道工序，所以只加尾巴
     pub fn 走了(&self) -> String {
         走了哪几路(&开了的(self.semantic, self.graph))
+    }
+
+    /// 上面那句 + 重排生效时的尾巴。界面上右上角与 CLI 那行总结读的是**同一个**方法——
+    /// 两边各拼一次，早晚一边改了另一边没改
+    pub fn 走了那句(&self) -> String {
+        if self.reranked {
+            format!("{}{重排尾巴}", self.走了())
+        } else {
+            self.走了()
+        }
     }
 }
 
@@ -522,7 +568,7 @@ fn 跑一趟(
     vault: &crate::vault::Vault,
     conn: &Connection,
     query: &str,
-    开图: bool,
+    法: 跑法,
 ) -> Result<检索结果> {
     let cfg = crate::ai::load(vault)?;
     let 模型 = cfg
@@ -543,42 +589,96 @@ fn 跑一趟(
         }
         None => false,
     };
-    let (语, 语义开, 提示) = match (&模型, 表在) {
-        (None, _) => (Vec::new(), false, None),
-        (Some(_), false) => (Vec::new(), false, None),
+    let (语, 语义开) = match (&模型, 表在) {
+        (None, _) => (Vec::new(), false),
+        (Some(_), false) => (Vec::new(), false),
         (Some(m), true) => {
             // 这一支不兜底：连不上就报错，别把失败说成"没开"
             let v = crate::ai::embed(&cfg, &[query.to_string()])?;
-            (语义路(conn, m, &v[0], 每路配额)?, true, None)
+            (语义路(conn, m, &v[0], 每路配额)?, true)
         }
     };
     let 种 = 种子(&关键, &语, 种子上限);
-    let 图 = if 开图 {
+    let 图 = if 法.开图 {
         图路(conn, &种, 图配额)?
     } else {
         Vec::new()
     };
-    let 走了 = 走了哪几路(&开了的(语义开, 开图));
-    let 提示 = 提示.or_else(|| {
-        if 语义开 {
-            return None;
-        }
-        Some(match &模型 {
+    let 走了 = 走了哪几路(&开了的(语义开, 法.开图));
+    // 提示攒成一条清单再拼：语义那一路没开 与 重排没成 可以同时成立，
+    // 各写各的字段早晚有一个被覆盖掉
+    let mut 提示 = Vec::new();
+    if !语义开 {
+        提示.push(match &模型 {
             None => format!(
                 "没填嵌入模型名，语义那一路没开，这一趟走{走了}。要加语义那一路：设置里填好，再点嵌入。"
             ),
             Some(_) => format!(
                 "还没嵌过向量，语义那一路没开，这一趟走{走了}。跑 `note ai embed`，或在设置里点嵌入。"
             ),
-        })
-    });
+        });
+    }
     let 排 = 合并(&关键, &语, &图, 每篇配额, 每路配额);
+    let 详情 = 取详情(conn, &排)?;
+    let (详情, 重排过, 重进, 重出) = 重排这一趟(&cfg, 法, query, 详情, &mut 提示);
     Ok(检索结果 {
-        hits: 取详情(conn, &排)?,
+        hits: 详情,
         semantic: 语义开,
-        graph: 开图,
-        hint: 提示,
+        graph: 法.开图,
+        reranked: 重排过,
+        rerank_in: 重进,
+        rerank_out: 重出,
+        hint: if 提示.is_empty() {
+            None
+        } else {
+            Some(提示.join(" "))
+        },
     })
+}
+
+/// 重排那一趟：开关来自配置（**默认关**，那是每次搜索一次付费），`法.重排` 只给 CLI 对照档用。
+///
+/// 失败不吞也不炸：顺序退回 RRF（重排只是增益，不该因为它读不出就把手里的结果扔掉），
+/// 但原因必须进 `提示`——"没重排"与"重排失败"必须分得开（1b 那条老规矩）。
+/// token 无论成败都带回去，读不出编号那一趟钱照样花掉了。
+fn 重排这一趟(
+    cfg: &crate::ai::AiConfig,
+    法: 跑法,
+    问题: &str,
+    候选: Vec<命中>,
+    提示: &mut Vec<String>,
+) -> (Vec<命中>, bool, usize, usize) {
+    if !法.重排.unwrap_or(cfg.rerank) {
+        return (候选, false, 0, 0);
+    }
+    // 没填对话模型就别去打个必然失败的请求：这一格是"配了开关但配不齐"，
+    // 说清缺什么比抛一个 HTTP 错误有用
+    let 有对话 = cfg
+        .chat_model
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !有对话 {
+        提示.push("开了重排但没填对话模型，这一趟没重排。".into());
+        return (候选, false, 0, 0);
+    }
+    // 连不上也不炸：重排只是增益，把手里的结果换成一句红色报错是拿功能换诚实。
+    // 但失败必须写进提示——"没重排"与"重排失败"不是一回事（1b 那条老规矩）
+    match crate::rerank::试(cfg, 问题, &候选) {
+        Ok(出) => match (出.顺序, 出.原因, 出.用量) {
+            (Some(新), _, 量) => (新, true, 量.in_tokens, 量.out_tokens),
+            (None, 原因, 量) => {
+                if let Some(话) = 原因 {
+                    提示.push(话);
+                }
+                (候选, false, 量.in_tokens, 量.out_tokens)
+            }
+        },
+        Err(e) => {
+            提示.push(format!("重排没成功（{e}）{}", crate::rerank::退回话));
+            (候选, false, 0, 0)
+        }
+    }
 }
 
 pub fn 混合或退回(
@@ -586,7 +686,18 @@ pub fn 混合或退回(
     conn: &Connection,
     query: &str,
 ) -> Result<检索结果> {
-    跑一趟(vault, conn, query, true)
+    检索(vault, conn, query, 常规)
+}
+
+/// 按指定跑法跑一趟。CLI 的两个对照档（`--rerank` / `--no-graph`）走这里——
+/// **量一个开关的增益，必须能把它关掉再量一次**，否则报出来的永远是加了东西之后的好数字。
+pub fn 检索(
+    vault: &crate::vault::Vault,
+    conn: &Connection,
+    query: &str,
+    法: 跑法,
+) -> Result<检索结果> {
+    跑一趟(vault, conn, query, 法)
 }
 
 /// 对照档：摘掉图扩展那一路。只给 `note eval --no-graph` 用——
@@ -596,7 +707,7 @@ pub fn 无图对照(
     conn: &Connection,
     query: &str,
 ) -> Result<检索结果> {
-    跑一趟(vault, conn, query, false)
+    检索(vault, conn, query, 对照无图)
 }
 
 /// 评测集里的一条。`expect_none = true` 是**负样本**：库里没有依据，正确行为是搜不出东西。
@@ -667,6 +778,9 @@ pub struct 成绩 {
     /// 这一轮图扩展那一路开没开。**报 recall 的数必须连着这个说**——
     /// `--no-graph` 那一档是给"新增那一路到底增益了多少"当对照的
     pub graph: bool,
+    /// 这一轮有没有真的重排过（配置里开着、且模型回了能读的编号）。
+    /// 开着开关但一路都没改成顺序，这个数就是 false——别拿"配了"当"生效了"
+    pub reranked: bool,
     pub k: usize,
 }
 
@@ -685,7 +799,7 @@ pub fn 评测(
     conn: &Connection,
     套件: &[问题],
     k: usize,
-    开图: bool,
+    法: 跑法,
 ) -> Result<成绩> {
     let mut 正 = 0;
     let mut 负 = 0;
@@ -693,9 +807,11 @@ pub fn 评测(
     let mut 误给 = Vec::new();
     let mut 漏 = Vec::new();
     let mut 语义开 = false;
+    let mut 重排过 = false;
     for 题 in 套件 {
-        let 结 = 跑一趟(vault, conn, &题.q, 开图)?;
+        let 结 = 跑一趟(vault, conn, &题.q, 法)?;
         语义开 |= 结.semantic;
+        重排过 |= 结.reranked;
         let 详情 = 结.hits;
         let 前: Vec<&str> = 详情.iter().take(k).map(|h| h.path.as_str()).collect();
         if 题.expect_none {
@@ -733,7 +849,8 @@ pub fn 评测(
         negatives_with_candidates: 误给,
         misses: 漏,
         semantic: 语义开,
-        graph: 开图,
+        graph: 法.开图,
+        reranked: 重排过,
         k,
     })
 }
@@ -996,7 +1113,7 @@ expect_none = true
 "#,
         )
         .unwrap();
-        let 成 = 评测(&v, idx.conn(), &套, 8, true).unwrap();
+        let 成 = 评测(&v, idx.conn(), &套, 8, 常规).unwrap();
         assert!(!成.semantic, "没建向量表就该只量关键词");
         assert_eq!(成.entries, 3);
         assert_eq!(成.positives, 2);
@@ -1024,7 +1141,7 @@ expect_none = true
 "#,
         )
         .unwrap();
-        let 成 = 评测(&v, idx.conn(), &套, 8, true).unwrap();
+        let 成 = 评测(&v, idx.conn(), &套, 8, 常规).unwrap();
         assert_eq!(成.hits, 0);
         assert_eq!(成.misses.len(), 1, "{:?}", 成.misses);
         assert!(
@@ -1106,6 +1223,7 @@ expect_none = true
                 base_url: Some("http://127.0.0.1:4310/v1".into()),
                 chat_model: None,
                 embedding_model: Some("还没嵌的模型".into()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1372,19 +1490,47 @@ expect_paths = ["notes/提到它的.md"]
 "#,
         )
         .unwrap();
-        let 开 = 评测(&v, idx.conn(), &套, 8, true).unwrap();
+        let 开 = 评测(&v, idx.conn(), &套, 8, 常规).unwrap();
         assert!(开.graph, "成绩要写清这一轮开着哪一路");
         assert_eq!(
             开.hits, 1,
             "只靠链接可达的那一篇，开着图扩展就该召回：{:?}",
             开.misses
         );
-        let 关 = 评测(&v, idx.conn(), &套, 8, false).unwrap();
+        let 关 = 评测(&v, idx.conn(), &套, 8, 对照无图).unwrap();
         assert!(!关.graph);
         assert_eq!(
             关.hits, 0,
             "对照档里这一条必须漏，否则说明题目本身关键词就能答"
         );
+    }
+
+    /// 重排开关的两态之一：**没配对话模型时不许把整趟搜索打挂**，也不许静默——
+    /// 顺序退回 RRF，原因写进 hint。（真打模型那一趟由假端点在真机那一轮演）
+    #[test]
+    fn 开了重排但没填对话模型就退回名次并且说清() {
+        let (_d, v, idx) = 装库(三篇);
+        crate::ai::save(
+            &v,
+            &crate::ai::AiConfig {
+                base_url: Some("http://127.0.0.1:4310/v1".into()),
+                chat_model: None,
+                embedding_model: None,
+                rerank: true,
+            },
+        )
+        .unwrap();
+        let 结 = 混合或退回(&v, idx.conn(), "唯一副本").unwrap();
+        assert!(!结.reranked);
+        assert_eq!(
+            结.rerank_in + 结.rerank_out,
+            0,
+            "一次网络都没打，token 记 0"
+        );
+        assert_eq!(结.hits.len(), 1, "开关配不齐不该把手里的结果一起扔掉");
+        let 提 = 结.hint.unwrap();
+        assert!(提.contains("开了重排但没填对话模型"), "{提}");
+        assert!(提.contains("没填嵌入模型名"), "两句都该在：{提}");
     }
 
     #[test]

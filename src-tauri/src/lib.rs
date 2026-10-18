@@ -670,6 +670,7 @@ async fn ai_save_config(
     base_url: String,
     chat_model: String,
     embedding_model: String,
+    rerank: bool,
 ) -> Result<note_core::ai::AiView, WriteErr> {
     let vault = vault_of(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -679,6 +680,7 @@ async fn ai_save_config(
                 base_url: Some(base_url),
                 chat_model: Some(chat_model),
                 embedding_model: Some(embedding_model),
+                rerank,
             },
         )
         .map_err(werr)?;

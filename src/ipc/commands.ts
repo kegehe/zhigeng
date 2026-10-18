@@ -105,8 +105,8 @@ export const api = {
    * 传下划线会直接报 `missing required key baseUrl`（真机照出来的，不是猜的）。
    * 空串 = 清空这一项。地址与模型名的裁剪、`/` 收尾都在 Rust 侧一份判据里做。
    */
-  aiSaveConfig: (baseUrl: string, chatModel: string, embeddingModel: string) =>
-    invoke<AiView>("ai_save_config", { baseUrl, chatModel, embeddingModel }),
+  aiSaveConfig: (baseUrl: string, chatModel: string, embeddingModel: string, rerank: boolean) =>
+    invoke<AiView>("ai_save_config", { baseUrl, chatModel, embeddingModel, rerank }),
   /** 空串 = 删掉这把 Key */
   aiSaveKey: (key: string) => invoke<AiView>("ai_save_key", { key }),
   /** 两个最小探针请求。发出去的是固定文本 "ping"，不含任何笔记内容 */

@@ -464,6 +464,7 @@ mod tests {
                 base_url: Some("http://127.0.0.1:9/v1".into()),
                 chat_model: None,
                 embedding_model: Some("没人听的模型".into()),
+                ..Default::default()
             },
         )
         .unwrap();

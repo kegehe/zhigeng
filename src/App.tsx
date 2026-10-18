@@ -22,7 +22,7 @@ import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
 import { 徽标, 徽标红, 可检索, 缺项, 步骤名, 探针结论 } from "./ui/ai";
-import { 来源徽章, 走了哪几路, 面板标题 } from "./ui/search";
+import { 来源徽章, 走了那句, 面板标题 } from "./ui/search";
 import {
   buildTree,
   dirsOf,
@@ -191,7 +191,12 @@ export function App() {
    * `ai测过` 刻意不持久化：重启之后还挂着"已连通"，说的是上次开机时的事实。
    */
   const [aiView, setAiView] = useState<AiView | null>(null);
-  const [aiForm, setAiForm] = useState({ baseUrl: "", chatModel: "", embeddingModel: "" });
+  const [aiForm, setAiForm] = useState({
+    baseUrl: "",
+    chatModel: "",
+    embeddingModel: "",
+    rerank: false,
+  });
   const [aiKey, setAiKey] = useState("");
   const [aiReport, setAiReport] = useState<AiProbeReport | null>(null);
   const [aiBusy, setAiBusy] = useState<"save" | "key" | "test" | "models" | null>(null);
@@ -238,7 +243,12 @@ export function App() {
       .then((v) => {
         setAi就绪(可检索(v));
         setAiView(v);
-        setAiForm({ baseUrl: v.baseUrl, chatModel: v.chatModel, embeddingModel: v.embeddingModel });
+        setAiForm({
+          baseUrl: v.baseUrl,
+          chatModel: v.chatModel,
+          embeddingModel: v.embeddingModel,
+          rerank: v.rerank,
+        });
       })
       .catch(() => setAi就绪(false));
     try {
@@ -1005,7 +1015,12 @@ export function App() {
   }, [palette]);
   const 填回 = (v: AiView) => {
     setAiView(v);
-    setAiForm({ baseUrl: v.baseUrl, chatModel: v.chatModel, embeddingModel: v.embeddingModel });
+    setAiForm({
+          baseUrl: v.baseUrl,
+          chatModel: v.chatModel,
+          embeddingModel: v.embeddingModel,
+          rerank: v.rerank,
+        });
   };
 
   const openAsk = async () => {
@@ -1013,7 +1028,12 @@ export function App() {
     try {
       const [v, 录] = await Promise.all([api.aiView(), api.aiRuns(8)]);
       setAiView(v);
-      setAiForm({ baseUrl: v.baseUrl, chatModel: v.chatModel, embeddingModel: v.embeddingModel });
+      setAiForm({
+          baseUrl: v.baseUrl,
+          chatModel: v.chatModel,
+          embeddingModel: v.embeddingModel,
+          rerank: v.rerank,
+        });
       setRuns(录);
     } catch (e) {
       setError(describeError(e).message);
@@ -1048,7 +1068,14 @@ export function App() {
   const ai保存 = async () => {
     setAiBusy("save");
     try {
-      填回(await api.aiSaveConfig(aiForm.baseUrl, aiForm.chatModel, aiForm.embeddingModel));
+      填回(
+        await api.aiSaveConfig(
+          aiForm.baseUrl,
+          aiForm.chatModel,
+          aiForm.embeddingModel,
+          aiForm.rerank,
+        ),
+      );
       setAiReport(null);
       setAi测过(null);
       // 地址可能变了，上一份清单不再作数——留着它会让人照着过时的候选填
@@ -1362,7 +1389,7 @@ export function App() {
                         : semBusy
                           ? "检索中…"
                           : sem
-                            ? 走了哪几路(sem.semantic, sem.graph)
+                            ? 走了那句(sem.semantic, sem.graph, sem.reranked)
                             : ""}
                     </span>
                   </div>
@@ -1686,6 +1713,25 @@ export function App() {
                       />
                     </label>
                   ))}
+                  {/* 重排是合并之后的**一道工序**，不是"第四路"，所以它不进右上角那句话的
+                      主体，只在生效时加一段"· 已重排"。**默认关**：那是每次搜索多打一趟模型，
+                      不能替用户决定花这个钱。回包读不出时后端会明说"这一趟用 RRF 名次"——
+                      "配了"与"生效了"在界面上必须是两件事。 */}
+                  <label className="mt-1 flex items-start gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="mt-1 accent-(--accent)"
+                      checked={aiForm.rerank}
+                      onChange={(e) => setAiForm({ ...aiForm, rerank: e.target.checked })}
+                    />
+                    <span className="text-fg-2">
+                      检索时让对话模型把候选排一遍（listwise 重排）
+                      <span className="block text-xs text-fg-disabled">
+                        每次搜索多打一趟模型，最多送前 30 条片段摘录（不含路径与块 ID）。
+                        没填对话模型时这一格不起作用；排不出来会自动退回按名次合并的结果，并在这里说清。
+                      </span>
+                    </span>
+                  </label>
                   <label className="mt-1 flex flex-col gap-1">
                     <span className="text-xs text-fg-2">
                       API Key
@@ -1938,7 +1984,9 @@ export function App() {
                       <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
                         {r.model}｜引用 {r.cited.length}/{r.candidates}
                         {r.retried ? "｜重试过" : ""}
-                        {r.semantic && r.graph ? "" : `｜${走了哪几路(r.semantic, r.graph)}`}
+                        {r.semantic && r.graph && !r.reranked
+                          ? ""
+                          : `｜${走了那句(r.semantic, r.graph, r.reranked)}`}
                       </span>
                       <span className="shrink-0 font-mono text-fg-2">
                         {r.inTokens + r.outTokens} tok · {new Date(r.createdAt).toLocaleTimeString()}
