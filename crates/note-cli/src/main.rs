@@ -136,6 +136,10 @@ enum Cmd {
         suite: PathBuf,
         #[arg(long, default_value_t = 8)]
         k: usize,
+        /// **对照档**：把图扩展那一路摘掉再量一遍。量新增那一路的增益必须有这个数，
+        /// 不然报出来的永远是"加了东西之后"的那一个好数字
+        #[arg(long)]
+        no_graph: bool,
     },
 }
 
@@ -148,7 +152,8 @@ enum AiCmd {
     },
     /// 看嵌了多少、还剩多少、多少永远不嵌
     Status,
-    /// 混合检索（关键词 + 语义）。**会打一次网络**把查询本身嵌成向量
+    /// 混合检索（关键词 + 链接，配了嵌入模型再加语义）。
+    /// **只有语义那一路开着时才打一次网络**；不配模型也能跑，那一趟走的是本地两路
     Search {
         query: String,
         #[arg(short, long, default_value_t = 10)]
@@ -203,7 +208,12 @@ fn main() -> Result<()> {
         Cmd::Capture { path, text, bench } => cmd_capture(&path, text.as_deref(), bench),
         Cmd::WriteBench { notes, iters } => cmd_write_bench(notes, iters),
         Cmd::WriteProfile { notes } => cmd_write_profile(notes),
-        Cmd::Eval { path, suite, k } => cmd_eval(path, suite, k),
+        Cmd::Eval {
+            path,
+            suite,
+            k,
+            no_graph,
+        } => cmd_eval(path, suite, k, !no_graph),
         Cmd::Ai { path, 命令 } => cmd_ai(path, 命令),
         Cmd::EditDoc { file } => {
             let src = std::fs::read_to_string(&file)?;
@@ -529,20 +539,18 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
             }
         }
         AiCmd::Search { query, limit } => {
-            let 中 = note_core::retrieve::混合(&vault, idx.conn(), &query)?;
+            let 结 = note_core::retrieve::混合或退回(&vault, idx.conn(), &query)?;
+            let 走了 = 结.走了();
+            if let Some(h) = &结.hint {
+                println!("  {h}");
+            }
+            let 中 = 结.hits;
             if 中.is_empty() {
-                println!("没有命中：{query}");
+                println!("没有命中：{query}（这一趟走【{走了}】）");
                 return Ok(());
             }
             for (i, h) in 中.iter().take(limit).enumerate() {
-                let 来源: Vec<&str> = h
-                    .from
-                    .iter()
-                    .map(|r| match r {
-                        note_core::retrieve::路::Keyword => "关键词",
-                        note_core::retrieve::路::Semantic => "语义",
-                    })
-                    .collect();
+                let 来源: Vec<&str> = h.from.iter().map(|r| r.显示名()).collect();
                 println!(
                     "{:>3}. {:>7.4} [{}] {}  {}",
                     i + 1,
@@ -553,8 +561,9 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                 );
             }
             println!(
-                "{} 条命中（关键词 + 语义两路合并，单篇最多 4 块）",
-                中.len()
+                "{} 条命中（这一趟走【{走了}】，单篇最多 {} 块）",
+                中.len(),
+                note_core::retrieve::每篇配额
             );
         }
     }
@@ -563,25 +572,27 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
 
 /// 跑评测集。**语义那一路开没开要印在第一行旁边**：没配模型时这个数只反映关键词，
 /// 拿它当"AI 检索达标了"是假的（docs/04 §评测集 要的是 recall@8 ≥ 0.85 与幻觉率 = 0）。
-fn cmd_eval(path: PathBuf, suite: PathBuf, k: usize) -> Result<()> {
+fn cmd_eval(path: PathBuf, suite: PathBuf, k: usize, 开图: bool) -> Result<()> {
     let 文本 =
         std::fs::read_to_string(&suite).with_context(|| format!("读评测集 {}", suite.display()))?;
     let 套 = note_core::retrieve::读套件(&文本)?;
     let vault = Vault::open(&path)?;
     let idx = note_core::index::Index::open(&vault)?;
-    let 成 = note_core::retrieve::评测(&vault, idx.conn(), &套, k)?;
+    let 成 = note_core::retrieve::评测(&vault, idx.conn(), &套, k, 开图)?;
     println!(
-        "评测集 {} 条（正 {} / 负 {}），K={}；语义那一路：{}",
+        "评测集 {} 条（正 {} / 负 {}），K={}；这一趟走【{}】",
         成.entries,
         成.positives,
         成.negatives,
         成.k,
-        if 成.semantic {
-            "开"
-        } else {
-            "关（没配模型或没嵌过 → 这个数只反映关键词）"
-        }
+        成.走了(),
     );
+    if !成.semantic {
+        println!("  语义那一路没开（没配模型或还没嵌过）——下面这个数只反映上面写着的那几路。");
+    }
+    if !成.graph {
+        println!("  对照档：图扩展那一路被 `--no-graph` 摘掉了，这个数是拿它当基线的。");
+    }
     println!(
         "recall@{} = {:.1}%（{}/{}）",
         成.k,

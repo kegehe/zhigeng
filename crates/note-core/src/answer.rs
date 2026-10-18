@@ -254,8 +254,10 @@ pub fn ask(vault: &Vault, conn: &Connection, 问题: &str) -> Result<答复> {
         conn,
         模型: 模型.to_string(),
         候选: 依据.len(),
+        语义路: 检索.semantic,
+        图路: 检索.graph,
     };
-    if let Err(e) = 记.写(&答复, 检索.semantic) {
+    if let Err(e) = 记.写(&答复) {
         // 审计写失败不能把答案吞掉：答案已经生成完了，钱也花完了。
         // 但也不能静默——那正是"账对不上"的来路
         tracing::warn!("ai_runs 没落进去（{e}），答案照给");
@@ -281,6 +283,9 @@ pub struct 运行 {
     pub cited: Vec<String>,
     pub retried: bool,
     pub semantic: bool,
+    /// 这一趟图扩展那一路开没开。**旧记录缺这个键时按 false 读**——那几次它确实还没做，
+    /// 不是"读不出来所以猜一个"
+    pub graph: bool,
     pub candidates: i64,
     pub created_at: i64,
 }
@@ -316,6 +321,7 @@ pub fn 最近运行(conn: &Connection, limit: i64) -> Result<Vec<运行>> {
                 .get("semantic")
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false),
+            graph: 解.get("graph").and_then(|x| x.as_bool()).unwrap_or(false),
             candidates: 解.get("candidates").and_then(|x| x.as_i64()).unwrap_or(0),
             created_at: r.get(8)?,
         })
@@ -327,10 +333,14 @@ struct 落审计<'a> {
     conn: &'a Connection,
     模型: String,
     候选: usize,
+    /// 这一趟那两路**可开关**的路开没开。放在结构体里而不是 `写` 的位置参数上：
+    /// 两个同类型 bool 挨着传，早晚会有一次传反
+    语义路: bool,
+    图路: bool,
 }
 
 impl 落审计<'_> {
-    fn 写(self, 答: &答复, 语义路: bool) -> Result<()> {
+    fn 写(self, 答: &答复) -> Result<()> {
         let id = format!("r-{}", &crate::capture::gen_note_id()[2..]);
         let 时候 = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -352,7 +362,8 @@ impl 落审计<'_> {
                     "cited": 引用,
                     "candidates": self.候选,
                     "retried": 答.retried,
-                    "semantic": 语义路,
+                    "semantic": self.语义路,
+                    "graph": self.图路,
                 }))
                 .map_err(|e| Error::Invalid(format!("审计的引用清单序列化失败：{e}")))?,
                 时候,
@@ -579,8 +590,10 @@ mod tests {
             conn: &conn,
             模型: "m1".into(),
             候选: 依.len(),
+            语义路: true,
+            图路: true,
         }
-        .写(&答, true)
+        .写(&答)
         .unwrap();
         let 行 = 最近运行(&conn, 10).unwrap();
         assert_eq!(行.len(), 1);
@@ -588,9 +601,29 @@ mod tests {
         assert_eq!(行[0].error.as_deref(), Some("依据不足或降级"));
         assert!(行[0].retried, "重试过要看得出来");
         assert!(行[0].semantic, "这一趟语义路开着");
+        assert!(行[0].graph, "链接那一路开没开也要落在同一笔账里");
         assert_eq!(行[0].candidates, 2);
         assert_eq!(行[0].in_tokens, 20, "两趟的 token 累加");
         assert!(行[0].cited.is_empty(), "降级没有可采信的引用");
+    }
+
+    /// 审计读的是 json 里的键。**2026-10-18 之前那几笔没有 `graph` 键**，缺键必须读成
+    /// "那一次确实没开"，不能读成开了——否则审计页上会出现一条从没存在过的通路。
+    #[test]
+    fn 旧记录里缺链接那个键就读成没开() {
+        crate::index::注册向量扩展();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::schema::SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO ai_runs(id,task,model,trigger,in_tokens,out_tokens,cost_usd,ok,error,duration_ms,cited_blocks_json,created_at)
+             VALUES('r-old0001','ask','m1','user',1,1,NULL,1,NULL,5,'{\"cited\":[],\"candidates\":1,\"retried\":false,\"semantic\":true}',1)",
+            [],
+        )
+        .unwrap();
+        let 行 = 最近运行(&conn, 10).unwrap();
+        assert_eq!(行.len(), 1);
+        assert!(行[0].semantic, "旧记录里写着的键照旧读得出来");
+        assert!(!行[0].graph, "缺键不是\"未知\"，是\"那一次没开\"");
     }
 
     #[test]

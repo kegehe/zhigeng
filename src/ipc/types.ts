@@ -187,7 +187,7 @@ export type HybridHit = {
   headerPath: string;
   snippet: string;
   status: string;
-  from: ("keyword" | "semantic")[];
+  from: ("keyword" | "semantic" | "graph")[];
   rrf: number;
 };
 
@@ -195,6 +195,11 @@ export type HybridResult = {
   hits: HybridHit[];
   /** 语义那一路这次到底开没开。没开时 `hint` 会说要它做什么 */
   semantic: boolean;
+  /**
+   * 图扩展那一路这次跑没跑。**它对任何 Key 都成立**（纯本地、零 token），
+   * 所以今天恒真——但界面上那句话是从这两个布尔拼出来的，不是写死的
+   */
+  graph: boolean;
   hint: string | null;
 };
 
@@ -233,6 +238,8 @@ export type AiRun = {
   cited: string[];
   retried: boolean;
   semantic: boolean;
+  /** 2026-10-18 之前那几笔没有这个键，后端读成 false——那几次确实没开，不是猜的 */
+  graph: boolean;
   candidates: number;
   createdAt: number;
 };

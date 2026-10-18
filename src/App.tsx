@@ -22,6 +22,7 @@ import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
 import { 徽标, 徽标红, 可检索, 缺项, 步骤名, 探针结论 } from "./ui/ai";
+import { 来源徽章, 走了哪几路, 面板标题 } from "./ui/search";
 import {
   buildTree,
   dirsOf,
@@ -361,12 +362,16 @@ export function App() {
   问的是.current = query;
 
   /**
-   * 语义那一路：比关键词再晚一档（700ms），因为它含一次网络往返，而且它只是补充——
-   * 用户真正在等的永远是先出来的那批。没配模型就不打这一趟（`ai就绪` 在开库时问一次）。
+   * 混合检索那一路：比关键词再晚一档（700ms），因为它可能含一次网络往返，而且它只是补充——
+   * 用户真正在等的永远是先出来的那批。
+   *
+   * 2026-10-18 起**不再被 `ai就绪` 挡着**：这一趟里图扩展那一路是纯本地的，
+   * 不配任何 Key 也有东西可给。用它挡着，等于把唯一人人都有的一路藏起来，
+   * 而设置面板那句"检索走关键词与链接"就成了当场可拆的谎。
    */
   useEffect(() => {
     const q = query.trim();
-    if (q.length < 1 || !inTauri() || !ai就绪) {
+    if (q.length < 1 || !inTauri()) {
       setSem(null);
       setSemErr(null);
       setSemBusy(false);
@@ -390,7 +395,7 @@ export function App() {
         });
     }, 700);
     return () => window.clearTimeout(t);
-  }, [query, ai就绪]);
+  }, [query]);
 
   // 提示是过路信息，不该赖在界面上
   useEffect(() => {
@@ -1338,26 +1343,26 @@ export function App() {
                     );
                   })}
               {/*
-                语义那一路。三条口径：
+                混合检索那一路（关键词 + 链接；配了嵌入模型再加语义）。四条口径：
                 1. **单独一块，不混进上面那张表**——上面是 BM25 名次，这里是 RRF 名次，
                    混排会让人以为一把尺子量出来的；
                 2. **按篇去重**：一个切片命中就把整篇列一次，同篇再来一个切片不占第二行；
-                3. 失败说失败、没开说没开。没配模型时这一整块不出现（`ai就绪` 挡在前面），
-                   而"配了但连不上"要把错误原文摆出来——那是"试过了"，不是"没这功能"。
+                3. 失败说失败、没开说没开。"配了但连不上"要把错误原文摆出来——
+                   那是"试过了"，不是"没这功能"；
+                4. 右上角那句话由 `走了哪几路` 拼出来，不写死。这一整块以前被 `ai就绪`
+                   挡着、叫「语义补充」，而链接那一路是纯本地的——不配 Key 也该看得见。
               */}
-              {searching && ai就绪 ? (
+              {searching ? (
                 <div className="mt-2 border-t border-line pt-1">
                   <div className="flex items-baseline justify-between px-3">
-                    <span className="text-xs text-fg-2">语义补充</span>
+                    <span className="text-xs text-fg-2">{面板标题}</span>
                     <span className="text-xs text-fg-disabled">
                       {semErr
                         ? "这一路失败"
                         : semBusy
-                          ? "问模型中…"
+                          ? "检索中…"
                           : sem
-                            ? sem.semantic
-                              ? "关键词 + 语义"
-                              : "只有关键词"
+                            ? 走了哪几路(sem.semantic, sem.graph)
                             : ""}
                     </span>
                   </div>
@@ -1391,11 +1396,7 @@ export function App() {
                             <span className="flex items-baseline gap-2">
                               <span className="min-w-0 flex-1 truncate">{h.title}</span>
                               <span className="shrink-0 text-xs text-fg-2">
-                                {h.from.length > 1
-                                  ? "两路都中"
-                                  : h.from[0] === "semantic"
-                                    ? "语义"
-                                    : "关键词"}
+                                {来源徽章(h.from)}
                               </span>
                             </span>
                             <span className="block truncate text-xs text-fg-2">
@@ -1937,7 +1938,7 @@ export function App() {
                       <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
                         {r.model}｜引用 {r.cited.length}/{r.candidates}
                         {r.retried ? "｜重试过" : ""}
-                        {r.semantic ? "" : "｜只有关键词"}
+                        {r.semantic && r.graph ? "" : `｜${走了哪几路(r.semantic, r.graph)}`}
                       </span>
                       <span className="shrink-0 font-mono text-fg-2">
                         {r.inTokens + r.outTokens} tok · {new Date(r.createdAt).toLocaleTimeString()}
