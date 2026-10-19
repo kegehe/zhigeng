@@ -204,6 +204,8 @@ mod tests {
             status: "active".into(),
             from: vec![路::Keyword],
             rrf: 1.0,
+            evidence: 1.0,
+            similarity: 0.0,
         }
     }
 

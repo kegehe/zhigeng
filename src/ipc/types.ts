@@ -191,6 +191,13 @@ export type HybridHit = {
   status: string;
   from: ("keyword" | "semantic" | "graph")[];
   rrf: number;
+  /**
+   * **可比的依据强度** = 查询词覆盖率（0..1）。只靠链接回来的候选这里是 0——
+   * 链接给的是"相关"，不是"依据"。拒答门的阈值按它标定，所以它跨库可比
+   */
+  evidence: number;
+  /** 语义那一路的余弦相似度（没开语义 = 0）。**阈值未标定**，只用于排序与显示 */
+  similarity: number;
 };
 
 export type HybridResult = {

@@ -107,6 +107,15 @@ pub struct 命中 {
     /// 这条是被哪几路捞上来的。多路都命中是最强的信号，界面上要说得出**是哪几路**
     pub from: Vec<路>,
     pub rrf: f64,
+    /// **可比的依据强度** = 查询词覆盖率（0..1）。**只靠链接回来的候选这一项是 0.0**——
+    /// 链接给的是"相关"，不是"依据"（用户拍板：能进上下文，不能单独作为作答依据）。
+    ///
+    /// 为什么不用 `rrf` 判：RRF 只有名次，实测**真命中与毫不相干的误命中都是 0.0164**。
+    /// 为什么也不把余弦相似度混进来：那是另一把尺子（真嵌入模型下随便两段相关文本都在
+    /// 0.7 以上），混进一个数里，阈值就没法只按覆盖率标定。相似度单独放 `similarity`。
+    pub evidence: f64,
+    /// 语义那一路给的余弦相似度（没开语义 = 0.0）。**阈值未标定**，只用于排序与显示
+    pub similarity: f64,
 }
 
 /// 纯函数：三路各自的有序 chunk_id（附 note_id 用于配额）→ RRF 合并后的有序结果。
@@ -158,6 +167,51 @@ pub fn 合并(
     出
 }
 
+/// 查询切成哪几个**有效词**：分词 → 丢掉文档频率过半的高频词 → 全被丢掉时回到原样。
+///
+/// 这是"匹配式"与"覆盖率"共用的那一份词表。分成两份的话，界面上那句"匹配到 3/4 个词"
+/// 量的就不是实际送进 FTS 的那几个词了。
+pub fn 查询词(
+    conn: &Connection, fts表: &str, 全表: &str, query: &str
+) -> Result<Vec<String>> {
+    let 词: Vec<String> = crate::index::segment(query)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    if 词.is_empty() {
+        return Ok(Vec::new());
+    }
+    let 总: i64 = conn.query_row(&format!("SELECT count(*) FROM {全表}"), [], |r| r.get(0))?;
+    let mut 留下 = Vec::new();
+    if 词.len() >= 2 && 总 > 0 {
+        for w in &词 {
+            let n = 词频(conn, fts表, w).unwrap_or(0);
+            if n * 2 <= 总 {
+                留下.push(w.clone());
+            }
+        }
+    }
+    // 单条词、或全被当成高频丢掉时回到原样：宁可给一堆噪音，也不要静默返回空
+    Ok(if 留下.is_empty() { 词 } else { 留下 })
+}
+
+/// 纯函数：**查询词覆盖率**——这段文本里有几个有效词。
+///
+/// 为什么用它当"能不能作答"的尺子而不是 BM25 分数：BM25 的绝对值随库的大小与词频漂，
+/// 而名次分（RRF）只有"第几"这一个信息——实测过，**真命中与毫不相干的误命中都是 0.0164**。
+/// 覆盖率是 0..1 的比值，跨库可比，也解释得给用户听（"只碰上一个词"）。
+pub fn 覆盖率(查询词: &[String], 文本: &str) -> f64 {
+    if 查询词.is_empty() {
+        return 0.0;
+    }
+    let 有: std::collections::BTreeSet<String> = crate::index::segment(文本)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let 中 = 查询词.iter().filter(|w| 有.contains(w.as_str())).count();
+    中 as f64 / 查询词.len() as f64
+}
+
 /// 把查询变成 FTS5 的匹配表达式：**各词 OR，并丢掉没有区分力的高频词**。
 ///
 /// 界面搜索（`Index::search_keyword`）与召回（`关键词路`）**共用这一份**。分成两份的代价
@@ -172,31 +226,22 @@ pub fn 匹配式(
     全表: &str,
     query: &str,
 ) -> Result<Option<String>> {
-    let 词: Vec<String> = crate::index::segment(query)
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
+    let 用 = 查询词(conn, fts表, 全表, query)?;
+    Ok(表达式(&用))
+}
+
+/// 纯函数：把词表拼成 FTS5 的 OR 表达式。与 `查询词` 分开，是为了让"跑一趟"能算一次词表
+/// 用两处（一路查询 + 一处算覆盖率），而不是把带 `词频` 查询的那趟活跑两遍。
+pub fn 表达式(词: &[String]) -> Option<String> {
     if 词.is_empty() {
-        return Ok(None);
+        return None;
     }
-    let 总: i64 = conn.query_row(&format!("SELECT count(*) FROM {全表}"), [], |r| r.get(0))?;
-    let mut 留下 = Vec::new();
-    if 词.len() >= 2 && 总 > 0 {
-        for w in &词 {
-            let n = 词频(conn, fts表, w).unwrap_or(0);
-            if n * 2 <= 总 {
-                留下.push(w.clone());
-            }
-        }
-    }
-    // 单条词、或全被当成高频丢掉时回到原样：宁可给一堆噪音，也不要静默返回空
-    let 用 = if 留下.is_empty() { 词 } else { 留下 };
-    Ok(Some(
-        用.iter()
+    Some(
+        词.iter()
             .map(|w| format!("\"{}\"", w.replace('"', "")))
             .collect::<Vec<_>>()
             .join(" OR "),
-    ))
+    )
 }
 
 /// 一个词在这张 FTS 表里出现在多少行里（文档频率）。
@@ -209,9 +254,13 @@ fn 词频(conn: &Connection, fts表: &str, 词: &str) -> Result<i64> {
     )?)
 }
 
-/// 关键词那一跳：切片级 BM25。
-pub fn 关键词路(conn: &Connection, query: &str, 配额: usize) -> Result<Vec<(i64, String)>> {
-    let Some(match_expr) = 匹配式(conn, "chunks_fts", "chunks", query)? else {
+/// 关键词那一跳（给已经算好的词表）。
+pub fn 关键词路按词(
+    conn: &Connection,
+    词: &[String],
+    配额: usize,
+) -> Result<Vec<(i64, String)>> {
+    let Some(match_expr) = 表达式(词) else {
         return Ok(Vec::new());
     };
     let mut s = conn.prepare(
@@ -231,13 +280,23 @@ pub fn 关键词路(conn: &Connection, query: &str, 配额: usize) -> Result<Vec
     Ok(rows.filter_map(|x| x.ok()).collect())
 }
 
+/// 关键词那一跳：切片级 BM25。
+pub fn 关键词路(conn: &Connection, query: &str, 配额: usize) -> Result<Vec<(i64, String)>> {
+    let 词 = 查询词(conn, "chunks_fts", "chunks", query)?;
+    关键词路按词(conn, &词, 配额)
+}
+
 /// 语义那一跳：查询向量 → KNN。向量本身由调用方去要（`ai::embed` 一次，只发查询文本）。
+///
+/// 回的是 `(切片, 笔记, 相似度)`——**相似度要带出来**：它是 0..1 的可比值，与覆盖率同一档，
+/// 拒答门读的是这个，不是名次分。sqlite-vec 的 cosine `distance = 1 - 余弦相似`，
+/// 所以 `1 - distance` 再夹进 0..1（反向相似给 0，不给负数——负数在阈值上会读成"很相关"）。
 pub fn 语义路(
     conn: &Connection,
     模型: &str,
     查询向量: &[f32],
     配额: usize,
-) -> Result<Vec<(i64, String)>> {
+) -> Result<Vec<(i64, String, f64)>> {
     if 查询向量.is_empty() {
         return Ok(Vec::new());
     }
@@ -261,7 +320,7 @@ pub fn 语义路(
         "WITH 近 AS (
            SELECT rowid AS id, distance FROM {表} WHERE embedding MATCH ?1 AND k = ?2
          )
-         SELECT 近.id, c.note_id
+         SELECT 近.id, c.note_id, 近.distance
          FROM 近
          JOIN chunks c ON c.id = 近.id
          JOIN notes  n ON n.id = c.note_id
@@ -270,9 +329,16 @@ pub fn 语义路(
     ))?;
     let rows = s.query_map(
         params![crate::embed::小端(查询向量), (配额 * 2) as i64],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        |r| {
+            let 距: f64 = r.get(2)?;
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                (1.0 - 距).clamp(0.0, 1.0),
+            ))
+        },
     )?;
-    let mut 出: Vec<(i64, String)> = rows.filter_map(|x| x.ok()).collect();
+    let mut 出: Vec<(i64, String, f64)> = rows.filter_map(|x| x.ok()).collect();
     出.truncate(配额);
     Ok(出)
 }
@@ -463,29 +529,51 @@ pub fn 图路(conn: &Connection, 种子: &[String], 配额: usize) -> Result<Vec
 }
 
 /// 把合并后的 chunk_id 补成界面要的那份形状。**顺序按 `合并` 给的来**，不再排。
-pub fn 取详情(conn: &Connection, 排好: &[(i64, f64, Vec<路>)]) -> Result<Vec<命中>> {
+///
+/// `查询词` 与 `相似度` 只用来算 `evidence`（可比的依据强度）。两者都给 0 的时候
+/// evidence 就是 0——那正是"只靠链接回来的"那一档。
+pub fn 取详情(
+    conn: &Connection,
+    排好: &[(i64, f64, Vec<路>)],
+    查询词: &[String],
+    相似度: &std::collections::BTreeMap<i64, f64>,
+) -> Result<Vec<命中>> {
     let mut 出 = Vec::new();
     for (id, s, 路) in 排好 {
         let 行 = conn.query_row(
-            "SELECT c.note_id, n.path, n.title, COALESCE(c.header_path,''), substr(c.text,1,160), n.status
+            "SELECT c.note_id, n.path, n.title, COALESCE(c.header_path,''), c.text, n.status
              FROM chunks c JOIN notes n ON n.id = c.note_id WHERE c.id=?1",
             [id],
             |r: &Row| {
-                Ok(命中 {
-                    chunk_id: *id,
-                    note_id: r.get(0)?,
-                    path: r.get(1)?,
-                    title: r.get(2)?,
-                    header_path: r.get(3)?,
-                    snippet: r.get(4)?,
-                    status: r.get(5)?,
-                    from: 路.clone(),
-                    rrf: *s,
-                })
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
             },
         );
         match 行 {
-            Ok(v) => 出.push(v),
+            Ok((note_id, path, title, header_path, 全文, status)) => {
+                let 覆盖 = 覆盖率(查询词, &全文);
+                let 语义 = 相似度.get(id).copied().unwrap_or(0.0);
+                let 摘: String = 全文.chars().take(160).collect();
+                出.push(命中 {
+                    chunk_id: *id,
+                    note_id,
+                    path,
+                    title,
+                    header_path,
+                    snippet: 摘,
+                    status,
+                    from: 路.clone(),
+                    rrf: *s,
+                    evidence: 覆盖,
+                    similarity: 语义,
+                })
+            }
             // 两路之间隔了一次网络往返，这期间那篇可能被删了。少一条比报错好，
             // 但也不能静默——留日志，别让"结果少了一条"变成查不到的事
             Err(e) => tracing::warn!("混合检索丢掉切片 {id}：{e}"),
@@ -577,7 +665,10 @@ fn 跑一趟(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let 关键 = 关键词路(conn, query, 每路配额)?;
+    // 词表算一次用两处：关键词那一路的查询、以及每条命中的覆盖率。各算一遍的话，
+    // "匹配到几个词"量的就不是实际送进 FTS 的那几个词了
+    let 词 = 查询词(conn, "chunks_fts", "chunks", query)?;
+    let 关键 = 关键词路按词(conn, &词, 每路配额)?;
     let 表在 = match &模型 {
         Some(m) => {
             let n: i64 = conn.query_row(
@@ -598,7 +689,11 @@ fn 跑一趟(
             (语义路(conn, m, &v[0], 每路配额)?, true)
         }
     };
-    let 种 = 种子(&关键, &语, 种子上限);
+    // 名次表要的是 (切片, 笔记)；相似度单独留一份表给 `取详情` 算依据强度
+    let 语列: Vec<(i64, String)> = 语.iter().map(|(i, n, _)| (*i, n.clone())).collect();
+    let 相似度: std::collections::BTreeMap<i64, f64> =
+        语.iter().map(|(i, _, 相)| (*i, *相)).collect();
+    let 种 = 种子(&关键, &语列, 种子上限);
     let 图 = if 法.开图 {
         图路(conn, &种, 图配额)?
     } else {
@@ -618,8 +713,9 @@ fn 跑一趟(
             ),
         });
     }
-    let 排 = 合并(&关键, &语, &图, 每篇配额, 每路配额);
-    let 详情 = 取详情(conn, &排)?;
+    let 排 = 合并(&关键, &语列, &图, 每篇配额, 每路配额);
+    let 词 = 查询词(conn, "chunks_fts", "chunks", query).unwrap_or_default();
+    let 详情 = 取详情(conn, &排, &词, &相似度)?;
     let (详情, 重排过, 重进, 重出) = 重排这一趟(&cfg, 法, query, 详情, &mut 提示);
     Ok(检索结果 {
         hits: 详情,
@@ -769,11 +865,19 @@ pub struct 成绩 {
     pub negatives: usize,
     pub hits: usize,
     pub recall_at_k: f64,
+    /// **MRR**：期望那一篇在结果里的名次的倒数取平均（docs/04 §8 早就列了它，一直没实现）。
+    /// 为什么这一档必须看它而不是只看 recall：`recall@8` 在小库上是**饱和的**——
+    /// 16 篇语料、K=8，正确答案怎么都装得下，于是重排把第一名换对了它也一动不动。
+    /// 量"排序变没变好"要的是名次，不是"前 8 里有没有"。
+    pub mrr: f64,
     /// **进了候选的负样本**（附 top-1 的 RRF 分与来源）。召回层给候选是它的本职，
     /// "库里没依据就不该答"由答案层的分数阈值判（docs/04 §拒答判定 要的就是这条阈值，
     /// 而它规定阈值由评测集标定）。所以这一栏是**标定材料**，不是失败计数。
     pub negatives_with_candidates: Vec<String>,
     pub misses: Vec<String>,
+    /// **标定材料**：每题 top-1 的依据强度与它属于哪一档。拒答阈值要从"正样本里最低的那个"
+    /// 与"负样本里最高的那个"之间的**间隙**里读，而不是拍一个好看的数（docs/04 §拒答判定）
+    pub scores: Vec<分数>,
     pub semantic: bool,
     /// 这一轮图扩展那一路开没开。**报 recall 的数必须连着这个说**——
     /// `--no-graph` 那一档是给"新增那一路到底增益了多少"当对照的
@@ -791,6 +895,17 @@ impl 成绩 {
     }
 }
 
+/// 一题的标定材料。字段名走英文（护栏第 5 条），值里那三种档是给人看的。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct 分数 {
+    pub q: String,
+    /// 这一题 top-1 候选的**依据强度**（0..1，见 `命中::evidence`）
+    pub top: f64,
+    /// `正·中` / `正·漏` / `负`
+    pub kind: String,
+}
+
 /// 跑一遍评测集。**走的是界面上同一个 `跑一趟`**：评测量的是产品实际跑的那条通路，
 /// 不是另写一份"看起来一样"的实现——分成两份的代价在 `匹配式` 那儿已经付过一次
 /// （同一次搜索里上面说"没有匹配的笔记"、下面说这一篇"两路都中"）。
@@ -804,8 +919,10 @@ pub fn 评测(
     let mut 正 = 0;
     let mut 负 = 0;
     let mut 命中数 = 0;
+    let mut 倒数和 = 0.0_f64;
     let mut 误给 = Vec::new();
     let mut 漏 = Vec::new();
+    let mut 分数 = Vec::new();
     let mut 语义开 = false;
     let mut 重排过 = false;
     for 题 in 套件 {
@@ -814,8 +931,18 @@ pub fn 评测(
         重排过 |= 结.reranked;
         let 详情 = 结.hits;
         let 前: Vec<&str> = 详情.iter().take(k).map(|h| h.path.as_str()).collect();
+        // 每题都记一行 top-1 依据强度：标定阈值要看的是**两列的间隙**，
+        // 只报负样本那一列，就会有人拿"负样本都低于 0.2"当结论而没看过正样本掉到哪儿
+        // 看的是**候选里最强的那条**覆盖率，不是 top-1：名次由 RRF 定，而 RRF 不分强弱，
+        // 只靠链接回来的那条排第一时 top-1 覆盖率会是 0，把"库里有依据"误判成没有
+        let 顶 = 详情.iter().map(|h| h.evidence).fold(0.0f64, f64::max);
         if 题.expect_none {
             负 += 1;
+            分数.push(分数 {
+                q: 题.q.clone(),
+                top: 顶,
+                kind: "负".into(),
+            });
             if let Some(首) = 详情.first() {
                 // 报的是"进了候选"与它的分数，不是"错了"：阈值还没标定之前，
                 // 把这个当失败计数会让人去改召回，而该改的是答案层的门
@@ -830,10 +957,27 @@ pub fn 评测(
             continue;
         }
         正 += 1;
+        // 名次按**整份结果**算（不受 K 截断），倒数才是 MRR 要的那个倒数
+        if let Some(位) = 详情
+            .iter()
+            .position(|h| 题.expect_paths.iter().any(|e| e == &h.path))
+        {
+            倒数和 += 1.0 / (位 as f64 + 1.0);
+        }
         if 前.iter().any(|p| 题.expect_paths.iter().any(|e| e == p)) {
             命中数 += 1;
+            分数.push(分数 {
+                q: 题.q.clone(),
+                top: 顶,
+                kind: "正·中".into(),
+            });
         } else {
             漏.push(format!("{}｜给了 {:?}", 题.q, 前));
+            分数.push(分数 {
+                q: 题.q.clone(),
+                top: 顶,
+                kind: "正·漏".into(),
+            });
         }
     }
     Ok(成绩 {
@@ -846,8 +990,14 @@ pub fn 评测(
         } else {
             命中数 as f64 / 正 as f64
         },
+        mrr: if 正 == 0 {
+            0.0
+        } else {
+            倒数和 / 正 as f64
+        },
         negatives_with_candidates: 误给,
         misses: 漏,
+        scores: 分数,
         semantic: 语义开,
         graph: 法.开图,
         reranked: 重排过,
@@ -1009,11 +1159,23 @@ mod tests {
         }
         let 语 = 语义路(conn, "mm", &[0.9, 0.1], 30).unwrap();
         assert_eq!(语[0].0, 甲, "最近的该是甲篇");
+        // 相似度要带得出来（拒答门读它，不读名次）
+        assert!(语[0].2 > 0.9, "余弦相似度没带出来：{:?}", 语[0]);
 
-        let 排 = 合并(&关, &语, &[], 4, 10);
+        let 语列: Vec<(i64, String)> = 语.iter().map(|(i, n, _)| (*i, n.clone())).collect();
+        let 相似: std::collections::BTreeMap<i64, f64> =
+            语.iter().map(|(i, _, s)| (*i, *s)).collect();
+        let 排 = 合并(&关, &语列, &[], 4, 10);
         assert_eq!(排[0].0, 甲);
         assert_eq!(排[0].2, vec![路::Keyword, 路::Semantic]);
-        let 详 = 取详情(conn, &排).unwrap();
+        let 详 = 取详情(conn, &排, &["向量".into(), "检索".into()], &相似).unwrap();
+        // 两把尺子分开待：evidence 只有覆盖率（阈值按它标定过），相似度单独一个字段
+        assert!(
+            (详[0].evidence - 1.0).abs() < 1e-9,
+            "两个词都在正文里，覆盖率该是 1：{:?}",
+            详[0].evidence
+        );
+        assert!(详[0].similarity > 0.9, "{:?}", 详[0].similarity);
         assert_eq!(详[0].title, "向量检索");
         assert!(详[0].snippet.contains("可比较的数"));
     }
@@ -1531,6 +1693,32 @@ expect_paths = ["notes/提到它的.md"]
         let 提 = 结.hint.unwrap();
         assert!(提.contains("开了重排但没填对话模型"), "{提}");
         assert!(提.contains("没填嵌入模型名"), "两句都该在：{提}");
+    }
+
+    /// 覆盖率是**拒答门的尺子**，所以它的边界要一条条钉死。
+    #[test]
+    fn 覆盖率量的是有效词命中了几个() {
+        let 词 = || vec!["快照".to_string(), "备份".to_string(), "目录".to_string()];
+        assert_eq!(覆盖率(&词(), "每日快照写到第二个目录"), 2.0 / 3.0);
+        assert_eq!(覆盖率(&词(), "快照 备份 目录 三词全中"), 1.0);
+        assert_eq!(覆盖率(&词(), "完全不相干的一句话"), 0.0);
+        // 空词表 = 没得量，给 0 而不是 1（给 1 等于"任何问题都有依据"）
+        assert_eq!(覆盖率(&[], "随便什么"), 0.0);
+        // 同一个词重复出现只算一次命中
+        assert_eq!(覆盖率(&词(), "快照 快照 快照"), 1.0 / 3.0);
+    }
+
+    #[test]
+    fn 词表算一次两处用() {
+        let (_d, _v, idx) = 装库(三篇);
+        let conn = idx.conn();
+        let 词 = 查询词(conn, "chunks_fts", "chunks", "快照 唯一副本").unwrap();
+        // 表达式与覆盖率读的是同一份词表：这里钉"匹配式就是这份词的 OR"
+        assert_eq!(
+            匹配式(conn, "chunks_fts", "chunks", "快照 唯一副本").unwrap(),
+            表达式(&词)
+        );
+        assert!(表达式(&[]).is_none(), "空词表不给表达式");
     }
 
     #[test]

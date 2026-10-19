@@ -129,6 +129,50 @@ where
     }
 }
 
+/// 拒答门的阈值：候选里**最强的那条查询词覆盖率**低于它，就不打模型、直接答"依据不足"。
+///
+/// **标定于 2026-10-18 的评测集 v1（22 题，走的是"关键词 + 链接"，语义那一路没开）**：
+/// 负样本最高 0.143（7 个词里碰上 1 个），正样本最低 0.500——间隙在 (0.143, 0.500) 之间，
+/// 取 1/3 落在中间，两边都留了余量。这句话能直接解释给用户："至少三分之一的关键词
+/// 出现在同一段里，才算你的笔记里真记过这件事"。
+///
+/// **它不是物理常数**：换语料、换分词口径、或把语义那一路开起来（那是另一把尺子，
+/// 相似度普遍 0.7 以上，混进来这个阈值就白标），都必须重标。重标的入口：
+/// `note eval <库> --suite testdata/eval/v1.toml`，看"依据强度分布"那一段。
+pub const 依据下限: f64 = 1.0 / 3.0;
+
+/// 候选里最强的依据强度。**纯函数**，判据只有一份：界面上、审计里、门上都读它。
+///
+/// 看的是"最强"而不是"第一名"：名次由 RRF 定而 RRF 不分强弱，只靠链接回来的那条排到第一时
+/// top-1 覆盖率会是 0，把"库里有依据"误判成没有（这条在真数据上照出来过）。
+pub fn 最强依据(命中: &[retrieve::命中]) -> f64 {
+    命中.iter().map(|h| h.evidence).fold(0.0_f64, f64::max)
+}
+
+/// 门拦下来时的那条答复。**一次模型都不打**，所以 token 与 ms 都是 0——
+/// 审计里看到 `in 0 / out 0` 就该知道是被门拦了，不是模型答的。
+pub fn 无依据(问题: &str, 候选数: usize, 最强: f64) -> 答复 {
+    答复 {
+        text: if 候选数 == 0 {
+            format!("我在你的笔记里没有找到关于「{问题}」的依据。要不要把这一条记下来？")
+        } else {
+            format!(
+                "「{问题}」在你的笔记里最相关的一段也只对上 {:.0}% 的关键词，不到三分之一。\
+                 这不算依据，所以没去问模型——要它答，它就会自己编。要不要把这一条记下来？",
+                最强 * 100.0
+            )
+        },
+        citations: Vec::new(),
+        insufficient: true,
+        retried: false,
+        candidates: 候选数,
+        in_tokens: 0,
+        out_tokens: 0,
+        ms: 0,
+        model: String::new(),
+    }
+}
+
 /// 组装 → 生成 → 判引用 → 违规就重生成一次 → 还违规就降级。
 pub fn 生成(依据: &[依据], 问题: &str, 发问者: &mut impl 发问) -> Result<答复> {
     let 给定: BTreeSet<String> = 依据.iter().map(|d| d.label.clone()).collect();
@@ -245,19 +289,35 @@ pub fn ask(vault: &Vault, conn: &Connection, 问题: &str) -> Result<答复> {
             Error::Invalid("没填对话模型名。问答要有对话模型；嵌入模型只管检索那一路。".into())
         })?;
     let 检索 = crate::retrieve::混合或退回(vault, conn, 问题)?;
-    let 依据 = 排依据(&检索.hits, 引用上限);
-    // 零依据时 `生成` 会在打网络之前返回"依据不足"，所以这里不必分两条路
-    let mut 发问者 = |内容: &str| crate::ai::chat(&cfg, 系统提示, 内容);
-    let mut 答复 = 生成(&依据, 问题, &mut 发问者)?;
+    // **拒答门在打模型之前**：候选里最强的覆盖率不到阈值，就一次网络都不发。
+    // 省的是钱，但更重要的是不给模型"没依据也要编一段"的机会——幻觉率 = 0 这条硬门，
+    // 到这一步才真正闭上：以前只闭住了"编出来的编号"，闭不住"有编号但不相干"。
+    let 最强 = 最强依据(&检索.hits);
+    let 拦了 = 最强 < 依据下限;
+    let 依据 = if 拦了 {
+        Vec::new()
+    } else {
+        排依据(&检索.hits, 引用上限)
+    };
+    let mut 答复 = if 拦了 {
+        无依据(问题, 检索.hits.len(), 最强)
+    } else {
+        let mut 发问者 = |内容: &str| crate::ai::chat(&cfg, 系统提示, 内容);
+        生成(&依据, 问题, &mut 发问者)?
+    };
     // 重排那一趟的钱要并进同一笔账：用户看到的是"这次问 AI 花了多少"，
-    // 把重排的 token 丢掉等于账面上少一笔真实支出
+    // 把重排的 token 丢掉等于账面上少一笔真实支出。被门拦下时那两个数本来就是 0
+    // （门在检索之后、发问之前，而重排发生在检索内部——拦下了就不会有重排的钱）
     答复.in_tokens += 检索.rerank_in;
     答复.out_tokens += 检索.rerank_out;
     答复.model = 模型.to_string();
     let 记 = 落审计 {
         conn,
         模型: 模型.to_string(),
-        候选: 依据.len(),
+        // 审计里的"候选"与界面那句「引用 x/y」的 y 是同一个数：被门拦下时它是检索
+        // 实际返回的条数（有候选但都不够依据），不是 0——写成 0 会把"拦下来了"与
+        // "什么都没搜到"混成同一笔账
+        候选: 答复.candidates,
         语义路: 检索.semantic,
         图路: 检索.graph,
         重排: 检索.reranked,
@@ -589,6 +649,83 @@ mod tests {
         );
     }
 
+    /// 拒答门的尺子：**阈值必须落在实测间隙里**，两头都留余量。
+    /// 数字来自 2026-10-18 的 `note eval`（v1 套件 22 题，走"关键词 + 链接"，16 篇与
+    /// 1216 篇两个库量出来一样）：负样本最高 0.143，正样本最低 0.500。
+    ///
+    /// 这条**故意是常量对常量的断言**（clippy 不喜欢，所以显式 expect）：它不是测运行时行为，
+    /// 是一个"改了口径或换了语料就去重标"的绊线。真跑数据的那半在 `note eval` 的输出里。
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "这是标定绊线，不是运行时判据"
+    )]
+    #[test]
+    fn 阈值落在标定过的间隙里() {
+        assert!(
+            依据下限 > 0.143 && 依据下限 < 0.5,
+            "阈值 {依据下限} 掉出实测间隙 (0.143, 0.500)：要么覆盖率口径变了，要么该重标"
+        );
+    }
+
+    #[test]
+    fn 最强依据看的是最强那条而不是第一名() {
+        let 造 = |e: f64| retrieve::命中 {
+            chunk_id: 1,
+            note_id: "n-1".into(),
+            path: "notes/甲.md".into(),
+            title: "甲".into(),
+            header_path: String::new(),
+            snippet: "正文".into(),
+            status: "active".into(),
+            from: vec![retrieve::路::Keyword],
+            rrf: 0.0164,
+            evidence: e,
+            similarity: 0.0,
+        };
+        // 名次第一的是只靠链接回来的（evidence 0），依据在第二条上
+        let 列 = vec![造(0.0), 造(0.75)];
+        assert!(
+            (最强依据(&列) - 0.75).abs() < 1e-9,
+            "取的是最大值，不是 top-1"
+        );
+        assert!(最强依据(&[]) < 依据下限, "空候选当然拦");
+    }
+
+    /// 只靠链接回来的候选**不能单独把一次提问送进模型**（用户拍板：能进上下文，
+    /// 不能单独当依据）。这条钉的就是那个"不能"。
+    #[test]
+    fn 只有链接命中时门拦下来() {
+        let 一条 = retrieve::命中 {
+            chunk_id: 3,
+            note_id: "n-3".into(),
+            path: "notes/读完一句.md".into(),
+            title: "读完一句".into(),
+            header_path: String::new(),
+            snippet: "下午和老周聊完".into(),
+            status: "active".into(),
+            from: vec![retrieve::路::Graph],
+            rrf: 0.0164,
+            evidence: 0.0,
+            similarity: 0.0,
+        };
+        assert!(最强依据(&[一条]) < 依据下限);
+    }
+
+    #[test]
+    fn 门拦下那条答复不打模型也说得清() {
+        let 答 = 无依据("深蹲一百公斤要练多久", 5, 0.143);
+        assert!(答.insufficient);
+        assert!(答.citations.is_empty());
+        assert_eq!(答.in_tokens + 答.out_tokens, 0, "一次网络都没打");
+        assert_eq!(答.candidates, 5, "有候选但都不够依据，这个数不能记成 0");
+        assert!(答.text.contains("14%"), "要说清对上几个词：{}", 答.text);
+        assert!(答.text.contains("没去问模型"), "{}", 答.text);
+        // 真空手是另一句话，别混成"覆盖率不够"
+        let 空 = 无依据("红烧肉怎么炒糖色", 0, 0.0);
+        assert!(空.text.contains("没有找到"), "{}", 空.text);
+        assert!(!空.text.contains("%"), "没候选就别报百分比：{}", 空.text);
+    }
+
     #[test]
     fn 每次生成都落账包括降级那次() {
         crate::index::注册向量扩展();
@@ -655,6 +792,8 @@ mod tests {
                 status: "active".into(),
                 from: vec![retrieve::路::Keyword],
                 rrf: 1.0 / (60.0 + i as f64),
+                evidence: 1.0,
+                similarity: 0.0,
             })
             .collect();
         let 依 = 排依据(&命中, 引用上限);

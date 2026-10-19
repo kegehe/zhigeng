@@ -140,6 +140,10 @@ enum Cmd {
         /// 不然报出来的永远是"加了东西之后"的那一个好数字
         #[arg(long)]
         no_graph: bool,
+        /// 强制开重排再量一遍（**每道题多打一趟模型**，会花钱）。与不开那次对比
+        /// 就是 rerank 的真实增益——假端点演不出这个数，它只会照脚本回话
+        #[arg(long)]
+        rerank: bool,
     },
 }
 
@@ -168,6 +172,11 @@ enum AiCmd {
     },
     /// 带引用的问答。**会打模型**；库里没有依据时一次都不打
     Ask { query: String },
+    /// 从**标准输入**读一把 Key 存进 Windows 凭据管理器。
+    /// 为什么要这条路：贴进界面输入框会被 WebView 里的脚本看到，写进命令行参数会进
+    /// 进程表与会话记录——只有管道能让它既不进对话也不留痕。本命令**只回末 4 位**。
+    #[command(name = "key-stdin")]
+    KeyStdin,
     /// 最近的生成记录（含失败的）：引用了哪几块、多少 token、有没有重试过
     Runs {
         #[arg(short, long, default_value_t = 10)]
@@ -220,13 +229,14 @@ fn main() -> Result<()> {
             suite,
             k,
             no_graph,
+            rerank,
         } => cmd_eval(
             path,
             suite,
             k,
             note_core::retrieve::跑法 {
                 开图: !no_graph,
-                重排: None,
+                重排: rerank.then_some(true),
             },
         ),
         Cmd::Ai { path, 命令 } => cmd_ai(path, 命令),
@@ -537,6 +547,26 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                 );
             }
         }
+        AiCmd::KeyStdin => {
+            use std::io::Read;
+            let mut 串 = String::new();
+            std::io::stdin()
+                .read_to_string(&mut 串)
+                .map_err(|e| anyhow::anyhow!("标准输入读不动：{e}"))?;
+            let 串 = 串.trim();
+            note_core::ai::set_key(串)?;
+            let 有 = note_core::ai::key_hint();
+            // **空输入是"删掉"，不是"存了一把空的"**：那两种结果得说两句话。
+            // 第一版这里不分叉，删完回一句"写了，但当场读不回来"，把成功报成了故障
+            match (串.is_empty(), 有) {
+                (true, None) => println!("已删掉凭据管理器里的那把 Key（当场读回：没有）"),
+                (true, Some(尾)) => println!("想删掉，但还读得回来：{尾}——**没删成**"),
+                (false, Some(尾)) => println!("已存进 Windows 凭据管理器：{尾}"),
+                (false, None) => println!(
+                    "写了，但当场读不回来——凭据管理器多半不可用（组策略或被占用），别当成配好了"
+                ),
+            }
+        }
         AiCmd::Status => {
             let 模型 = note_core::ai::load(&vault)?
                 .embedding_model
@@ -638,12 +668,26 @@ fn cmd_eval(
         }
     );
     println!(
-        "recall@{} = {:.1}%（{}/{}）",
+        "recall@{} = {:.1}%（{}/{}）｜MRR = {:.3}",
         成.k,
         成.recall_at_k * 100.0,
         成.hits,
-        成.positives
+        成.positives,
+        成.mrr
     );
+    println!(
+        "依据强度分布（升序）。阈值要读的是\"负\"那一堆的顶与\"正·中\"那一堆的底之间的间隙，
+         间隙不存在就说明这个量不可比——那要先修的是分数，不是阈值："
+    );
+    let mut 分 = 成.scores.clone();
+    分.sort_by(|a, b| {
+        a.top
+            .partial_cmp(&b.top)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for x in &分 {
+        println!("  {:.3} [{:>3}] {}", x.top, x.kind, x.q);
+    }
     if 成.misses.is_empty() {
         println!("没有漏。");
     } else {
