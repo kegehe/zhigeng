@@ -775,12 +775,27 @@ async fn search_hybrid(
     .map_err(|e| e.to_string())?
 }
 
-/// 带引用的问答。**可能两次网络往返**（引用违规会重生成一次），所以同样在锁外、
-/// 用一条分叉出来的连接干活；答案落 `ai_runs` 由 note-core 那一侧负责。
+/// 流式问答往外播的东西。字段名走英文（护栏第 5 条：`rename_all` 碰中文字段名会 panic）。
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct 播块 {
+    /// 界面生成的问号，原样带回。**没有它就会串台**：连问两句时，前一句的后半截会贴到
+    /// 后一句下面（`search_hybrid` 那边已经为同一件事钉过"认自己问的是哪句"）
+    run_id: u64,
+    text: String,
+}
+
+/// 带引用的问答，**一边收一边播**：`ai://token` 是一截新字，`ai://reset` 是"把已经播出去的
+/// 清掉"——第一次的答案引用了没给过的编号就不会被采信，那就不能留在屏幕上。
+///
+/// 命令本身仍然返回完整的 `答复`：**流式只改变字什么时候到，不改变"什么才算答案"的判定**。
+/// 可能两次网络往返，所以同样在锁外、用一条分叉出来的连接干活；落 `ai_runs` 由 note-core 负责。
 #[tauri::command]
-async fn ai_ask(
+async fn chat_ask(
+    app: AppHandle,
     state: State<'_, Shared>,
     query: String,
+    run_id: u64,
 ) -> Result<note_core::answer::答复, WriteErr> {
     let (vault, 派生) = {
         let guard = state.0.lock().map_err(werr_io)?;
@@ -798,7 +813,25 @@ async fn ai_ask(
             })?;
             写锁.fork().map_err(werr)?
         };
-        note_core::answer::ask(&vault, 专.conn(), &query).map_err(werr)
+        note_core::answer::ask流(&vault, 专.conn(), &query, &mut |e| match e {
+            note_core::answer::事件::文本(字) => {
+                let _ = app.emit("ai://token", 播块 { run_id, text: 字 });
+            }
+            note_core::answer::事件::思考(字) => {
+                // 思考的字单独一个事件：界面上只报"它在想"，不把它当答案渲染
+                let _ = app.emit("ai://think", 播块 { run_id, text: 字 });
+            }
+            note_core::answer::事件::重来 => {
+                let _ = app.emit(
+                    "ai://reset",
+                    播块 {
+                        run_id,
+                        text: String::new(),
+                    },
+                );
+            }
+        })
+        .map_err(werr)
     })
     .await
     .map_err(|e| WriteErr {
@@ -885,7 +918,7 @@ pub fn run() {
             ai_test,
             ai_discover,
             search_hybrid,
-            ai_ask,
+            chat_ask,
             ai_runs
         ])
         .setup(|app| {

@@ -117,10 +117,14 @@ export const api = {
    */
   searchHybrid: (query: string) => invoke<HybridResult>("search_hybrid", { query }),
   /**
-   * 带引用的问答。**可能两次网络往返**（引用了没给过的编号会重生成一次），
-   * 库里没有依据时一次都不打。答案同时落 `ai_runs`。
+   * 带引用的问答，**流式**：字通过 `ai://token` 一截截到，`ai://reset` 表示"把已经播出去的
+   * 清掉"（第一次的答案引用了没给过的编号，不会被采信）。
+   * `runId` 由界面生成、原样带回——连问两句时靠它丢掉前一句剩下的字。
+   * Promise 仍然在**判完引用之后**才回，回的就是最终那条 `答复`：流式只改变字什么时候到，
+   * 不改变"什么才算答案"。库里没有依据时一次网络都不打，也就一个字都不会播。
    */
-  aiAsk: (query: string) => invoke<Answer>("ai_ask", { query }),
+  chatAsk: (query: string, runId: number) =>
+    invoke<Answer>("chat_ask", { query, runId }),
   /** 审计：最近的生成记录，含未采纳的那几次 */
   aiRuns: (limit = 20) => invoke<AiRun[]>("ai_runs", { limit }),
   /**

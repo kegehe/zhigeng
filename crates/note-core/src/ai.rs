@@ -553,6 +553,19 @@ fn 客户端() -> std::result::Result<reqwest::blocking::Client, reqwest::Error>
         .build()
 }
 
+/// 流式专用的客户端。**总超时比非流式那条放宽到 180 秒**：`timeout` 管的是"整个响应
+/// 多久之内要读完"，而思考型模型光想就要几十秒——拿 20 秒去流它必然读到一半断掉
+/// （真机照出来的第一条：报"一个字都没有"，实际是它还在想）。
+/// 为什么不用 `read_timeout`：`reqwest::blocking` 的 builder 没有这个方法（只有 async 侧有），
+/// 实测编译不过。宁可给一个宽松的总闸，也别没有闸——没有闸的话一次挂死的流会永久占住
+/// 那条 `spawn_blocking` 线程。
+fn 流式客户端() -> std::result::Result<reqwest::blocking::Client, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+}
+
 fn 钥() -> Option<String> {
     条目于(CRED_SERVICE, CRED_USER)
         .ok()
@@ -654,7 +667,7 @@ pub fn embed(cfg: &AiConfig, 文本: &[String]) -> Result<Vec<Vec<f32>>> {
 }
 
 /// 一次 API 调用收发的大致量。`usage` 没回时记 0——**记 0 比猜一个数诚实**。
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct 用量 {
     pub in_tokens: usize,
     pub out_tokens: usize,
@@ -663,45 +676,228 @@ pub struct 用量 {
 /// 打一次 `<base>/chat/completions`。**只发系统提示 + 组装好的上下文**，
 /// 上下文里装的是检索出来的片段摘录（不是整篇笔记），所以送出去的量是可控的。
 pub fn chat(cfg: &AiConfig, 系统: &str, 内容: &str) -> Result<(String, 用量)> {
-    let base = 端点(cfg.base_url.as_deref().unwrap_or("")).map_err(Error::Invalid)?;
-    let 模型 = cfg
-        .chat_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::Invalid("没填对话模型名".into()))?;
-    let url = format!("{base}/chat/completions");
-    let 客 = 客户端().map_err(|e| Error::Invalid(format!("建不出 HTTP 客户端：{e}")))?;
-    let 请 = 客.post(&url).json(&serde_json::json!({
-        "model": 模型,
+    let mut 体 = 请求体(cfg, 系统, 内容);
+    体["stream"] = serde_json::Value::Bool(false);
+    let 基 = 基址(cfg)?;
+    let 答 = 认状态(发一次(cfg, &体)?, &基)?;
+    解chat回包(&答.text().unwrap_or_default())
+}
+
+/// 流式版：`stream: true`，一边收一边把**新增的那截文本**交给 `每块`。
+///
+/// 两条不显然的：
+/// 1. **不是所有网关都认 `stream`**。回包的 `content-type` 不是 event-stream 就当普通回包
+///    解析，`每块` 收到一次完整文本——界面因此不需要知道对方流不流，它只是"可能一次到齐"。
+/// 2. **token 数不能猜**：OpenAI 的流式默认**不回 usage**，要显式 `stream_options.include_usage`。
+///    给了就拿，没给就记 0（与"提供方没回 usage 时记 0 而不是猜"同一条规矩）。
+pub fn chat流(
+    cfg: &AiConfig,
+    系统: &str,
+    内容: &str,
+    每块: &mut dyn FnMut(流),
+) -> Result<(String, 用量)> {
+    let 基 = 基址(cfg)?;
+    let 答 = 认状态(发一次(cfg, &流式请求体(cfg, 系统, 内容))?, &基)?;
+    let 流 = 答
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream") || v.contains("stream"))
+        .unwrap_or(false);
+    if !流 {
+        // 对方不流：整包解析，`每块` 一次给完。这不是降级失败，是一种正常回法
+        let 文 = 答.text().unwrap_or_default();
+        let (全文, 量) = 解chat回包(&文)?;
+        每块(流::答案(全文.clone()));
+        return Ok((全文, 量));
+    }
+    use std::io::BufRead;
+    let mut 全文 = String::new();
+    let mut 想了 = 0usize;
+    let mut 量 = 用量::default();
+    let mut 行 = String::new();
+    let mut 读 = std::io::BufReader::new(答);
+    loop {
+        行.clear();
+        let 读了 = 读
+            .read_line(&mut 行)
+            .map_err(|e| Error::Invalid(format!("流读断了：{e}")))?;
+        if 读了 == 0 {
+            break;
+        }
+        match 解流行(&行) {
+            流块::文本(t) => {
+                全文.push_str(&t);
+                每块(流::答案(t));
+            }
+            流块::思考(t) => {
+                想了 += t.chars().count();
+                每块(流::思考(t));
+            }
+            流块::用量(u) => 量 = u,
+            流块::结束 => break,
+            流块::忽略 => {}
+        }
+    }
+    if 全文.trim().is_empty() && 想了 == 0 {
+        // **一个字都没收到 = 对方多半根本不支持 stream**（真机照出来的：这家网关会在流中途
+        // 直接 reset 连接）。这时用非流式再问一次——用户要的是答案，不是我们的实现偏好。
+        // 代价说清楚：首字时间没了。日志必须留一条，别让它变成"悄悄退回另一条路"
+        tracing::warn!("流式一个字节都没收到，退回非流式再问一次（首字时间会没有）");
+        let (全文, 量) = chat(cfg, 系统, 内容)?;
+        每块(流::答案(全文.clone()));
+        return Ok((全文, 量));
+    }
+    if 全文.trim().is_empty() {
+        // 只回了思考过程 = 被截断或对方把答案吞了。这种**不**自动重试：
+        // 它已经想了那么久，再打一趟是双倍的钱与双倍的等待，交回用户决定
+        return Err(Error::Invalid(if 想了 > 0 {
+            format!(
+                "对方只回了思考过程（{想了} 字），没有答案——多半是被超时截断了。试着把问题问短一点，或在设置里换一家更快的模型"
+            )
+        } else {
+            "流式回包里一个字都没有（对方可能不支持 stream，或中途断了）".into()
+        }));
+    }
+    Ok((全文, 量))
+}
+
+/// 一行 SSE。`data: {...}` / `data: [DONE]` / 注释行 / 心跳空行。
+#[derive(Debug, Clone, PartialEq)]
+pub enum 流块 {
+    /// 答案的字
+    文本(String),
+    /// **思考过程**的字（DeepSeek-R1 一类会先吐 `reasoning_content`，`content` 一直空着）。
+    /// 它不是答案：不进 `答复.text`、不进引用判定，只能当进度显示
+    思考(String),
+    用量(用量),
+    结束,
+    忽略,
+}
+
+/// `chat流` 交给调用方的东西。分成两种字是为了**让界面能显示"它在想"而不把思考当答案**。
+#[derive(Debug, Clone, PartialEq)]
+pub enum 流 {
+    答案(String),
+    思考(String),
+}
+
+/// **纯函数**：喂一行，回这一行装的东西。流式的坑几乎都在切行与 `[DONE]` 上，
+/// 这一段不打网络也能逐条钉住。
+pub fn 解流行(行: &str) -> 流块 {
+    let 行 = 行.trim_end_matches(['\r', '\n']);
+    let 一些 = match 行.strip_prefix("data:") {
+        Some(余) => 余.trim(),
+        // `:` 开头是 SSE 注释/心跳，其它行（event:、id:）我们不用
+        None => return 流块::忽略,
+    };
+    if 一些 == "[DONE]" {
+        return 流块::结束;
+    }
+    let Ok(解) = serde_json::from_str::<serde_json::Value>(一些) else {
+        return 流块::忽略;
+    };
+    let 取 = |键: &str| {
+        解.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get(键))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let 增量 = 取("content");
+    let 思 = 取("reasoning_content");
+    let 量 = 解.get("usage").map(|u| 用量 {
+        in_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+        out_tokens: u
+            .get("completion_tokens")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as usize,
+    });
+    if let Some(u) = 量 {
+        return 流块::用量(u);
+    }
+    if !思.is_empty() {
+        return 流块::思考(思);
+    }
+    if 增量.is_empty() {
+        return 流块::忽略;
+    }
+    流块::文本(增量)
+}
+
+fn 基址(cfg: &AiConfig) -> Result<String> {
+    端点(cfg.base_url.as_deref().unwrap_or("")).map_err(Error::Invalid)
+}
+
+fn 地址(cfg: &AiConfig) -> Result<String> {
+    Ok(format!("{}/chat/completions", 基址(cfg)?))
+}
+
+fn 请求体(cfg: &AiConfig, 系统: &str, 内容: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": cfg.chat_model.as_deref().unwrap_or("").trim(),
         "messages": [
             { "role": "system", "content": 系统 },
             { "role": "user", "content": 内容 },
         ],
-    }));
+    })
+}
+
+fn 流式请求体(cfg: &AiConfig, 系统: &str, 内容: &str) -> serde_json::Value {
+    let mut 体 = 请求体(cfg, 系统, 内容);
+    体["stream"] = serde_json::Value::Bool(true);
+    // 不显式要就没有 usage——而审计里的 token 不能靠猜
+    体["stream_options"] = serde_json::json!({ "include_usage": true });
+    体
+}
+
+/// 建请求、带上 Key、发出去。**chat 与 chat流 共用这一份**——两条路各写一遍请求头，
+/// 早晚一条改了另一条没改（Key 那条尤其：漏了就是"配了却 401"）。
+fn 发一次(cfg: &AiConfig, 体: &serde_json::Value) -> Result<reqwest::blocking::Response> {
+    // 没填模型名就别发：这条原先在 `chat` 里，挪到这里是因为 `chat流` 也得有同样的拦截
+    cfg.chat_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Invalid("没填对话模型名".into()))?;
+    let url = 地址(cfg)?;
+    let 客 = 流式客户端().map_err(|e| Error::Invalid(format!("建不出 HTTP 客户端：{e}")))?;
+    let 请 = 客.post(&url).json(体);
     let 请 = match 钥() {
         Some(k) => 请.header("authorization", format!("Bearer {k}")),
         None => 请,
     };
-    let 答 = 请
-        .send()
-        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}")))?;
+    请.send()
+        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}")))
+}
+
+/// 非 2xx 翻成一句人话；2xx 把响应**原样还回来**给调用方读。
+/// （`text()` 会吃掉 Response，所以这里不能是 `&mut`——一版写成 &mut 就编不过，
+///  而"出错时读掉、成功时留着"这件事只能靠移动所有权表达）
+fn 认状态(答: reqwest::blocking::Response, 基: &str) -> Result<reqwest::blocking::Response> {
     let 状 = 答.status();
-    let 文 = 答.text().unwrap_or_default();
-    if !状.is_success() {
-        return Err(Error::Invalid(format!(
-            "问答请求 HTTP {}：{}{}",
-            状.as_u16(),
-            原文截(&文),
-            if 建议补_v1(状.as_u16(), &base) {
-                "｜这个地址末尾可能要加 /v1"
-            } else {
-                ""
-            }
-        )));
+    if 状.is_success() {
+        return Ok(答);
     }
-    let 解: serde_json::Value = serde_json::from_str(&文)
-        .map_err(|e| Error::Invalid(format!("问答回包不是 JSON（{e}）：{}", 原文截(&文))))?;
+    let 文 = 答.text().unwrap_or_default();
+    Err(Error::Invalid(format!(
+        "问答请求 HTTP {}：{}{}",
+        状.as_u16(),
+        原文截(&文),
+        if 建议补_v1(状.as_u16(), 基) {
+            "｜这个地址末尾可能要加 /v1"
+        } else {
+            ""
+        }
+    )))
+}
+
+/// 普通（非流式）回包的解析。**chat 与 chat流 的兜底分支共用这一份**。
+fn 解chat回包(文: &str) -> Result<(String, 用量)> {
+    let 解: serde_json::Value = serde_json::from_str(文)
+        .map_err(|e| Error::Invalid(format!("问答回包不是 JSON（{e}）：{}", 原文截(文))))?;
     let 文本 = 解
         .get("choices")
         .and_then(|c| c.get(0))
@@ -712,7 +908,7 @@ pub fn chat(cfg: &AiConfig, 系统: &str, 内容: &str) -> Result<(String, 用�
         .ok_or_else(|| {
             Error::Invalid(format!(
                 "问答回包里没有 choices[0].message.content：{}",
-                原文截(&文)
+                原文截(文)
             ))
         })?;
     let 量 = 解.get("usage");
@@ -734,6 +930,44 @@ pub fn chat(cfg: &AiConfig, 系统: &str, 内容: &str) -> Result<(String, 用�
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SSE 切行的坑全在这：`[DONE]`、心跳、注释、没有 content 的首块、带 usage 的尾块。
+    #[test]
+    fn 流的每一行都认得() {
+        use 流块 as 块;
+        assert_eq!(
+            match 解流行("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n") {
+                块::文本(t) => t,
+                _ => "".into(),
+            },
+            "你好"
+        );
+        // CRLF 与没有尾随空行都要能吃
+        assert!(matches!(
+            解流行("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}"),
+            块::文本(_)
+        ));
+        assert!(matches!(解流行("data: [DONE]"), 块::结束));
+        assert!(matches!(解流行("\n"), 块::忽略), "心跳空行");
+        assert!(matches!(解流行(": keep-alive\n"), 块::忽略), "注释行");
+        assert!(
+            matches!(解流行("event: message\n"), 块::忽略),
+            "我们不用的字段"
+        );
+        // 首块常常只有 role 没有 content；尾块常常只有 usage
+        assert!(matches!(
+            解流行("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}"),
+            块::忽略
+        ));
+        match 解流行(
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":7}}",
+        ) {
+            块::用量(u) => assert_eq!((u.in_tokens, u.out_tokens), (12, 7)),
+            其他 => panic!("该认出用量，来了 {其他:?}"),
+        }
+        // 坏 JSON 不许 panic，也不许当成内容
+        assert!(matches!(解流行("data: {不是 json"), 块::忽略));
+    }
 
     #[test]
     fn 没填齐就不发请求() {

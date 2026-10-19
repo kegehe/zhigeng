@@ -216,6 +216,19 @@ export function App() {
   const [问, set问] = useState("");
   const [答, set答] = useState<Answer | null>(null);
   const [问busy, set问busy] = useState(false);
+  /**
+   * 流式中的字。`ai://token` 一截截往上加，`ai://reset` 清空（第一次的答案引用了没给过的
+   * 编号，那些字已经到屏幕上了，必须擦掉——留着就是一段"显示过但没被采信"的答案）。
+   * 答案定稿后由 `答` 接管渲染，这里归零。
+   */
+  const [流字, set流字] = useState("");
+  /** 思考型模型在想的那几十秒里屏幕上什么都没有——这个字数只用来证明"它没死"，
+   *  思考内容本身不进答案区（它不是答案，也不该被当成答案引用） */
+  const [想字, set想字] = useState(0);
+  /** 这一次问的号。事件带回来对不上就丢——连问两句时前一句的尾巴不能贴到后一句下面 */
+  const 问号 = useRef(0);
+  /** 第一个字到达的时刻，用来在 console 里报"首字多久到"——流式的全部意义在这个数上 */
+  const 首字 = useRef(0);
   const [runs, setRuns] = useState<AiRun[]>([]);
   const { theme, setTheme } = useTheme();
   const searchTimer = useRef<number | null>(null);
@@ -318,6 +331,47 @@ export function App() {
   // 手里没有未落盘的东西就整个重装载——停在旧内容上是验收 ⑤ 没通过的样子。
   // **判据是 `unsaved`，不是"有没有在编辑态"**：现在打开就是可编辑的，"在编辑态"不再
   // 意味着"有东西会丢"；真正会丢的只有没存下来的改动。
+  /**
+   * 流式问答的两个事件。都**先对问号**再动状态：连问两句时，前一句剩下的字
+   * 不能贴到后一句下面（同一次会话里 `search_hybrid` 已经为这件事钉过一条守卫）。
+   */
+  useEffect(() => {
+    if (!inTauri()) return;
+    let alive = true;
+    const 订 = async () => {
+      const { listen: 听 } = await import("@tauri-apps/api/event");
+      const a = await 听<{ runId: number; text: string }>("ai://token", (e) => {
+        if (!alive || e.payload.runId !== 问号.current) return;
+        if (!首字.current) 首字.current = performance.now();
+        set流字((旧) => 旧 + e.payload.text);
+      });
+      const c = await 听<{ runId: number; text: string }>("ai://think", (e) => {
+        if (!alive || e.payload.runId !== 问号.current) return;
+        set想字((旧) => 旧 + e.payload.text.length);
+      });
+      const b = await 听<{ runId: number }>("ai://reset", (e) => {
+        if (!alive || e.payload.runId !== 问号.current) return;
+        // 第一次的答案引用了没给过的编号：那些字已经到屏幕上了，必须擦掉
+        set流字("");
+        首字.current = 0;
+      });
+      return () => {
+        a();
+        b();
+        c();
+      };
+    };
+    let 拆: (() => void) | undefined;
+    void 订().then((f) => {
+      if (alive) 拆 = f;
+      else f();
+    });
+    return () => {
+      alive = false;
+      拆?.();
+    };
+  }, []);
+
   useEffect(() => {
     if (!inTauri()) return;
     let alive = true;
@@ -1045,12 +1099,24 @@ export function App() {
     if (!q) return;
     set问busy(true);
     set答(null);
+    set流字("");
+    set想字(0);
+    const 号 = Date.now();
+    问号.current = 号;
+    首字.current = 0;
+    const 起 = performance.now();
     try {
-      set答(await api.aiAsk(q));
+      const r = await api.chatAsk(q, 号);
+      set答(r);
       setRuns(await api.aiRuns(8));
+      // 首字时间只有在这条路上才量得到：以前是"整段回来才显示"，屏幕上只有一个总时长
+      console.info(
+        `问答：首字 ${Math.round(首字.current - 起)}ms｜全文 ${Math.round(performance.now() - 起)}ms｜${r.inTokens}+${r.outTokens} tok`,
+      );
     } catch (e) {
       setError(describeError(e).message);
     } finally {
+      set流字("");
       set问busy(false);
     }
   };
@@ -1920,6 +1986,23 @@ export function App() {
                     没填对话模型名，问不了。左下角「AI」那一格里填上——
                     检索那一路不受它影响。
                   </p>
+                ) : null}
+                {/*
+                  流式中的那张卡。**与最终答案同一副外壳**（同 border / bg / 字号），
+                  只在定稿时换掉里面的内容——如果两态长得不一样，用户就会看到"答案跳一下"，
+                  而那是这一档最不想要的外观。光标用 animate-pulse，不写 keyframes。
+                */}
+                {问busy && 流字 ? (
+                  <div className="mt-5 max-w-2xl rounded-md border border-line bg-raised px-4 py-3">
+                    <div className="font-mono text-xs text-fg-2">
+                      {流字.length ? "生成中…" : "它在想…"}｜已到 {流字.length} 字
+                      {想字 ? `｜思考 ${想字} 字（不算答案）` : ""}
+                    </div>
+                    <p className="mt-2 whitespace-pre-wrap text-sm text-fg">
+                      {流字}
+                      <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-fg-2 align-middle" />
+                    </p>
+                  </div>
                 ) : null}
                 {答 ? (
                   <div

@@ -117,7 +117,38 @@ pub struct 答复 {
 /// 发问这一跳抽象出来，是为了**用假回答测硬门**：真模型有没有幻觉不由我们保证，
 /// 但"出现了幻觉我们放没放过去"完全可以在用例里钉死。
 pub trait 发问 {
+    /// 问一次，拿完整回包。
     fn 问(&mut self, 内容: &str) -> Result<(String, 用量)>;
+
+    /// 问一次，**并且**一边收一边把新增的那截文本交给 `每块`。
+    ///
+    /// 默认实现就是 `问` 然后一次给完——所以假模型与不关心流的调用方一行都不用改，
+    /// 而"流式"与"不流式"跑的是**同一条流水线**（两条流水线早晚一条改了另一条没改，
+    /// 而这条上挂着幻觉门）。真模型覆盖它走 SSE。
+    fn 流着问(
+        &mut self,
+        内容: &str,
+        每块: &mut dyn FnMut(crate::ai::流),
+    ) -> Result<(String, 用量)> {
+        let (文本, 量) = self.问(内容)?;
+        每块(crate::ai::流::答案(文本.clone()));
+        Ok((文本, 量))
+    }
+}
+
+/// 流水线往外播的东西。流式调用方把它接到事件上；不流式的传一个空处理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum 事件 {
+    /// 新增的一截**答案**文本
+    文本(String),
+    /// 新增的一截**思考**文本（DeepSeek-R1 一类先吐 `reasoning_content`，那几十秒里
+    /// 答案一个字都没有）。它不进 `答复.text`、不进引用判定，只能当进度显示——
+    /// 没有它，屏幕上就是"点了没反应"，破 G7
+    思考(String),
+    /// **上一次的答案被判违规，界面要把已经播出去的字清掉**。
+    /// 这条不是装饰：幻觉门是"编出来的编号不递给你"，而流式已经把那些字送到屏幕上了。
+    /// 没有这个信号，界面上会留下一段"已经显示过但没被采信"的答案——那正是这一档要防的形状
+    重来,
 }
 
 impl<F> 发问 for F
@@ -173,8 +204,28 @@ pub fn 无依据(问题: &str, 候选数: usize, 最强: f64) -> 答复 {
     }
 }
 
-/// 组装 → 生成 → 判引用 → 违规就重生成一次 → 还违规就降级。
+/// 组装 → 生成 → 判引用 → 违规就重生成一次 → 还违规就降级。**不流式**的那层壳。
 pub fn 生成(依据: &[依据], 问题: &str, 发问者: &mut impl 发问) -> Result<答复> {
+    生成与播(依据, 问题, 发问者, &mut |_| {})
+}
+
+/// `ai::流` → 本模块的 `事件`。**答案与思考分开走**：思考的字混进 `答复.text` 的话，
+/// 幻觉判定就会去判一段模型自己都没当成答案的东西，而屏幕上会先长出一段"想的话"再被清掉。
+fn 转(b: crate::ai::流) -> 事件 {
+    match b {
+        crate::ai::流::答案(字) => 事件::文本(字),
+        crate::ai::流::思考(字) => 事件::思考(字),
+    }
+}
+
+/// 同一条流水线，多一个往外播的口子。**流式与非流式共用这一份实现**——
+/// 幻觉门只有一处，不会因为"那条路是流式的"就漏判。
+pub fn 生成与播(
+    依据: &[依据],
+    问题: &str,
+    发问者: &mut impl 发问,
+    播: &mut dyn FnMut(事件),
+) -> Result<答复> {
     let 给定: BTreeSet<String> = 依据.iter().map(|d| d.label.clone()).collect();
     if 依据.is_empty() {
         // 零候选：一次模型都不打。省的不只是钱——没有片段可依据时，模型只会靠自己编
@@ -192,7 +243,7 @@ pub fn 生成(依据: &[依据], 问题: &str, 发问者: &mut impl 发问) -> R
     }
     let 头 = format!("{}{}", 组装(依据), 问题尾(问题));
     let 起 = std::time::Instant::now();
-    let (文本, 量) = 发问者.问(&头)?;
+    let (文本, 量) = 发问者.流着问(&头, &mut |b| 播(转(b)))?;
     let 一次 = 越界引用(&文本, &给定);
     let (最终, 重试过, 总用量) = if 一次.is_empty() {
         (文本, false, 量)
@@ -203,7 +254,10 @@ pub fn 生成(依据: &[依据], 问题: &str, 发问者: &mut impl 发问) -> R
             一次.join("、"),
             给定.iter().cloned().collect::<Vec<_>>().join("、")
         );
-        let (再答, 再量) = 发问者.问(&纠正)?;
+        // 第一次的字已经播到屏幕上了，而它不会被采信——先让界面清掉，再播第二次。
+        // 没有这一下，屏幕上会留下一段"显示过但没被采信"的答案
+        播(事件::重来);
+        let (再答, 再量) = 发问者.流着问(&纠正, &mut |b| 播(转(b)))?;
         let 还越界 = 越界引用(&再答, &给定);
         if !还越界.is_empty() {
             // 第二次还有幻觉：不再赌第三次，直接降级。这是"幻觉率 = 0"的兑现方式——
@@ -278,7 +332,42 @@ pub fn 排依据(命中: &[retrieve::命中], 上限: usize) -> Vec<依据> {
 
 /// 一次问答的完整一趟：检索 → 组装 → 生成 → 落 `ai_runs`。
 /// **含两次网络往返的可能（重生成），所以调用方必须在锁外跑它。**
+/// 真打模型的那层 `发问`：把 SSE 的每一截原文转给调用方给的回调。
+/// 单拎出来是为了 `ask` 与 `ask流` **共用同一条流水线**，只差那个回调是干什么的。
+struct 真发问<'a> {
+    cfg: &'a crate::ai::AiConfig,
+}
+
+impl 发问 for 真发问<'_> {
+    fn 问(&mut self, 内容: &str) -> Result<(String, 用量)> {
+        crate::ai::chat(self.cfg, 系统提示, 内容)
+    }
+
+    fn 流着问(
+        &mut self,
+        内容: &str,
+        每块: &mut dyn FnMut(crate::ai::流),
+    ) -> Result<(String, 用量)> {
+        crate::ai::chat流(self.cfg, 系统提示, 内容, 每块)
+    }
+}
+
+/// 不流式的那层壳（CLI 与测试用）。
 pub fn ask(vault: &Vault, conn: &Connection, 问题: &str) -> Result<答复> {
+    ask流(vault, conn, 问题, &mut |_| {})
+}
+
+/// 流式问答：一边收一边把新增文本交给 `播`，最后仍然返回**同一个 `答复` 形状**——
+/// 引用完整性判定在返回前照旧跑完，所以流式不会把没采信的字段递出去。
+///
+/// `播` 会收到两类东西：`事件::文本`（新增一截）与 `事件::重来`（第一次的答案被判违规，
+/// 屏幕上已经播出去的字要清掉）。**门在流之前**：依据不够时一个字都不会播，token 记 0。
+pub fn ask流(
+    vault: &Vault,
+    conn: &Connection,
+    问题: &str,
+    播: &mut dyn FnMut(事件),
+) -> Result<答复> {
     let cfg = crate::ai::load(vault)?;
     let 模型 = cfg
         .chat_model
@@ -302,8 +391,8 @@ pub fn ask(vault: &Vault, conn: &Connection, 问题: &str) -> Result<答复> {
     let mut 答复 = if 拦了 {
         无依据(问题, 检索.hits.len(), 最强)
     } else {
-        let mut 发问者 = |内容: &str| crate::ai::chat(&cfg, 系统提示, 内容);
-        生成(&依据, 问题, &mut 发问者)?
+        let mut 发问者 = 真发问 { cfg: &cfg };
+        生成与播(&依据, 问题, &mut 发问者, 播)?
     };
     // 重排那一趟的钱要并进同一笔账：用户看到的是"这次问 AI 花了多少"，
     // 把重排的 token 丢掉等于账面上少一笔真实支出。被门拦下时那两个数本来就是 0
@@ -724,6 +813,93 @@ mod tests {
         let 空 = 无依据("红烧肉怎么炒糖色", 0, 0.0);
         assert!(空.text.contains("没有找到"), "{}", 空.text);
         assert!(!空.text.contains("%"), "没候选就别报百分比：{}", 空.text);
+    }
+
+    /// 流式那一半的用例：**播出去的东西与重试时的清空信号**。
+    /// 这条测的不是"能不能流"，而是"流式有没有绕过幻觉门"——答案不能因为走了流就漏出去。
+    #[test]
+    fn 流式播字与违规那次要播重来() {
+        let 依 = 依据集(2);
+        // 一台会分块吐字的假模型：第一次吐一段带幻觉的，第二次吐规矩的
+        struct 吐块 {
+            脚本: Vec<Vec<String>>,
+            第几次: usize,
+        }
+        impl 发问 for 吐块 {
+            fn 问(&mut self, _内容: &str) -> Result<(String, 用量)> {
+                unreachable!("流式这条路不该退回非流式问法")
+            }
+            fn 流着问(
+                &mut self,
+                _内容: &str,
+                每块: &mut dyn FnMut(crate::ai::流),
+            ) -> Result<(String, 用量)> {
+                let 块 = &self.脚本[self.第几次];
+                self.第几次 += 1;
+                let mut 全 = String::new();
+                for b in 块 {
+                    每块(crate::ai::流::答案(b.clone()));
+                    全.push_str(b);
+                }
+                Ok((
+                    全,
+                    用量 {
+                        in_tokens: 3,
+                        out_tokens: 5,
+                    },
+                ))
+            }
+        }
+        let mut 假 = 吐块 {
+            脚本: vec![
+                vec!["先看 [K9]".into(), "，那是编的".into()],
+                vec!["规矩的：".into(), "[K1] 说保留三十份".into()],
+            ],
+            第几次: 0,
+        };
+        let mut 收 = Vec::new();
+        let 答 = 生成与播(&依, "备份", &mut 假, &mut |e| 收.push(e)).unwrap();
+        assert_eq!(
+            收,
+            vec![
+                事件::文本("先看 [K9]".into()),
+                事件::文本("，那是编的".into()),
+                事件::重来,
+                事件::文本("规矩的：".into()),
+                事件::文本("[K1] 说保留三十份".into()),
+            ],
+            "第一次的字播完必须跟着一个「重来」，否则界面上留下一段没采信的答案"
+        );
+        assert!(答.retried);
+        assert_eq!(答.citations.len(), 1, "最终采信的是第二次");
+    }
+
+    #[test]
+    fn 不流式的调用方收到一次完整文本() {
+        let 依 = 依据集(1);
+        let mut 假模型 = 假 {
+            脚本: RefCell::new(vec!["完整的一段 [K1]".into()]),
+            收到: Rc::new(RefCell::new(Vec::new())),
+        };
+        let mut 收 = Vec::new();
+        生成与播(&依, "问", &mut 假模型, &mut |e| 收.push(e)).unwrap();
+        assert_eq!(
+            收,
+            vec![事件::文本("完整的一段 [K1]".into())],
+            "默认实现一次给完"
+        );
+    }
+
+    #[test]
+    fn 零依据时一个字都不播() {
+        let mut 收 = Vec::new();
+        let mut 假模型 = 假 {
+            脚本: RefCell::new(vec![]),
+            收到: Rc::new(RefCell::new(Vec::new())),
+        };
+        let 答 = 生成与播(&[], "红烧肉", &mut 假模型, &mut |e| 收.push(e)).unwrap();
+        assert!(收.is_empty(), "门在流之前：{:?}", 收);
+        assert!(答.insufficient);
     }
 
     #[test]

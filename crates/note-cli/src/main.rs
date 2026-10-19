@@ -171,7 +171,12 @@ enum AiCmd {
         no_rerank: bool,
     },
     /// 带引用的问答。**会打模型**；库里没有依据时一次都不打
-    Ask { query: String },
+    Ask {
+        query: String,
+        /// 一边收一边把字打到标准输出（流式）。量"首字多久到"用这个
+        #[arg(long)]
+        stream: bool,
+    },
     /// 从**标准输入**读一把 Key 存进 Windows 凭据管理器。
     /// 为什么要这条路：贴进界面输入框会被 WebView 里的脚本看到，写进命令行参数会进
     /// 进程表与会话记录——只有管道能让它既不进对话也不留痕。本命令**只回末 4 位**。
@@ -461,8 +466,48 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                 报.pending, 报.excluded
             );
         }
-        AiCmd::Ask { query } => {
-            let 答 = note_core::answer::ask(&vault, idx.conn(), &query)?;
+        AiCmd::Ask { query, stream } => {
+            use note_core::answer::事件 as 事;
+            let 起 = std::time::Instant::now();
+            let mut 首字: Option<std::time::Duration> = None;
+            let mut 想了 = 0usize;
+            let 答 = note_core::answer::ask流(&vault, idx.conn(), &query, &mut |e| match e {
+                事::文本(字) => {
+                    if !stream {
+                        return;
+                    }
+                    if 首字.is_none() {
+                        首字 = Some(起.elapsed());
+                    }
+                    use std::io::Write;
+                    print!("{字}");
+                    let _ = std::io::stdout().flush();
+                }
+                事::思考(字) => {
+                    想了 += 字.chars().count();
+                }
+                事::重来 => {
+                    if stream {
+                        // 第一次的答案引用了没给过的编号，不会被采信——已经打出来的字要擦掉。
+                        // 界面上是同一个信号（`ai://reset`），这里用一行提示代替清屏
+                        println!("\n（引用了没给过的编号，清空重来）");
+                    }
+                }
+            })?;
+            if stream {
+                println!();
+            }
+            if let Some(到) = 首字 {
+                println!(
+                    "  首字 {}ms{}（思考不进答案，只算进度）",
+                    到.as_millis(),
+                    if 想了 > 0 {
+                        format!("｜想了 {想了} 字")
+                    } else {
+                        String::new()
+                    }
+                );
+            }
             println!(
                 "模型 {}｜候选 {}｜in {} / out {} tokens｜{}ms{}",
                 答.model,
@@ -476,7 +521,9 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
                     ""
                 }
             );
-            println!("\n{}\n", 答.text);
+            if !stream {
+                println!("\n{}\n", 答.text);
+            }
             if 答.citations.is_empty() {
                 println!(
                     "{}",
