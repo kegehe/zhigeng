@@ -160,6 +160,25 @@ fn 凭据失败(e: keyring::Error) -> Error {
     ))
 }
 
+/// 把生成侧的失败翻成一句"生成侧暂时不可用"。**只有这一份口径**——
+/// 问答与改写两条路各写一句的话，早晚一句说"暂时不可用"另一句说"出错了"，
+/// 而用户分不出这两者的区别正是这一档要消掉的（docs/05 M2 ③）。
+///
+/// 三段：结论（生成侧暂时不可用）→ 原因（连不上 / 对方 5xx / 超时）→ 还能做什么。
+/// 第三段不是安慰，是真的：检索两路是本地的，改写那一档正文一个字没动——
+/// 各条路说各自的，但第一段是同一句。
+///
+/// **只有 `Unavailable` 会被翻**：配置错误（模型名没填、地址格式不对）仍然是 `Invalid`，
+/// 那句话说的是"去改设置"，混成"暂时不可用"会让人干等。
+pub fn 翻不可用(e: Error, 还能做什么: &str) -> Error {
+    match e {
+        Error::Unavailable(原因) => {
+            Error::Unavailable(format!("生成侧暂时不可用：{原因}。{还能做什么}"))
+        }
+        其他 => 其他,
+    }
+}
+
 /// 一次连通测试的每一步结果。
 ///
 /// 字段名走英文：`#[serde(rename_all)]` 遇到单个汉字字段名会在字符边界上切片直接
@@ -597,15 +616,21 @@ pub fn embed(cfg: &AiConfig, 文本: &[String]) -> Result<Vec<Vec<f32>>> {
     };
     let 答 = 请
         .send()
-        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}")))?;
+        .map_err(|e| Error::Unavailable(format!("{url} 连不上：{e}")))?;
     let 状 = 答.status();
     let 文 = 答.text().unwrap_or_default();
     if !状.is_success() {
+        let 码 = 状.as_u16();
+        if 是暂时不可用(码) {
+            return Err(Error::Unavailable(format!(
+                "对方回了 HTTP {码}：{}",
+                原文截(&文)
+            )));
+        }
         return Err(Error::Invalid(format!(
-            "嵌入请求 HTTP {}：{}{}",
-            状.as_u16(),
+            "嵌入请求 HTTP {码}：{}{}",
             原文截(&文),
-            if 建议补_v1(状.as_u16(), &base) {
+            if 建议补_v1(码, &base) {
                 "｜这个地址末尾可能要加 /v1"
             } else {
                 ""
@@ -911,7 +936,7 @@ fn 发一次(
         None => 请,
     };
     请.send()
-        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}")))
+        .map_err(|e| Error::Unavailable(format!("{url} 连不上：{e}")))
 }
 
 /// 非 2xx 翻成一句人话；2xx 把响应**原样还回来**给调用方读。
@@ -923,16 +948,32 @@ fn 认状态(答: reqwest::blocking::Response, 基: &str) -> Result<reqwest::blo
         return Ok(答);
     }
     let 文 = 答.text().unwrap_or_default();
+    let 码 = 状.as_u16();
+    if 是暂时不可用(码) {
+        // 对方那头挂了或正在限流：**这是"暂时不可用"，不是"设置写错了"**——
+        // 前者要说的是"本地那两路照常"，后者要说的是"去改设置"。两种都说成"出错了"，
+        // 用户就只能干等（docs/05 M2 ③）
+        return Err(Error::Unavailable(format!(
+            "对方回了 HTTP {码}：{}",
+            原文截(&文)
+        )));
+    }
     Err(Error::Invalid(format!(
-        "问答请求 HTTP {}：{}{}",
-        状.as_u16(),
+        "问答请求 HTTP {码}：{}{}",
         原文截(&文),
-        if 建议补_v1(状.as_u16(), 基) {
+        if 建议补_v1(码, 基) {
             "｜这个地址末尾可能要加 /v1"
         } else {
             ""
         }
     )))
+}
+
+/// 哪些状态码算"对方那头暂时不可用"。**5xx 与 429 算**：前者是对方挂了或网关在重启，
+/// 后者是对方在限流——两者都是"过一会儿可能就好"。4xx 不算：Key 不对、地址不对、
+/// 请求体不对，那些是"改了设置才会有用"，说成暂时不可用会让人干等。
+fn 是暂时不可用(码: u16) -> bool {
+    码 >= 500 || 码 == 429
 }
 
 /// 普通（非流式）回包的解析。**chat 与 chat流 的兜底分支共用这一份**。

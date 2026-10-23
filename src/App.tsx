@@ -216,6 +216,13 @@ export function App() {
   const [答, set答] = useState<Answer | null>(null);
   const [问busy, set问busy] = useState(false);
   /**
+   * 问答这一路的失败，**摆在提问框底下而不是全局横幅**。
+   * 横幅在窗口顶上，而用户问完一句之后眼睛在输入框那一带——把"生成侧暂时不可用"
+   * 放到几百像素外的地方，它就变成一句没人看的红字（docs/05 M2 ③）。
+   * 话是后端写好的（`ai::翻不可用`），这边只负责把它显示出来。
+   */
+  const [问错, set问错] = useState<string | null>(null);
+  /**
    * 流式中的字。`ai://token` 一截截往上加，`ai://reset` 清空（第一次的答案引用了没给过的
    * 编号，那些字已经到屏幕上了，必须擦掉——留着就是一段"显示过但没被采信"的答案）。
    * 答案定稿后由 `答` 接管渲染，这里归零。
@@ -1113,6 +1120,7 @@ export function App() {
     if (!q) return;
     set问busy(true);
     set答(null);
+    set问错(null);
     set流字("");
     set想字(0);
     const 号 = Date.now();
@@ -1128,7 +1136,14 @@ export function App() {
         `问答：首字 ${Math.round(首字.current - 起)}ms｜全文 ${Math.round(performance.now() - 起)}ms｜${r.inTokens}+${r.outTokens} tok`,
       );
     } catch (e) {
-      setError(describeError(e).message);
+      // 摆在原地，不走全局横幅：横幅在窗口顶上，离用户正在看的地方太远
+      set问错(describeError(e).message);
+      // 失败那一趟也落进了 ai_runs，所以审计页上看得见——把这几条拉回来
+      try {
+        setRuns(await api.aiRuns(8));
+      } catch {
+        /* 拉不回审计不该盖掉本来要说的话 */
+      }
     } finally {
       set流字("");
       set问busy(false);
@@ -1850,6 +1865,16 @@ export function App() {
                       {流字}
                       <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-fg-2 align-middle" />
                     </p>
+                  </div>
+                ) : null}
+                {问错 ? (
+                  /*
+                    失败也用答案那张卡的外壳：**同一副壳**，用户不用分辨"这是答案还是
+                    出错了"——他只要知道这一问没有答案，以及为什么没有。
+                  */
+                  <div className="mt-5 max-w-2xl rounded-md border border-danger bg-danger-soft px-4 py-3">
+                    <div className="font-mono text-xs text-fg-2">这一问没有答成</div>
+                    <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{问错}</p>
                   </div>
                 ) : null}
                 {答 ? (

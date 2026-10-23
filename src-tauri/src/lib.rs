@@ -77,12 +77,16 @@ struct WriteErr {
 }
 
 fn werr(e: note_core::Error) -> WriteErr {
+    // `kind` 是**类型**不是文案：界面要能把三种失败分开说——
+    // 冲突（让用户选保留哪份）、生成侧不可用（网络那头没反应，本地那两路照常）、
+    // 其余（配置写错了之类）。
+    let kind = match &e {
+        note_core::Error::Conflict(_) => "conflict",
+        note_core::Error::Unavailable(_) => "unavailable",
+        _ => "error",
+    };
     WriteErr {
-        kind: if matches!(e, note_core::Error::Conflict(_)) {
-            "conflict"
-        } else {
-            "error"
-        },
+        kind,
         message: e.to_string(),
     }
 }

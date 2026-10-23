@@ -23,6 +23,11 @@ pub mod tree_order;
 pub mod vault;
 pub mod watch;
 
+/// 假端点。**只在测试里编译**：它跑一个本地 HTTP 服务、把收到的请求体记下来，
+/// 用来证明"送出去的那份里没有私密那篇的字节"——这件事没法用"查出来没有"来证。
+#[cfg(test)]
+pub mod fake_endpoint;
+
 /// 重新导出，避免上层直接依赖 md-kernel 的版本细节。
 pub use md_kernel as mk;
 
@@ -46,6 +51,11 @@ pub enum Error {
     Invalid(String),
     #[error("笔记不存在: {0}")]
     NotFound(String),
+    /// **模型端点不可用**（连不上、被拒、超时）。它单独一个变体而不是塞进 `Invalid`：
+    /// 界面要能把"网络那头没反应"与"配置写错了"分开说——前者是"生成侧暂时不可用，
+    /// 本地那两路照常"，后者是"得改设置"。两种都说成"出错了"就是一句废话。
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

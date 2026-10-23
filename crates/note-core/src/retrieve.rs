@@ -667,7 +667,11 @@ impl 检索结果 {
 }
 
 /// **没配模型 / 还没嵌过**时退回剩下的路，并说清为什么；
-/// **配了但连不上**不退回——那是"试过了，失败"，混进"这一路没开"就是把错误吞成状态。
+/// **配了但连不上**也退回——**但把错因写进提示**。
+///
+/// 退回不等于吞掉："这一路没开"与"这一路试过了但失败"必须分得开。
+/// 混成一句就是用户看到"我没配语义"从而去改设置，而真正的原因是网络断了
+/// （docs/05 M2 ③：断网时本地两路照常可用，生成侧另外说不可用）。
 fn 跑一趟(
     vault: &crate::vault::Vault,
     conn: &Connection,
@@ -696,14 +700,16 @@ fn 跑一趟(
         }
         None => false,
     };
-    let (语, 语义开) = match (&模型, 表在) {
-        (None, _) => (Vec::new(), false),
-        (Some(_), false) => (Vec::new(), false),
-        (Some(m), true) => {
-            // 这一支不兜底：连不上就报错，别把失败说成"没开"
-            let v = crate::ai::embed(&cfg, &[query.to_string()])?;
-            (语义路(conn, m, &v[0], 每路配额)?, true)
-        }
+    // 第三段是"错因"：配了却没能跑通时它有值，错因进提示而不是变成一句"没开"
+    let (语, 语义开, 语义错) = match (&模型, 表在) {
+        (None, _) => (Vec::new(), false, None),
+        (Some(_), false) => (Vec::new(), false, None),
+        (Some(m), true) => match crate::ai::embed(&cfg, &[query.to_string()]) {
+            Ok(v) => (语义路(conn, m, &v[0], 每路配额)?, true, None),
+            // 断网时这一路要能退：关键词与链接两路是本地的，不该因为模型那头没反应
+            // 就把整趟结果扔掉。**退不是吞**——错因交给下面的提示说清
+            Err(e) => (Vec::new(), false, Some(e.to_string())),
+        },
     };
     // 名次表要的是 (切片, 笔记)；相似度单独留一份表给 `取详情` 算依据强度
     let 语列: Vec<(i64, String)> = 语.iter().map(|(i, n, _)| (*i, n.clone())).collect();
@@ -719,15 +725,21 @@ fn 跑一趟(
     // 提示攒成一条清单再拼：语义那一路没开 与 重排没成 可以同时成立，
     // 各写各的字段早晚有一个被覆盖掉
     let mut 提示 = Vec::new();
-    if !语义开 {
-        提示.push(match &模型 {
-            None => format!(
-                "没填嵌入模型名，语义那一路没开，这一趟走{走了}。要加语义那一路：设置里填好，再点嵌入。"
-            ),
-            Some(_) => format!(
-                "还没嵌过向量，语义那一路没开，这一趟走{走了}。跑 `note ai embed`，或在设置里点嵌入。"
-            ),
-        });
+    // 三件事要分得开：没配模型、配了但还没嵌过、配了嵌过了但这一趟没能跑通。
+    // 合并成"没开"一句，用户就会跑去改设置，而真正的原因是网络断了
+    match (&模型, 表在, &语义错) {
+        // 配了却没能跑通：说清错在哪，**别把它说成"没开"**
+        (Some(_), _, Some(错)) => 提示.push(format!(
+            "语义那一路没能跑通（{错}），这一趟走{走了}。关键词与链接两路是本地的，结果照常可用。"
+        )),
+        (None, _, _) => 提示.push(format!(
+            "没填嵌入模型名，语义那一路没开，这一趟走{走了}。要加语义那一路：设置里填好，再点嵌入。"
+        )),
+        (Some(_), false, None) => 提示.push(format!(
+            "还没嵌过向量，语义那一路没开，这一趟走{走了}。跑 `note ai embed`，或在设置里点嵌入。"
+        )),
+        // 配了、也嵌过了、这一趟真的跑通了：没有要说的话
+        (Some(_), true, None) => {}
     }
     let 排 = 合并(&关键, &语列, &图, 每篇配额, 每路配额);
     let 详情 = 取详情(conn, &排, &词, &相似度)?;
@@ -1840,5 +1852,217 @@ q = "乙"
                 );
             }
         }
+    }
+
+    // ---- M2 ③：端点不通时本地那两路照常 -------------------------------------
+
+    /// 一个刚被放开的本地端口：连它一定被拒，而且拒得很快（不会等 5 秒超时）。
+    fn 关着的端口() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// M2 ③ 的头一条：**断网时本地两路照常可用**（docs/05 M2 ③）。
+    ///
+    /// 端点写成刚被放开的端口，语义那一路必然连不上；关键词与链接两路必须照样出结果。
+    /// 而且提示要说清"没能跑通"——说成"没开"会让用户去改设置，而真因是网络断了。
+    #[test]
+    fn 端点不通时关键词与链接两路照常并且说清是没能跑通() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = crate::vault::Vault::open(dir.path()).unwrap();
+        v.write_atomic(
+            "notes/甲.md",
+            "---\nid: n-off0001\ntitle: 甲\n---\n\n向量检索把文本变成可比较的数。\n".as_bytes(),
+        )
+        .unwrap();
+        let idx = crate::index::Index::open(&v).unwrap();
+        idx.rebuild_all(&v).unwrap();
+        // 配一个连不上的端点，**并且把向量表建出来**——只有这样这一路才会真的去联网
+        crate::ai::save(
+            &v,
+            &crate::ai::AiConfig {
+                base_url: Some(format!("http://127.0.0.1:{}/v1", 关着的端口())),
+                chat_model: None,
+                embedding_model: Some("mm".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let conn = idx.conn();
+        crate::embed::建表(conn, "mm", 2).unwrap();
+        let 结 = 混合或退回(&v, conn, "向量检索").unwrap();
+        assert!(!结.semantic, "这一路没能跑通，不能说成开过");
+        assert!(结.graph, "链接那一路不配模型也在跑");
+        assert!(
+            !结.hits.is_empty(),
+            "关键词那一路必须照样出东西：{:?}",
+            结.hits
+        );
+        let 提 = 结.hint.unwrap();
+        assert!(提.contains("语义那一路没能跑通"), "{提}");
+        assert!(提.contains("关键词 + 链接"), "{提}");
+        assert!(
+            !提.contains("没填嵌入模型名") && !提.contains("还没嵌过向量"),
+            "配过了就别说成没配：{提}"
+        );
+    }
+
+    /// 语义那一路**跑通了**的时候，提示里不许再说"还没嵌过向量"。
+    ///
+    /// 两种提示混起来比没有提示更坏：说"还没嵌过"会让用户跑去点嵌入，
+    /// 而向量明明早就嵌好了——他点了多少次都是同一句话。
+    #[test]
+    fn 语义跑通了就不说还没嵌过向量() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = crate::vault::Vault::open(dir.path()).unwrap();
+        v.write_atomic(
+            "notes/甲.md",
+            "---\nid: n-off0002\ntitle: 甲\n---\n\n向量检索把文本变成可比较的数。\n".as_bytes(),
+        )
+        .unwrap();
+        let idx = crate::index::Index::open(&v).unwrap();
+        idx.rebuild_all(&v).unwrap();
+        // 端点是真的：这一路会真的联网并真的回向量
+        let 端 =
+            crate::fake_endpoint::假端点::起(r#"{"data":[{"index":0,"embedding":[0.1,0.2]}]}"#);
+        crate::ai::save(
+            &v,
+            &crate::ai::AiConfig {
+                base_url: Some(端.地址()),
+                chat_model: None,
+                embedding_model: Some("mm".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let conn = idx.conn();
+        let 表 = crate::embed::建表(conn, "mm", 2).unwrap();
+        // 表里真有一行：语义那一路有东西可捞
+        let 切片: i64 = conn
+            .query_row("SELECT id FROM chunks LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        crate::embed::写入(conn, "mm", &表, &[(切片, vec![0.1_f32, 0.2])]).unwrap();
+
+        let 结 = 混合或退回(&v, conn, "向量检索").unwrap();
+        assert!(结.semantic, "这一路跑通了：{:?}", 结.hits);
+        let 提 = 结.hint.unwrap_or_default();
+        assert!(!提.contains("还没嵌过向量"), "跑通了就不许说还没嵌过：{提}");
+        assert!(!提.contains("没填嵌入模型名"), "配过了就不许说没配：{提}");
+        assert!(!提.contains("没能跑通"), "跑通了就不许说没能跑通：{提}");
+    }
+
+    // ---- M2 ④：私密那篇经任何一条路都召不回 ---------------------------------
+
+    /// 四篇。种子（关键词命中，出链到「私密出链」与「被链到」）+ 私密出链（私密，被种子链到）
+    /// + 私密入链（私密，链到种子）+ 被链到（普通）。
+    ///
+    /// 两种私密各占图扩展的一个方向：**只钉一个方向等于没钉**——漏一边就是隐私漏一边
+    /// （docs/05 M2 ④ 说的"含图扩展那一路的两个方向"）。
+    const 隐私图: &[(&str, &str)] = &[
+        (
+            "notes/种子.md",
+            "---\nid: n-pv00001\ntitle: 种子\n---\n\n向量检索把文本变成可比较的数，顺手见 [[私密出链]] 和 [[被链到]]。\n",
+        ),
+        (
+            "notes/私密出链.md",
+            "---\nid: n-pv00002\ntitle: 私密出链\nai:\n  private: true\n---\n\n向量检索也说过这一句，账号是 6222020202021234。\n",
+        ),
+        (
+            "notes/私密入链.md",
+            "---\nid: n-pv00003\ntitle: 私密入链\nai:\n  private: true\n---\n\n[[种子]] 那篇的说法我不同意。\n",
+        ),
+        (
+            "notes/被链到.md",
+            "---\nid: n-pv00004\ntitle: 被链到\n---\n\n被链到的首块讲的是备份目录留三十份。\n",
+        ),
+    ];
+
+    #[test]
+    fn 关键词路不捞私密那篇() {
+        let (_d, _v, idx) = 装库(隐私图);
+        let 关 = 关键词路(idx.conn(), "向量检索", 30).unwrap();
+        let 篇: Vec<&str> = 关.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(篇.contains(&"n-pv00001"), "种子该命中：{篇:?}");
+        assert!(
+            !篇.contains(&"n-pv00002"),
+            "私密那篇不该被关键词路捞到：{篇:?}"
+        );
+    }
+
+    #[test]
+    fn 语义路不捞私密那篇() {
+        let (_d, _v, idx) = 装库(隐私图);
+        let conn = idx.conn();
+        let 表 = crate::embed::建表(conn, "mm", 2).unwrap();
+        // **每一篇都塞同一个最像查询的向量**：过滤要是在 SQL 层，私密那篇根本进不来；
+        // 要是不在，它会顶到第一名——所以这个向量必须人人都有
+        let 全部: Vec<i64> = {
+            let mut s = conn.prepare("SELECT id FROM chunks ORDER BY id").unwrap();
+            s.query_map([], |r| r.get(0))
+                .unwrap()
+                .filter_map(|x| x.ok())
+                .collect()
+        };
+        assert!(全部.len() >= 3, "料里该有四篇的切片：{全部:?}");
+        for id in 全部 {
+            crate::embed::写入(conn, "mm", &表, &[(id, vec![1.0, 0.0])]).unwrap();
+        }
+        let 语 = 语义路(conn, "mm", &[0.99, 0.01], 30).unwrap();
+        let 篇: Vec<&str> = 语.iter().map(|(_, n, _)| n.as_str()).collect();
+        assert!(篇.contains(&"n-pv00001"), "种子该被语义路捞到：{篇:?}");
+        assert!(
+            !篇.contains(&"n-pv00002"),
+            "私密那篇不该被语义路捞到：{篇:?}"
+        );
+    }
+
+    #[test]
+    fn 图扩展入链方向不捞私密那篇() {
+        let (_d, _v, idx) = 装库(隐私图);
+        let 图 = 图路(idx.conn(), &["n-pv00001".to_string()], 图配额).unwrap();
+        let 篇: Vec<&str> = 图.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(篇.contains(&"n-pv00004"), "普通邻居该来：{篇:?}");
+        assert!(
+            !篇.contains(&"n-pv00003"),
+            "入链方向：私密那篇提到种子也不该被带回来：{篇:?}"
+        );
+    }
+
+    #[test]
+    fn 图扩展出链方向不捞私密那篇() {
+        let (_d, _v, idx) = 装库(隐私图);
+        let 图 = 图路(idx.conn(), &["n-pv00001".to_string()], 图配额).unwrap();
+        let 篇: Vec<&str> = 图.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            !篇.contains(&"n-pv00002"),
+            "出链方向：种子链到私密那篇也不该被带回来：{篇:?}"
+        );
+    }
+
+    #[test]
+    fn no_ai那篇三路同样都不给() {
+        let 料: &[(&str, &str)] = &[
+            (
+                "notes/种子.md",
+                "---\nid: n-noa00001\ntitle: 种子\n---\n\n向量检索把文本变成可比较的数，顺手见 [[不许AI]]。\n",
+            ),
+            (
+                "notes/不许AI.md",
+                "---\nid: n-noa00002\ntitle: 不许AI\nai:\n  no_ai: true\n---\n\n向量检索也在我这儿说过，账号是 6222020202021234。\n",
+            ),
+        ];
+        let (_d, _v, idx) = 装库(料);
+        let conn = idx.conn();
+        let 关 = 关键词路(conn, "向量检索", 30).unwrap();
+        let 篇: Vec<&str> = 关.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(篇.contains(&"n-noa00001"), "种子该命中：{篇:?}");
+        assert!(!篇.contains(&"n-noa00002"), "no_ai 那篇不该被捞到：{篇:?}");
+
+        let 图 = 图路(conn, &["n-noa00001".to_string()], 图配额).unwrap();
+        let 篇: Vec<&str> = 图.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(
+            !篇.contains(&"n-noa00002"),
+            "no_ai 那篇不该被链接带回来：{篇:?}"
+        );
     }
 }

@@ -242,6 +242,11 @@ fn 转(b: crate::ai::流) -> 事件 {
     }
 }
 
+/// 问答这一路"生成侧不可用"时还要告诉用户什么。**本地那两路是本地的**：
+/// 关键词与链接扩展都不经过模型，断网时它们照样出结果——这一句不是安慰，
+/// 是"你现在能做什么"的实话（docs/05 M2 ③）。
+pub const 检索还在: &str = "本地那两路（关键词、链接）照常可用，检索结果仍然可信。";
+
 /// 同一条流水线，多一个往外播的口子。**流式与非流式共用这一份实现**——
 /// 幻觉门只有一处，不会因为"那条路是流式的"就漏判。
 pub fn 生成与播(
@@ -267,7 +272,11 @@ pub fn 生成与播(
     }
     let 头 = format!("{}{}", 组装(依据), 问题尾(问题));
     let 起 = std::time::Instant::now();
-    let (文本, 量) = 发问者.流着问(&头, &mut |b| 播(转(b)))?;
+    // 生成侧的失败翻成"生成侧暂时不可用"：模型那头没反应与"设置写错了"要分开说，
+    // 前者要说的是"本地那两路照常"（docs/05 M2 ③）
+    let (文本, 量) = 发问者
+        .流着问(&头, &mut |b| 播(转(b)))
+        .map_err(|e| crate::ai::翻不可用(e, 检索还在))?;
     let 一次 = 越界引用(&文本, &给定);
     let (最终, 重试过, 总用量) = if 一次.is_empty() {
         (文本, false, 量)
@@ -432,7 +441,26 @@ pub fn ask流(
         无依据(问题, 门.len(), 最强)
     } else {
         let mut 发问者 = 真发问 { cfg: &cfg };
-        生成与播(&依据, 问题, &mut 发问者, 播)?
+        match 生成与播(&依据, 问题, &mut 发问者, 播) {
+            Ok(答) => 答,
+            Err(e) => {
+                // 失败那一趟也要落账（与 `rewrite::记账` 同一规矩）：断网时那一趟同样花了
+                // 用户的等待，账上只留成功就等于把这段抹掉——而"问过什么"才是审计要的
+                let 记 = 落审计 {
+                    conn,
+                    模型: 模型.to_string(),
+                    候选: 依据.len(),
+                    语义路: 检索.semantic,
+                    图路: 检索.graph,
+                    重排: 检索.reranked,
+                };
+                if let Err(写错) = 记.写失败(&e.to_string(), 起.elapsed().as_millis() as u64)
+                {
+                    tracing::warn!("ai_runs 的失败记录没落进去（{写错}）");
+                }
+                return Err(e);
+            }
+        }
     };
     // 重排那一趟的钱与时间要并进同一笔账：用户看到的是"这次问 AI 花了多少"。
     // 被预检拦下时这两个数就是 0；预检过了、正门才拦下时重排确实花过钱，必须留着。
@@ -543,6 +571,38 @@ struct 落审计<'a> {
 }
 
 impl 落审计<'_> {
+    /// 失败那一趟也要落。**账要的是"问过什么"，不是成功榜**——断网时那一趟同样
+    /// 消耗了用户的等待，只写成功就等于把这段从账上抹掉。
+    /// token 记 0：模型一个字节都没回。
+    fn 写失败(self, 错: &str, ms: u64) -> Result<()> {
+        let id = format!("r-{}", &crate::capture::gen_note_id()[2..]);
+        let 时候 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO ai_runs(id,task,model,trigger,in_tokens,out_tokens,cost_usd,ok,error,duration_ms,cited_blocks_json,created_at)
+             VALUES(?1,'ask',?2,'user',0,0,NULL,0,?3,?4,?5,?6)",
+            params![
+                id,
+                self.模型,
+                错,
+                ms as i64,
+                serde_json::to_string(&serde_json::json!({
+                    "cited": Vec::<String>::new(),
+                    "candidates": self.候选,
+                    "retried": false,
+                    "semantic": self.语义路,
+                    "graph": self.图路,
+                    "reranked": self.重排,
+                }))
+                .map_err(|e| Error::Invalid(format!("审计的引用清单序列化失败：{e}")))?,
+                时候,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn 写(self, 答: &答复) -> Result<()> {
         let id = format!("r-{}", &crate::capture::gen_note_id()[2..]);
         let 时候 = std::time::SystemTime::now()
@@ -1099,5 +1159,106 @@ mod tests {
         assert_eq!(依[0].label, "K1");
         assert_eq!(依[0].crumb, "篇0", "没有面包屑时退回标题，不留空");
         assert_eq!(依[7].label, "K8");
+    }
+
+    // ---- M2 ③ 与 M2 ④：整条链的两头 -----------------------------------------
+
+    /// 两篇笔记：公开那篇与私密那篇。**正文里有一句一模一样的**——
+    /// 私密那篇多一个账号号段，那个号段就是"绝不许出网"的那几个字节。
+    fn 装问答库(dir: &std::path::Path) -> (crate::vault::Vault, crate::index::Index) {
+        let v = crate::vault::Vault::open(dir).unwrap();
+        v.write_atomic(
+            "notes/公开.md",
+            "---\nid: n-pub0001\ntitle: 公开\n---\n\n备份目录要写到第二个磁盘，保留三十份。\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        v.write_atomic(
+            "notes/私密.md",
+            "---\nid: n-pub0002\ntitle: 私密\nai:\n  private: true\n---\n\n备份目录要写到第二个磁盘。账号是 6222020202021234。\n".as_bytes(),
+        )
+        .unwrap();
+        let idx = crate::index::Index::open(&v).unwrap();
+        idx.rebuild_all(&v).unwrap();
+        (v, idx)
+    }
+
+    /// M2 ④ 的最后一环：**私密那篇的字节不许出网**。
+    ///
+    /// 前面几条钉的是"召不回"（检索那一步），这一条钉的是"送出去的那份里没有它"
+    /// （整条链的终点）。**真的打一次请求、真的看一遍请求体**——
+    /// "查出来没有"证明不了请求体里没有它。
+    #[test]
+    fn 私密那篇的字节不发给模型() {
+        let dir = tempfile::tempdir().unwrap();
+        let (v, idx) = 装问答库(dir.path());
+        let 端点 = crate::fake_endpoint::假端点::起(
+            r#"{"choices":[{"message":{"content":"备份目录写到第二个磁盘 [K1]。"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
+        );
+        crate::ai::save(
+            &v,
+            &crate::ai::AiConfig {
+                base_url: Some(端点.地址()),
+                chat_model: Some("m1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let 答 = ask流(&v, idx.conn(), "备份目录", &mut |_| {}).unwrap();
+        assert!(!答.insufficient, "公开那篇该答得出来：{:?}", 答);
+        let 收到 = 端点.收到();
+        assert_eq!(收到.len(), 1, "只该有一次请求：{收到:?}");
+        assert!(
+            收到[0].contains("第二个磁盘"),
+            "公开那篇的片段该在请求里：{}",
+            收到[0]
+        );
+        assert!(
+            !收到[0].contains("6222020202021234"),
+            "私密那篇的字节不许出网：{}",
+            收到[0]
+        );
+    }
+
+    /// M2 ③ 的生成侧：**网络那头没反应要说成"生成侧暂时不可用"**，
+    /// 而不是一句"出错了"；而且那一趟**要落进 ai_runs**——
+    /// 账要的是"这个库问过什么"，不是成功榜。
+    #[test]
+    fn 端点不通时生成侧说不可用而且那一趟落账() {
+        let dir = tempfile::tempdir().unwrap();
+        let (v, idx) = 装问答库(dir.path());
+        // 一个刚被放开的端口：连它一定被拒
+        let 端口 = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        crate::ai::save(
+            &v,
+            &crate::ai::AiConfig {
+                base_url: Some(format!("http://127.0.0.1:{端口}/v1")),
+                chat_model: Some("m1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let 错 = ask流(&v, idx.conn(), "备份目录", &mut |_| {}).unwrap_err();
+        assert!(matches!(错, Error::Unavailable(_)), "{错:?}");
+        let 话 = 错.to_string();
+        assert!(话.contains("生成侧暂时不可用"), "{话}");
+        assert!(话.contains("本地那两路"), "{话}");
+
+        // 账上要有那一趟，ok=0，理由就是那句不可用
+        let 行 = 最近运行(idx.conn(), 10).unwrap();
+        assert_eq!(行.len(), 1, "失败那趟也要在：{行:?}");
+        assert!(!行[0].ok);
+        assert!(
+            行[0]
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("生成侧暂时不可用"),
+            "{行:?}"
+        );
+        assert_eq!(行[0].in_tokens, 0, "模型一个字节都没回，token 就是 0");
     }
 }
