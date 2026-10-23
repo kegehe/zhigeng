@@ -555,8 +555,8 @@ fn note_move(
 #[tauri::command]
 fn note_trash(app: AppHandle, state: State<'_, Shared>, rel: String) -> Result<(), WriteErr> {
     with_hub_write(&state, |h| h.note_trash_file(&rel))?;
-    reindex_async(app, vec![rel.clone()], move |_vault, index| {
-        unindex(index, &rel)
+    reindex_async(app, vec![rel.clone()], move |vault, index| {
+        unindex(vault, index, &rel)
     });
     Ok(())
 }

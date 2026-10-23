@@ -174,10 +174,14 @@ CREATE TABLE IF NOT EXISTS attachments (
   ocr_text TEXT, first_seen_at INTEGER NOT NULL
 );
 
+-- 版本历史。**钥匙是 path，不是 note_id**：笔记进回收站时 notes 行会消失，
+-- 而版本必须活得比笔记久（撤销与恢复都要它）。所以这一列**不挂外键**——
+-- 原来挂的是 ON DELETE CASCADE，一挂，版本就跟着笔记一起没了。
 CREATE TABLE IF NOT EXISTS note_versions (
-  id INTEGER PRIMARY KEY, note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  id INTEGER PRIMARY KEY, path TEXT NOT NULL,
+  note_id TEXT NOT NULL DEFAULT '',
   content_hash TEXT NOT NULL, blob_path TEXT NOT NULL,
   reason TEXT, created_at INTEGER NOT NULL,
-  UNIQUE (note_id, content_hash)
+  UNIQUE (path, content_hash)
 );
 "#;

@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use md_kernel::{Block, Doc, Kind};
 use rusqlite::{params, Connection, Row};
@@ -17,7 +18,7 @@ use crate::schema::SCHEMA;
 use crate::vault::{NoteFile, NoteKind, NoteStatus, Vault};
 use crate::{Error, Result};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 pub const MD_FORMAT_VERSION: i64 = 1;
 
 /// 切片预算（字符数近似 token：中文一字≈一 token，英文约 4 字符≈1 token）。
@@ -30,7 +31,14 @@ pub struct Index {
     /// 库根。链接解析要能查盘（资产链接的存在性按盘上事实判，docs/02 §资产引用格式），
     /// 而索引层拿不到 `Vault`——只拿得到根路径，边界判据走 `vault::resolve_in` 那一份。
     root: PathBuf,
+    /// 待落的版本快照。**主连接与后台那条连接共用同一份**（`fork()` 复制 Arc）——
+    /// 否则同步那一半排进去的东西，后台那条连接看不见，队列就永远排在那儿。
+    待落: Arc<Mutex<Vec<crate::versions::待落>>>,
 }
+
+/// 待落队列的上限。爆了说明后台那一半卡住了：丢掉最老的一条，别把内存吃光。
+/// 丢的是"历史里的一版"，不是笔记本身。
+const 待落上限: usize = 256;
 
 static VEC_REGISTERED: std::sync::Once = std::sync::Once::new();
 
@@ -65,7 +73,11 @@ impl Index {
     /// 第二条连接指向同一个库。后台索引拿它干活，读命令就不会排这把写锁
     /// （WAL 下读与写互不挡）。docs/03 §后端调用纪律 的"隐形预算"就是这么来的。
     pub fn fork(&self) -> Result<Self> {
-        Self::open_path(&self.path, &self.root)
+        let mut f = Self::open_path(&self.path, &self.root)?;
+        // 待落队列要**共用同一份**：同步那一半往主连接旁边排的东西，
+        // 后台这条连接得看得见才认领得走。
+        f.待落 = Arc::clone(&self.待落);
+        Ok(f)
     }
 
     /// 一串写包进一个事务。rusqlite 的事务是**连接态**：`BEGIN` 之后这条连接上的
@@ -106,6 +118,7 @@ impl Index {
             conn,
             path: path.to_path_buf(),
             root: root.to_path_buf(),
+            待落: Arc::new(Mutex::new(Vec::new())),
         };
         me.ensure_schema()?;
         Ok(me)
@@ -113,6 +126,37 @@ impl Index {
 
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// 库根。版本快照的 blob 落在它下面（`.note/versions/`）。
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// 排一条待落的版本快照。
+    pub fn 推待落(&self, 待: crate::versions::待落) {
+        let mut q = self.待落.lock().unwrap_or_else(|e| e.into_inner());
+        if q.len() >= 待落上限 {
+            q.remove(0);
+            tracing::warn!("待落快照队列已满，丢掉最老的一条");
+        }
+        q.push(待);
+    }
+
+    /// 取走属于 `rel` 的那些（取走即离队）。
+    pub fn 取待落(&self, rel: &str) -> Vec<crate::versions::待落> {
+        let mut q = self.待落.lock().unwrap_or_else(|e| e.into_inner());
+        let mut 留下 = Vec::new();
+        let mut 拿走 = Vec::new();
+        for 待 in q.drain(..) {
+            if 待.rel == rel {
+                拿走.push(待);
+            } else {
+                留下.push(待);
+            }
+        }
+        q.extend(留下);
+        拿走
     }
 
     fn ensure_schema(&self) -> Result<()> {
@@ -177,6 +221,15 @@ impl Index {
     /// 重解析链接图即可，不用重扫全库。
     ///
     /// v2 → v3：`links` 补上目标的原始写法（悬空链接在反链面板上唯一还能显示的信息）。
+    ///
+    /// v3 → v4：`note_versions` 换钥匙。原先它挂的是
+    /// `note_id REFERENCES notes(id) ON DELETE CASCADE`——**笔记一进回收站，
+    /// `notes` 行被删，版本跟着级联消失**，而那正是撤销与恢复唯一要用的落点。
+    /// 新形状的钥匙是 `path`（版本活得比笔记久），并**不挂外键**。
+    ///
+    /// 这一档**必须保行**：迁移框架是"丢掉重算"，而版本不是能重算出来的东西
+    /// （盘上早就没有那一版了）。所以先把旧表改名保住 → 跑 SCHEMA 建出新形状 →
+    /// 把行搬过去 → 再删旧表。
     fn migrate_from(&self, from: i64) -> Result<()> {
         if from < 2 {
             self.conn
@@ -185,8 +238,22 @@ impl Index {
         if from < 3 {
             self.conn.execute_batch("DROP TABLE IF EXISTS links;")?;
         }
+        if from < 4 {
+            self.conn
+                .execute_batch("ALTER TABLE note_versions RENAME TO note_versions_v3;")?;
+        }
         // SCHEMA 全是 IF NOT EXISTS，重跑一遍就把上面缺的形状建回来
         self.conn.execute_batch(SCHEMA)?;
+        if from < 4 {
+            // 旧行只有 note_id，path 从 notes 表反查；查不到（笔记已经没了）就留空串。
+            self.conn.execute_batch(
+                "INSERT OR IGNORE INTO note_versions(path,note_id,content_hash,blob_path,reason,created_at)
+                 SELECT COALESCE((SELECT n.path FROM notes n WHERE n.id = v.note_id), ''),
+                        v.note_id, v.content_hash, v.blob_path, v.reason, v.created_at
+                 FROM note_versions_v3 v;",
+            )?;
+            self.conn.execute_batch("DROP TABLE note_versions_v3;")?;
+        }
         if from < 2 {
             let rows: Vec<(String, String)> = {
                 let mut s = self.conn.prepare("SELECT id, markdown FROM blocks")?;

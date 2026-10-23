@@ -21,6 +21,7 @@ pub mod service;
 pub mod snapshot;
 pub mod tree_order;
 pub mod vault;
+pub mod versions;
 pub mod watch;
 
 /// 假端点。**只在测试里编译**：它跑一个本地 HTTP 服务、把收到的请求体记下来，

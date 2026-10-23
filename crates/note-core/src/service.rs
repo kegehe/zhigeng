@@ -99,6 +99,30 @@ pub struct HitRow {
     pub score: f64,
 }
 
+/// 版本历史里的一条。**一条快照 = 一个曾经存在过的版本**，也就是那次操作
+/// **之前**盘上的内容（撤销靠它，docs/04 §建议的生命周期）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionRow {
+    pub id: i64,
+    /// `manual` / `ai_applied` / `before_delete`
+    pub reason: String,
+    pub content_hash: String,
+    /// epoch 毫秒
+    pub created_at: i64,
+    /// 人看得懂的时间（本地时区）
+    pub created_at_text: String,
+    /// 这一版有多少字节
+    pub size: usize,
+}
+
+/// epoch 毫秒 → 本地时区的 RFC3339。
+fn 时刻文本(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| t.with_timezone(&chrono::Local).to_rfc3339())
+        .unwrap_or_default()
+}
+
 /// 反链面板里的一条。入链与出链共用一个形状：面板要说的都是"哪篇、哪块、什么写法、
 /// 断没断"。入链的 `broken` 恒为 false（能算入链就说明目标就是本篇）。
 #[derive(Debug, Clone, Serialize)]
@@ -284,7 +308,7 @@ pub fn apply_external(
                 done += 1;
             }
             (None, Some(_)) => {
-                unindex(index, rel)?;
+                unindex(vault, index, rel)?;
                 done += 1;
             }
             (None, None) => {} // 盘上没有、库里也没有
@@ -338,6 +362,9 @@ pub fn reindex_note(vault: &Vault, index: &Index, rel: &str) -> Result<()> {
     let file = vault.note_file(rel)?;
     let content = String::from_utf8_lossy(&vault.read(rel)?).to_string();
     index.in_tx(|| {
+        // 版本快照先落：它是"那次保存之前"的那一版，与索引重建无关，
+        // 但得在同一趟里做完——不然同步那一半排进队列的东西没人认领。
+        crate::versions::落待落(vault, index, rel)?;
         index.index_file(&file, &content)?;
         index.rebuild_links_of_note(rel)?;
         // 这篇新写出来的链接里，可能有别人早就悬空指向它的
@@ -351,13 +378,18 @@ pub fn reindex_moved(vault: &Vault, index: &Index, rel: &str, new_rel: &str) -> 
     if rel == new_rel {
         return reindex_note(vault, index, new_rel);
     }
-    unindex(index, rel)?;
+    unindex(vault, index, rel)?;
+    // 版本历史跟着笔记一起搬：钥匙是路径，路径一换，历史就掉在旧路径上了。
+    crate::versions::搬家(index, rel, new_rel)?;
     reindex_note(vault, index, new_rel)
 }
 
 /// 把一篇从索引里摘掉，并把它人的入链退回悬空（不随 `ON DELETE CASCADE` 静默消失）。
-pub fn unindex(index: &Index, rel: &str) -> Result<()> {
+pub fn unindex(vault: &Vault, index: &Index, rel: &str) -> Result<()> {
     index.in_tx(|| {
+        // 快照要在 `notes` 行被删**之前**落：那一行是"这篇当时叫什么"的唯一来源。
+        // 落下来的版本本身不挂外键，所以删行之后它照样在（docs/02 §回收站的索引处理）。
+        crate::versions::落待落(vault, index, rel)?;
         index.break_incoming_links(rel)?;
         index.drop_note(rel)?;
         Ok(())
@@ -383,9 +415,20 @@ impl Hub {
         if index.count_notes()? == 0 {
             index.rebuild_all(&vault)?;
         }
+        // 后台那条连接先 fork 出来：版本历史的清理要**写库**（删行、删 blob），
+        // 而 GUI 里**主连接只读**——写一律走后台那条，前台那条一笔都不写。
+        let bg = index.fork()?;
+        // 版本历史的清理放在开库这一刻：那时没有前台命令在等，做点清理不占谁的 8ms。
+        // 失败只记日志——历史多了几条不影响别的功能，清理失败不该挡住开库。
+        if let Err(e) = crate::versions::清理(&bg, crate::versions::手工保留上限) {
+            tracing::warn!("清理版本历史失败：{e}");
+        }
+        if let Err(e) = crate::versions::清孤儿(&bg) {
+            tracing::warn!("清理版本残留失败：{e}");
+        }
         Ok(Self {
             vault,
-            bg: std::sync::Arc::new(std::sync::Mutex::new(index.fork()?)),
+            bg: std::sync::Arc::new(std::sync::Mutex::new(bg)),
             index,
             root: opened,
         })
@@ -505,11 +548,16 @@ impl Hub {
             .backup_dir_of()?
             .ok_or_else(|| Error::Invalid("还没配置备份目录".into()))?;
         let bytes = snapshot::read_file(&dir, id, rel)?;
-        if let Ok(current) = self.vault.read(rel) {
-            if current != bytes {
-                self.vault.keep_conflict(rel, &current)?;
+        // 恢复是覆盖动作，盘上现在那份要被换掉。前像照旧存一份——
+        // 不存的话"恢复之后再撤销"就没有落点了（`.note/conflicts/` 是另一条退路：
+        // 它留的是文件副本，不进版本历史，撤销那条路读不到它）。
+        let 当前 = self.vault.read(rel).ok();
+        if let Some(cur) = &当前 {
+            if cur.as_slice() != bytes.as_slice() {
+                self.vault.keep_conflict(rel, cur)?;
             }
         }
+        self.记前像(rel, crate::versions::手工, 当前);
         self.vault.write_atomic(rel, &bytes)
     }
 
@@ -622,15 +670,76 @@ impl Hub {
         expect_hash: Option<&str>,
     ) -> Result<String> {
         check_note_rel(rel)?;
+        // 前像：落盘**之前**盘上那一份。它一次读干两件事——冲突判定要读它，
+        // 版本快照要的也是它（docs/02 §写入与外部修改 的保存路径）。
+        let 前像 = self.读前像(rel, expect_hash)?;
+        self.记前像(rel, crate::versions::手工, 前像);
+        self.vault.write_atomic(rel, content.as_bytes())
+    }
+
+    /// 读落盘前盘上那一份（冲突判定与快照前像共用这一次读）。
+    ///
+    /// 读不出来就当"没有可比对的版本"：新文件本来就没有。冲突判定原先也是
+    /// 这么判的（`if let Ok(cur) = ...`），这里保持一致。
+    fn 读前像(&self, rel: &str, expect_hash: Option<&str>) -> Result<Option<Vec<u8>>> {
+        let Ok(bytes) = self.vault.read(rel) else {
+            return Ok(None);
+        };
         if let Some(want) = expect_hash {
-            // 新建的文件磁盘上没有旧版本，note_file 失败即"没有可比对的"，放行
-            if let Ok(cur) = self.vault.note_file(rel) {
-                if cur.content_hash != want {
-                    return Err(Error::Conflict(rel.to_string()));
-                }
+            if crate::hash::content_hash(&bytes) != want {
+                return Err(Error::Conflict(rel.to_string()));
             }
         }
-        self.vault.write_atomic(rel, content.as_bytes())
+        Ok(Some(bytes))
+    }
+
+    /// 记一条前像快照。
+    ///
+    /// **同步这一半只读盘、只排队**：blob 与行由后台那一半落（versions::落待落）。
+    /// 往 SQLite 写一行要跟后台那条连接抢写锁，而主锁被后台事务占住时前台
+    /// 任何一条命令都得排队——那是 3.26 秒那次事故的形状，不能在写路径上再买一次。
+    fn 记前像(&self, rel: &str, reason: &'static str, 前像: Option<Vec<u8>>) {
+        let Some(bytes) = 前像 else {
+            return; // 还没有这篇（新建），没有前像可记
+        };
+        self.index.推待落(crate::versions::待落 {
+            rel: rel.to_string(),
+            前像: bytes,
+            reason,
+            时刻: crate::versions::现在(),
+        });
+    }
+
+    /// 某一篇的版本历史（新的在前）。
+    pub fn note_versions(&self, rel: &str) -> Result<Vec<VersionRow>> {
+        let rel = rel.replace('\\', "/");
+        let 行 = crate::versions::列出(&self.index, &rel)?;
+        Ok(行.into_iter().map(|r| self.版本行转显示(r)).collect())
+    }
+
+    /// 某一版的正文。**读回来先核对 hash**：对不上就是坏档，宁可报错也不把
+    /// 半截内容当成用户的旧版本。
+    pub fn note_version_content(&self, rel: &str, id: i64) -> Result<String> {
+        let rel = rel.replace('\\', "/");
+        let 行 = crate::versions::列出(&self.index, &rel)?
+            .into_iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| Error::NotFound(format!("{rel} 的第 {id} 版")))?;
+        let bytes = crate::versions::读回(self.vault.root(), &行)?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    fn 版本行转显示(&self, r: crate::versions::版本行) -> VersionRow {
+        VersionRow {
+            id: r.id,
+            reason: r.reason,
+            content_hash: r.content_hash,
+            created_at: r.created_at,
+            created_at_text: 时刻文本(r.created_at),
+            size: std::fs::metadata(self.vault.root().join(&r.blob_path))
+                .map(|m| m.len() as usize)
+                .unwrap_or(0),
+        }
     }
 
     /// **后台那一半**：按磁盘现状重建这一篇的索引与链接。
@@ -727,6 +836,10 @@ impl Hub {
 
     /// **同步那一半**：把文件移进回收站。
     pub fn note_trash_file(&mut self, rel: &str) -> Result<()> {
+        // 删除前的原件：移走之后文件就在回收站的批次目录里了，路径变了，
+        // 前像要在这之前读（docs/02 §回收站的索引处理）。
+        let 前像 = self.读前像(rel, None)?;
+        self.记前像(rel, crate::versions::删除前, 前像);
         self.vault.move_to_trash(rel).map(|_| ())
     }
 
@@ -734,7 +847,7 @@ impl Hub {
     /// 直接删行会被 `ON DELETE CASCADE` 把入链一起带走，恢复时就没有
     /// "曾经指向它"的记录可接回来了。
     pub fn index_trashed(&mut self, rel: &str) -> Result<()> {
-        unindex(&self.index, rel)
+        unindex(self.vault(), &self.index, rel)
     }
 
     /// 移进回收站。文件本身还在（`.note/trash/`），所以这条操作不丢内容；

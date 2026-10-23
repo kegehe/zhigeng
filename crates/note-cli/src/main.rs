@@ -76,6 +76,16 @@ enum Cmd {
         #[arg(short, long, default_value_t = 20)]
         limit: usize,
     },
+    /// 某一篇的版本历史（撤销的落点在这里）
+    Versions {
+        /// Vault 根目录
+        path: PathBuf,
+        /// 库内相对路径（notes/甲.md）
+        rel: String,
+        /// 打印某一版的正文（配合上面列出的编号）
+        #[arg(long)]
+        show: Option<i64>,
+    },
     /// 性能基准：造 N 篇笔记，测扫描/重建/检索耗时（docs/03 §性能预算）
     Bench {
         #[arg(long, default_value_t = 5000)]
@@ -224,6 +234,7 @@ fn main() -> Result<()> {
         ),
         Cmd::Reindex { path, dry_run } => cmd_reindex(path, dry_run),
         Cmd::Search { path, query, limit } => cmd_search(path, &query, limit),
+        Cmd::Versions { path, rel, show } => cmd_versions(path, &rel, show),
         Cmd::Bench { notes, out } => cmd_bench(notes, out),
         Cmd::IpcBench { notes, iters } => cmd_ipc_bench(notes, iters),
         Cmd::Capture { path, text, bench } => cmd_capture(&path, text.as_deref(), bench),
@@ -444,6 +455,36 @@ fn cmd_search(path: PathBuf, query: &str, limit: usize) -> Result<()> {
         );
     }
     println!("{} 条命中", hits.len());
+    Ok(())
+}
+
+/// 版本历史。一条快照 = 一个**曾经存在过**的版本，也就是那次操作之前盘上的内容。
+///
+/// 所以第一遍存完历史还是空的（新文件没有前像），第二遍才把第一版记下来——
+/// 这不是漏记，是"前像"这条语义本身如此。
+fn cmd_versions(path: PathBuf, rel: &str, show: Option<i64>) -> Result<()> {
+    let hub = Hub::open(&path)?;
+    if let Some(id) = show {
+        let 正文 = hub.note_version_content(rel, id)?;
+        print!("{正文}");
+        return Ok(());
+    }
+    let 行 = hub.note_versions(rel)?;
+    if 行.is_empty() {
+        println!("{rel} 还没有版本历史");
+        return Ok(());
+    }
+    for r in &行 {
+        println!(
+            "#{:<4} {:<12} {:<7} {}  {}",
+            r.id,
+            r.reason,
+            format!("{} B", r.size),
+            r.created_at_text,
+            &r.content_hash[..8.min(r.content_hash.len())]
+        );
+    }
+    println!("{} 版", 行.len());
     Ok(())
 }
 

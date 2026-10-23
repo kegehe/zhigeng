@@ -685,7 +685,7 @@ fn 老库的两张链接表一起升级且版本号要记下来() {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-        "3",
+        "4",
         "迁移跑完没把版本号记下来，下次开库还要重跑"
     );
     assert_eq!(
@@ -700,7 +700,7 @@ fn 老库的两张链接表一起升级且版本号要记下来() {
     assert_eq!(入.len(), 1, "甲 → 乙 的入链要在");
     assert!(入[0].snippet.contains("链到"));
     assert!(出.is_empty());
-    // 再开一次：版本号已经是 3，不该再有迁移动作，数据也不能变
+    // 再开一次：版本号已经是 4，不该再有迁移动作，数据也不能变
     drop(idx);
     let idx = note_core::index::Index::open(&vault).unwrap();
     assert_eq!(
@@ -709,6 +709,71 @@ fn 老库的两张链接表一起升级且版本号要记下来() {
             .unwrap(),
         2
     );
+}
+
+/// v3 → v4：`note_versions` 换钥匙（path 代替 note_id、不挂外键），**而且必须保行**。
+///
+/// 迁移框架是"丢掉重算"，而版本不是能重算出来的东西——盘上早就没有那一版了。
+/// 所以这一档得把旧行搬到新表里，不能像链接表那样 drop 掉重算。
+#[test]
+fn 老库的版本表换钥匙但不丢行() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = note_core::vault::Vault::open(dir.path()).unwrap();
+    vault
+        .write_atomic(
+            "notes/甲.md",
+            "---\nid: n-old0001\ntitle: 甲\n---\n\n正文。\n".as_bytes(),
+        )
+        .unwrap();
+    {
+        let idx = note_core::index::Index::open(&vault).unwrap();
+        idx.rebuild_all(&vault).unwrap();
+        // 手工退回 v3：旧形状（挂外键、钥匙是 note_id），并塞一条旧行
+        idx.conn()
+            .execute_batch("DROP TABLE note_versions;")
+            .unwrap();
+        idx.conn()
+            .execute_batch(
+                "CREATE TABLE note_versions (
+                   id INTEGER PRIMARY KEY, note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+                   content_hash TEXT NOT NULL, blob_path TEXT NOT NULL,
+                   reason TEXT, created_at INTEGER NOT NULL,
+                   UNIQUE (note_id, content_hash));",
+            )
+            .unwrap();
+        idx.conn()
+            .execute(
+                "INSERT INTO note_versions(note_id,content_hash,blob_path,reason,created_at)
+                 VALUES('n-old0001','abc123','.note/versions/n-old0001/abc123','manual',1000)",
+                [],
+            )
+            .unwrap();
+        idx.conn()
+            .execute("UPDATE meta SET value='3' WHERE key='schema_version'", [])
+            .unwrap();
+    }
+    let idx = note_core::index::Index::open(&vault).unwrap();
+    // 行还在，而且 path 从 notes 表反查得到
+    let 行: (String, String, String) = idx
+        .conn()
+        .query_row(
+            "SELECT path,note_id,content_hash FROM note_versions WHERE content_hash='abc123'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(行.0, "notes/甲.md", "旧行的 path 该从 notes 表反查回来");
+    assert_eq!(行.1, "n-old0001");
+    assert_eq!(行.2, "abc123");
+    // 新表不再挂外键：笔记的行被删，版本行必须还在
+    idx.conn()
+        .execute("DELETE FROM notes WHERE id='n-old0001'", [])
+        .unwrap();
+    let 还在: i64 = idx
+        .conn()
+        .query_row("SELECT COUNT(*) FROM note_versions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(还在, 1, "版本活得比笔记久：notes 行删了它也得在");
 }
 
 #[test]
