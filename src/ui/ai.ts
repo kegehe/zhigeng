@@ -27,6 +27,14 @@ export function 可检索(v: Pick<AiView, "baseUrl" | "embeddingModel">): boolea
 }
 
 /**
+ * 问答 / 选区改写能不能走。只认地址与对话模型——嵌入模型是检索那一路的事。
+ * 与 `ai.rs` 的 `缺项` 同规则（那边把这两项算必填、嵌入留空是正常配置）。
+ */
+export function 可对话(v: Pick<AiView, "baseUrl" | "chatModel">): boolean {
+  return !!v.baseUrl.trim() && !!v.chatModel.trim();
+}
+
+/**
  * 侧栏底部那枚入口的角标。`测过` 是这一次会话里连通测试的结论（null = 还没测）。
  *
  * 为什么"测过"不持久化：重启之后还挂着"已连通"，说的其实是上一次开机时的事实。

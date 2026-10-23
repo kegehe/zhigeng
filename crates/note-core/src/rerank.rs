@@ -196,6 +196,8 @@ mod tests {
     fn 命(id: i64, 篇: &str, 摘: &str) -> 命中 {
         命中 {
             chunk_id: id,
+            block_id: format!("n-{id}#1"),
+            block_ordinal: 1,
             note_id: format!("n-{id}"),
             path: format!("notes/{篇}.md"),
             title: 篇.into(),

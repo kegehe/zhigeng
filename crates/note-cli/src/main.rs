@@ -122,7 +122,7 @@ enum Cmd {
         #[arg(long)]
         check_canonical: bool,
     },
-    /// 模型接入：嵌入落库与进度（问答、建议箱还没做）
+    /// 模型接入：嵌入落库、混合检索、带引用问答（建议箱属于 M3）
     Ai {
         path: PathBuf,
         #[command(subcommand)]

@@ -22,13 +22,15 @@ use crate::retrieve;
 use crate::vault::Vault;
 use crate::{Error, Result};
 
-/// 一条依据。`label` 是给模型看的那把短标签（K1、K2…），`block_id` 是还原成可点击链接
-/// 要的真 ID。字段名走英文：跨边界的 DTO 一律 camelCase（护栏第 5 条）。
+/// 一条依据。`label` 是给模型看的那把短标签（K1、K2…），`block_id` 是库内块键，
+/// `block_ordinal` 是顶层块序号（界面靠它定位并高亮）。字段名走英文：跨边界的 DTO
+/// 一律 camelCase（护栏第 5 条）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct 依据 {
     pub label: String,
     pub block_id: String,
+    pub block_ordinal: i64,
     pub path: String,
     pub title: String,
     pub crumb: String,
@@ -110,6 +112,8 @@ pub struct 答复 {
     pub candidates: usize,
     pub in_tokens: usize,
     pub out_tokens: usize,
+    /// 这一趟问答从检索开始到定稿的墙钟时间。**不是模型耗时**：检索与（可能发生的）
+    /// 重排都算在里面；被门拦下时它是"找过但没生成"的时间，不是 0。有没有打模型看 token。
     pub ms: u64,
     pub model: String,
 }
@@ -180,8 +184,28 @@ pub fn 最强依据(命中: &[retrieve::命中]) -> f64 {
     命中.iter().map(|h| h.evidence).fold(0.0_f64, f64::max)
 }
 
-/// 门拦下来时的那条答复。**一次模型都不打**，所以 token 与 ms 都是 0——
-/// 审计里看到 `in 0 / out 0` 就该知道是被门拦了，不是模型答的。
+/// 门读的那一截：与 `排依据` 取走的是同一截（前 `引用上限` 条）。
+/// 门扫全量会放行"第 9 条有依据、前 8 条都是弱相关"的问题——而那 8 条才是模型看到的。
+fn 门候选(命中: &[retrieve::命中]) -> &[retrieve::命中] {
+    &命中[..命中.len().min(引用上限)]
+}
+
+/// 预检之后再决定要不要花重排那一趟的钱。**重排只改顺序、不造依据**：
+/// 全量候选的最强覆盖率都没过线时，重排之后的前 8 条也不可能过线。
+/// 单独抽出来是为了能用假重排钉死"被预检拦下的问题一次重排都不跑"。
+fn 过预检(
+    初: retrieve::检索结果,
+    重排: impl FnOnce(retrieve::检索结果) -> retrieve::检索结果,
+) -> retrieve::检索结果 {
+    if 最强依据(&初.hits) < 依据下限 {
+        初
+    } else {
+        重排(初)
+    }
+}
+
+/// 门拦下来时的那条答复。**不会为了答案去打生成**；token 先记 0，
+/// 如果预检之后跑过重排，调用方会把那一趟的钱补上（它确实花过）。
 pub fn 无依据(问题: &str, 候选数: usize, 最强: f64) -> 答复 {
     答复 {
         text: if 候选数 == 0 {
@@ -317,7 +341,8 @@ pub fn 排依据(命中: &[retrieve::命中], 上限: usize) -> Vec<依据> {
         .enumerate()
         .map(|(i, h)| 依据 {
             label: format!("K{}", i + 1),
-            block_id: h.chunk_id.to_string(),
+            block_id: h.block_id.clone(),
+            block_ordinal: h.block_ordinal,
             path: h.path.clone(),
             title: h.title.clone(),
             crumb: if h.header_path.is_empty() {
@@ -361,13 +386,14 @@ pub fn ask(vault: &Vault, conn: &Connection, 问题: &str) -> Result<答复> {
 /// 引用完整性判定在返回前照旧跑完，所以流式不会把没采信的字段递出去。
 ///
 /// `播` 会收到两类东西：`事件::文本`（新增一截）与 `事件::重来`（第一次的答案被判违规，
-/// 屏幕上已经播出去的字要清掉）。**门在流之前**：依据不够时一个字都不会播，token 记 0。
+/// 屏幕上已经播出去的字要清掉）。**门在流之前**：依据不够时一个字都不会播，生成 token 记 0。
 pub fn ask流(
     vault: &Vault,
     conn: &Connection,
     问题: &str,
     播: &mut dyn FnMut(事件),
 ) -> Result<答复> {
+    let 起 = std::time::Instant::now();
     let cfg = crate::ai::load(vault)?;
     let 模型 = cfg
         .chat_model
@@ -377,11 +403,25 @@ pub fn ask流(
         .ok_or_else(|| {
             Error::Invalid("没填对话模型名。问答要有对话模型；嵌入模型只管检索那一路。".into())
         })?;
-    let 检索 = crate::retrieve::混合或退回(vault, conn, 问题)?;
-    // **拒答门在打模型之前**：候选里最强的覆盖率不到阈值，就一次网络都不发。
-    // 省的是钱，但更重要的是不给模型"没依据也要编一段"的机会——幻觉率 = 0 这条硬门，
-    // 到这一步才真正闭上：以前只闭住了"编出来的编号"，闭不住"有编号但不相干"。
-    let 最强 = 最强依据(&检索.hits);
+    // 检索先**不重排**：预检读全量候选，而重排只改顺序、不造依据——全量最强都没过线时，
+    // 重排之后的前 8 条也不可能过线。先拦下，这一问一次重排的钱都不花。
+    let 初 = retrieve::检索(
+        vault,
+        conn,
+        问题,
+        retrieve::跑法 {
+            重排: Some(false),
+            ..retrieve::常规
+        },
+    )?;
+    // 预检过了才值得花重排那一趟。**正门读的是重排后的前 `引用上限` 条**，与
+    // `排依据` 送进模型的是同一截：门继续扫全量，就会放行"第 9 条有依据、前 8 条都弱"
+    // 的问题——模型看到的那一截里根本没有依据。
+    let 检索 = 过预检(初, |初| {
+        retrieve::补重排(&cfg, 初, 问题, retrieve::常规)
+    });
+    let 门 = 门候选(&检索.hits);
+    let 最强 = 最强依据(门);
     let 拦了 = 最强 < 依据下限;
     let 依据 = if 拦了 {
         Vec::new()
@@ -389,23 +429,23 @@ pub fn ask流(
         排依据(&检索.hits, 引用上限)
     };
     let mut 答复 = if 拦了 {
-        无依据(问题, 检索.hits.len(), 最强)
+        无依据(问题, 门.len(), 最强)
     } else {
         let mut 发问者 = 真发问 { cfg: &cfg };
         生成与播(&依据, 问题, &mut 发问者, 播)?
     };
-    // 重排那一趟的钱要并进同一笔账：用户看到的是"这次问 AI 花了多少"，
-    // 把重排的 token 丢掉等于账面上少一笔真实支出。被门拦下时那两个数本来就是 0
-    // （门在检索之后、发问之前，而重排发生在检索内部——拦下了就不会有重排的钱）
+    // 重排那一趟的钱与时间要并进同一笔账：用户看到的是"这次问 AI 花了多少"。
+    // 被预检拦下时这两个数就是 0；预检过了、正门才拦下时重排确实花过钱，必须留着。
     答复.in_tokens += 检索.rerank_in;
     答复.out_tokens += 检索.rerank_out;
+    // 整趟墙钟：检索、重排、生成（含重试）都算。它不是模型耗时——那要看 token。
+    答复.ms = 起.elapsed().as_millis() as u64;
     答复.model = 模型.to_string();
     let 记 = 落审计 {
         conn,
         模型: 模型.to_string(),
-        // 审计里的"候选"与界面那句「引用 x/y」的 y 是同一个数：被门拦下时它是检索
-        // 实际返回的条数（有候选但都不够依据），不是 0——写成 0 会把"拦下来了"与
-        // "什么都没搜到"混成同一笔账
+        // 审计里的"候选"与界面那句「引用 x/y」的 y 是同一个数：门看的就是这前 8 条，
+        // 不把检索返回的全量写进来。被门拦下时它也不是 0——"有候选但都不够依据"。
         候选: 答复.candidates,
         语义路: 检索.semantic,
         图路: 检索.graph,
@@ -548,6 +588,7 @@ mod tests {
             .map(|i| 依据 {
                 label: format!("K{}", i + 1),
                 block_id: format!("9{i}"),
+                block_ordinal: i as i64 + 1,
                 path: format!("notes/甲{i}.md"),
                 title: format!("甲{i}"),
                 crumb: format!("甲{i} > 节"),
@@ -760,6 +801,8 @@ mod tests {
     fn 最强依据看的是最强那条而不是第一名() {
         let 造 = |e: f64| retrieve::命中 {
             chunk_id: 1,
+            block_id: "n-1#1".into(),
+            block_ordinal: 1,
             note_id: "n-1".into(),
             path: "notes/甲.md".into(),
             title: "甲".into(),
@@ -786,6 +829,8 @@ mod tests {
     fn 只有链接命中时门拦下来() {
         let 一条 = retrieve::命中 {
             chunk_id: 3,
+            block_id: "n-3#1".into(),
+            block_ordinal: 1,
             note_id: "n-3".into(),
             path: "notes/读完一句.md".into(),
             title: "读完一句".into(),
@@ -798,6 +843,81 @@ mod tests {
             similarity: 0.0,
         };
         assert!(最强依据(&[一条]) < 依据下限);
+    }
+
+    /// 门与上下文必须读同一截。第 9 条再有依据也没用——模型只看到前 8 条。
+    #[test]
+    fn 门只看送进模型的那八条() {
+        let 造 = |e: f64| retrieve::命中 {
+            chunk_id: 1,
+            block_id: "n-1#1".into(),
+            block_ordinal: 1,
+            note_id: "n-1".into(),
+            path: "notes/甲.md".into(),
+            title: "甲".into(),
+            header_path: String::new(),
+            snippet: "正文".into(),
+            status: "active".into(),
+            from: vec![retrieve::路::Keyword],
+            rrf: 0.0164,
+            evidence: e,
+            similarity: 0.0,
+        };
+        let mut 列: Vec<retrieve::命中> = (0..引用上限).map(|_| 造(0.1)).collect();
+        列.push(造(0.75));
+        assert!(
+            最强依据(&列) >= 依据下限,
+            "全量预检会放行——所以预检不能当正门"
+        );
+        assert!(
+            最强依据(门候选(&列)) < 依据下限,
+            "正门只读前 8 条，必须拦下：第 9 条再强也送不进模型"
+        );
+    }
+
+    /// 预检拦下的问题一次重排都不跑：重排只改顺序、不造依据，不值得为一个已经
+    /// 注定拒答的问题花那趟钱。预检过了才把结果交给重排。
+    #[test]
+    fn 预检拦下就不跑重排() {
+        let 造 = |e: f64| retrieve::命中 {
+            chunk_id: 1,
+            block_id: "n-1#1".into(),
+            block_ordinal: 1,
+            note_id: "n-1".into(),
+            path: "notes/甲.md".into(),
+            title: "甲".into(),
+            header_path: String::new(),
+            snippet: "正文".into(),
+            status: "active".into(),
+            from: vec![retrieve::路::Keyword],
+            rrf: 0.0164,
+            evidence: e,
+            similarity: 0.0,
+        };
+        let 初 = |e: f64| retrieve::检索结果 {
+            hits: vec![造(e)],
+            semantic: false,
+            graph: true,
+            reranked: false,
+            rerank_in: 0,
+            rerank_out: 0,
+            hint: None,
+        };
+
+        let mut 跑过 = false;
+        let 出 = 过预检(初(0.0), |r| {
+            跑过 = true;
+            r
+        });
+        assert!(!跑过, "全量最强都没过线，重排一次都不该跑");
+        assert_eq!(出.rerank_in + 出.rerank_out, 0);
+
+        let mut 跑过 = false;
+        let _ = 过预检(初(0.75), |r| {
+            跑过 = true;
+            r
+        });
+        assert!(跑过, "预检过了才值得花重排的钱");
     }
 
     #[test]
@@ -960,6 +1080,8 @@ mod tests {
         let 命中: Vec<retrieve::命中> = (0..12)
             .map(|i| retrieve::命中 {
                 chunk_id: i,
+                block_id: format!("n{i}#1"),
+                block_ordinal: 1,
                 note_id: format!("n{i}"),
                 path: format!("notes/{i}.md"),
                 title: format!("篇{i}"),

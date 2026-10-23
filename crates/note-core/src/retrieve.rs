@@ -97,7 +97,13 @@ pub fn 开了的(语义: bool, 图: bool) -> Vec<路> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct 命中 {
+    /// 切片行号。**不是块 ID**——它只用来在 `chunks` 表里找这一行
     pub chunk_id: i64,
+    /// 切片起点块的**库内键**（`<note_id>#<锚点或序号>`）。块 ID 以这里为准
+    pub block_id: String,
+    /// 起点块在**顶层块**里的 1-based 序号。编辑器只装载顶层块，引用定位按它走；
+    /// 索引里的 `blocks.ordinal` 是全树前序（含嵌套子块），不能直接拿来当编辑器序号
+    pub block_ordinal: i64,
     pub note_id: String,
     pub path: String,
     pub title: String,
@@ -541,8 +547,14 @@ pub fn 取详情(
     let mut 出 = Vec::new();
     for (id, s, 路) in 排好 {
         let 行 = conn.query_row(
-            "SELECT c.note_id, n.path, n.title, COALESCE(c.header_path,''), c.text, n.status
-             FROM chunks c JOIN notes n ON n.id = c.note_id WHERE c.id=?1",
+            "SELECT c.note_id, n.path, n.title, COALESCE(c.header_path,''), c.text, n.status,
+                    c.start_block,
+                    (SELECT COUNT(*) FROM blocks b2
+                      WHERE b2.note_id = c.note_id AND b2.parent_id IS NULL AND b2.ordinal <= sb.ordinal)
+             FROM chunks c
+             JOIN notes n ON n.id = c.note_id
+             JOIN blocks sb ON sb.id = c.start_block
+             WHERE c.id=?1",
             [id],
             |r: &Row| {
                 Ok((
@@ -552,16 +564,20 @@ pub fn 取详情(
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, i64>(7)?,
                 ))
             },
         );
         match 行 {
-            Ok((note_id, path, title, header_path, 全文, status)) => {
+            Ok((note_id, path, title, header_path, 全文, status, block_id, block_ordinal)) => {
                 let 覆盖 = 覆盖率(查询词, &全文);
                 let 语义 = 相似度.get(id).copied().unwrap_or(0.0);
                 let 摘: String = 全文.chars().take(160).collect();
                 出.push(命中 {
                     chunk_id: *id,
+                    block_id,
+                    block_ordinal,
                     note_id,
                     path,
                     title,
@@ -714,13 +730,42 @@ fn 跑一趟(
         });
     }
     let 排 = 合并(&关键, &语列, &图, 每篇配额, 每路配额);
-    let 词 = 查询词(conn, "chunks_fts", "chunks", query).unwrap_or_default();
     let 详情 = 取详情(conn, &排, &词, &相似度)?;
-    let (详情, 重排过, 重进, 重出) = 重排这一趟(&cfg, 法, query, 详情, &mut 提示);
-    Ok(检索结果 {
+    let 结果 = 检索结果 {
         hits: 详情,
         semantic: 语义开,
         graph: 法.开图,
+        reranked: false,
+        rerank_in: 0,
+        rerank_out: 0,
+        hint: if 提示.is_empty() {
+            None
+        } else {
+            Some(提示.join(" "))
+        },
+    };
+    Ok(补重排(&cfg, 结果, query, 法))
+}
+
+/// 在已经取好详情的检索结果上补做重排。界面的搜索在 `跑一趟` 里一路做完；
+/// 问答路径要先拿**没重排**的顺序过预检门，只有预检过了才值得花这一趟的钱。
+/// 配置由调用方传进来：问答那一趟本来就已经为对话模型加载过同一份配置。
+pub fn 补重排(
+    cfg: &crate::ai::AiConfig, 结果: 检索结果, 问题: &str, 法: 跑法
+) -> 检索结果 {
+    let 检索结果 {
+        hits,
+        hint,
+        semantic,
+        graph,
+        ..
+    } = 结果;
+    let mut 提示: Vec<String> = hint.into_iter().collect();
+    let (hits, 重排过, 重进, 重出) = 重排这一趟(cfg, 法, 问题, hits, &mut 提示);
+    检索结果 {
+        hits,
+        semantic,
+        graph,
         reranked: 重排过,
         rerank_in: 重进,
         rerank_out: 重出,
@@ -729,7 +774,7 @@ fn 跑一趟(
         } else {
             Some(提示.join(" "))
         },
-    })
+    }
 }
 
 /// 重排那一趟：开关来自配置（**默认关**，那是每次搜索一次付费），`法.重排` 只给 CLI 对照档用。
@@ -1112,6 +1157,36 @@ mod tests {
             "空表回空，不是错"
         );
         let _ = 表;
+    }
+
+    #[test]
+    fn 块序号是顶层序号而不是全树序号() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::schema::SCHEMA).unwrap();
+        conn.execute(
+            "INSERT INTO notes(id,path,title,content_hash) VALUES('n-top','notes/top.md','顶层','h')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO blocks(id,note_id,parent_id,ordinal,type,markdown) VALUES
+               ('n-top#1','n-top',NULL,1,'heading','# 标题'),
+               ('n-top#2','n-top',NULL,2,'bullet','- 甲'),
+               ('n-top#3','n-top','n-top#2',3,'bullet','- 子'),
+               ('n-top#4','n-top',NULL,4,'paragraph','尾');
+             INSERT INTO chunks(id,note_id,start_block,end_block,text,source_hash)
+               VALUES(7,'n-top','n-top#4','n-top#4','尾','h');",
+        )
+        .unwrap();
+
+        let 排 = vec![(7, 1.0, vec![路::Keyword])];
+        let 相似 = std::collections::BTreeMap::new();
+        let 详 = 取详情(&conn, &排, &[], &相似).unwrap();
+        assert_eq!(详[0].block_id, "n-top#4");
+        assert_eq!(
+            详[0].block_ordinal, 3,
+            "嵌套子块占全树 ordinal 3，但它在编辑器里是第 2 块；顶层尾块才是第 3"
+        );
     }
 
     /// 端到端（不打网络）：真索引一篇 → 关键词路能命中 → 手工塞向量 → 语义路能命中 →

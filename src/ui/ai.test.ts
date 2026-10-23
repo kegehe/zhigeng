@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
-import { 可检索, 徽标, 徽标红, 缺项, 步骤名, 探针数, 探针结论 } from "./ai";
+import { 可对话, 可检索, 徽标, 徽标红, 缺项, 步骤名, 探针数, 探针结论 } from "./ai";
 
 const 齐 = { baseUrl: "https://api.example.com/v1", chatModel: "gpt-x", embeddingModel: "emb-1" };
 
@@ -81,6 +81,18 @@ describe("语义那一路的门槛", () => {
   it("缺地址或缺嵌入模型就不打那一趟", () => {
     expect(可检索({ baseUrl: "", embeddingModel: "e" })).toBe(false);
     expect(可检索({ baseUrl: "http://x/v1", embeddingModel: "   " })).toBe(false);
+  });
+});
+
+describe("文档里那枚 AI 按钮的门槛", () => {
+  it("地址与对话模型都填了才放开", () => {
+    expect(可对话({ baseUrl: "http://x/v1", chatModel: "m" })).toBe(true);
+    expect(可对话({ baseUrl: "", chatModel: "m" })).toBe(false);
+    expect(可对话({ baseUrl: "http://x/v1", chatModel: "   " })).toBe(false);
+  });
+
+  it("只有嵌入模型不算能改写：那只管检索那一路", () => {
+    expect(可对话({ baseUrl: "http://x/v1", chatModel: "" })).toBe(false);
   });
 });
 

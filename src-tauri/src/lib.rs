@@ -840,6 +840,55 @@ async fn chat_ask(
     })?
 }
 
+/// 文档内选区改写：只把选中的那一段与一条要求发出去，回稿先预览、用户点替换才落盘。
+///
+/// 与问答同一条纪律：**可能一次网络往返，所以在锁外、用分叉连接干活**；`ai_runs`
+/// 由 note-core 落（失败那趟也落）。`ai://rewrite-token` / `ai://rewrite-think`
+/// 带 `runId` 回来，界面靠它丢掉上一次剩下的字。
+#[tauri::command]
+async fn ai_rewrite(
+    app: AppHandle,
+    state: State<'_, Shared>,
+    text: String,
+    instruction: String,
+    preset: String,
+    run_id: u64,
+) -> Result<note_core::rewrite::改写, WriteErr> {
+    let (vault, 派生) = {
+        let guard = state.0.lock().map_err(werr_io)?;
+        let hub = guard.as_ref().ok_or_else(|| WriteErr {
+            kind: "error",
+            message: "尚未选择 Vault".into(),
+        })?;
+        (hub.vault().clone(), hub.indexer())
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let 专 = {
+            let 写锁 = 派生.lock().map_err(|_| WriteErr {
+                kind: "error",
+                message: "索引那条连接被毒化，改不了".into(),
+            })?;
+            写锁.fork().map_err(werr)?
+        };
+        note_core::rewrite::改写流(&vault, 专.conn(), &text, &instruction, &preset, &mut |e| {
+            match e {
+                note_core::rewrite::事件::文本(字) => {
+                    let _ = app.emit("ai://rewrite-token", 播块 { run_id, text: 字 });
+                }
+                note_core::rewrite::事件::思考(字) => {
+                    let _ = app.emit("ai://rewrite-think", 播块 { run_id, text: 字 });
+                }
+            }
+        })
+        .map_err(werr)
+    })
+    .await
+    .map_err(|e| WriteErr {
+        kind: "error",
+        message: e.to_string(),
+    })?
+}
+
 /// 审计页：最近的生成记录（含未采纳的那几次）。
 #[tauri::command]
 fn ai_runs(
@@ -919,6 +968,7 @@ pub fn run() {
             ai_discover,
             search_hybrid,
             chat_ask,
+            ai_rewrite,
             ai_runs
         ])
         .setup(|app| {

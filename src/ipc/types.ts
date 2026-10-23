@@ -183,6 +183,10 @@ export type AiDiscovery = { all: string[]; embedCandidates: string[]; ms: number
 /** 混合检索的一条命中。`from` 说的是这一条被哪几路捞上来——两路都中是最强的信号 */
 export type HybridHit = {
   chunkId: number;
+  /** 切片起点块的库内键。**不是** `chunkId`——后者只是 `chunks` 表的行号 */
+  blockId: string;
+  /** 起点块在顶层块里的 1-based 序号，正文定位用 */
+  blockOrdinal: number;
   noteId: string;
   path: string;
   title: string;
@@ -223,7 +227,10 @@ export type HybridResult = {
 /** 一条可点击的引用。label 是给模型看的编号，path 才是能打开的东西 */
 export type Citation = {
   label: string;
+  /** 库内块键（`<note id>#<锚点或序号>`），不是切片行号 */
   blockId: string;
+  /** 原块在顶层块里的 1-based 序号；点引用后按它定位并高亮 */
+  blockOrdinal: number;
   path: string;
   title: string;
   crumb: string;
@@ -237,6 +244,18 @@ export type Answer = {
   insufficient: boolean;
   retried: boolean;
   candidates: number;
+  inTokens: number;
+  outTokens: number;
+  ms: number;
+  model: string;
+};
+
+/**
+ * 一次选区改写的结果。`text` 是**已经洗过、可直接替换**的那一段（围栏剥掉、多行拒收）。
+ * 流式过程中界面收到的是模型原文，定稿以这个字段为准。
+ */
+export type RewriteResult = {
+  text: string;
   inTokens: number;
   outTokens: number;
   ms: number;

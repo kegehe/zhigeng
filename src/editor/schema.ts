@@ -28,6 +28,7 @@ import { api, describeError, 资产地址 } from "../ipc/commands";
 import { 批量, TableSelect } from "./tableSelectPlugin";
 import { 拼开栏, 拆开栏, 围栏行of } from "./fence";
 import { 短写, 已识别, 语言清单, 语言of, 着色区间, 识别 } from "./highlight";
+import { 引用高亮扩展 } from "./citeFocus";
 import { mightRender, renderOpaque } from "./render";
 
 /**
@@ -1950,5 +1951,6 @@ export const mdExtensions = [
   CodeHighlight,
   FocusIndicator,
   OpaqueFace,
+  引用高亮扩展,
   History,
 ];

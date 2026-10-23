@@ -679,7 +679,7 @@ pub fn chat(cfg: &AiConfig, 系统: &str, 内容: &str) -> Result<(String, 用�
     let mut 体 = 请求体(cfg, 系统, 内容);
     体["stream"] = serde_json::Value::Bool(false);
     let 基 = 基址(cfg)?;
-    let 答 = 认状态(发一次(cfg, &体)?, &基)?;
+    let 答 = 认状态(发一次(cfg, &体, false)?, &基)?;
     解chat回包(&答.text().unwrap_or_default())
 }
 
@@ -697,7 +697,7 @@ pub fn chat流(
     每块: &mut dyn FnMut(流),
 ) -> Result<(String, 用量)> {
     let 基 = 基址(cfg)?;
-    let 答 = 认状态(发一次(cfg, &流式请求体(cfg, 系统, 内容))?, &基)?;
+    let 答 = 认状态(发一次(cfg, &流式请求体(cfg, 系统, 内容), true)?, &基)?;
     let 流 = 答
         .headers()
         .get("content-type")
@@ -711,12 +711,41 @@ pub fn chat流(
         每块(流::答案(全文.clone()));
         return Ok((全文, 量));
     }
-    use std::io::BufRead;
+    let mut 读 = std::io::BufReader::new(答);
+    let (全文, 量, 想了, 见到结束) = 收流(&mut 读, 每块)?;
+    if 全文.trim().is_empty() && 想了 == 0 {
+        // **一个字都没收到 = 对方多半根本不支持 stream**（真机照出来的：这家网关会在流中途
+        // 直接 reset 连接）。这时用非流式再问一次——用户要的是答案，不是我们的实现偏好。
+        // 代价说清楚：首字时间没了。日志必须留一条，别让它变成"悄悄退回另一条路"
+        tracing::warn!("流式一个字节都没收到，退回非流式再问一次（首字时间会没有）");
+        let (全文, 量) = chat(cfg, 系统, 内容)?;
+        每块(流::答案(全文.clone()));
+        return Ok((全文, 量));
+    }
+    if 全文.trim().is_empty() {
+        // 只回了思考过程 = 被截断或对方把答案吞了。这种**不**自动重试：
+        // 它已经想了那么久，再打一趟是双倍的钱与双倍的等待，交回用户决定
+        return Err(Error::Invalid(format!(
+            "对方只回了思考过程（{想了} 字），没有答案——多半是被超时截断了。试着把问题问短一点，或在设置里换一家更快的模型"
+        )));
+    }
+    if let Some(错) = 缺收尾(&全文, 想了, 见到结束) {
+        return Err(Error::Invalid(错));
+    }
+    Ok((全文, 量))
+}
+
+/// 把一条 SSE 流读到 EOF 或 `[DONE]`。**EOF 不在这里判完整**：正常收尾与半路断开
+/// 在 `read_line` 眼里都是 0，区别只在 `见到结束`——交给 `缺收尾` 判。
+fn 收流(
+    读: &mut impl std::io::BufRead,
+    每块: &mut dyn FnMut(流),
+) -> Result<(String, 用量, usize, bool)> {
     let mut 全文 = String::new();
     let mut 想了 = 0usize;
     let mut 量 = 用量::default();
+    let mut 见到结束 = false;
     let mut 行 = String::new();
-    let mut 读 = std::io::BufReader::new(答);
     loop {
         行.clear();
         let 读了 = 读
@@ -735,31 +764,31 @@ pub fn chat流(
                 每块(流::思考(t));
             }
             流块::用量(u) => 量 = u,
-            流块::结束 => break,
+            流块::结束 => {
+                见到结束 = true;
+                break;
+            }
             流块::忽略 => {}
         }
     }
-    if 全文.trim().is_empty() && 想了 == 0 {
-        // **一个字都没收到 = 对方多半根本不支持 stream**（真机照出来的：这家网关会在流中途
-        // 直接 reset 连接）。这时用非流式再问一次——用户要的是答案，不是我们的实现偏好。
-        // 代价说清楚：首字时间没了。日志必须留一条，别让它变成"悄悄退回另一条路"
-        tracing::warn!("流式一个字节都没收到，退回非流式再问一次（首字时间会没有）");
-        let (全文, 量) = chat(cfg, 系统, 内容)?;
-        每块(流::答案(全文.clone()));
-        return Ok((全文, 量));
+    Ok((全文, 量, 想了, 见到结束))
+}
+
+/// 有字但没收到 `[DONE]`：这是半路断开的流，不是完整答案。
+/// 已收到的字可能正少在引用之前，不能交给幻觉门——门只查编号，查不出半句话被截断。
+fn 缺收尾(全文: &str, 想了: usize, 见到结束: bool) -> Option<String> {
+    if 见到结束 || 全文.trim().is_empty() {
+        return None;
     }
-    if 全文.trim().is_empty() {
-        // 只回了思考过程 = 被截断或对方把答案吞了。这种**不**自动重试：
-        // 它已经想了那么久，再打一趟是双倍的钱与双倍的等待，交回用户决定
-        return Err(Error::Invalid(if 想了 > 0 {
-            format!(
-                "对方只回了思考过程（{想了} 字），没有答案——多半是被超时截断了。试着把问题问短一点，或在设置里换一家更快的模型"
-            )
+    Some(format!(
+        "流式回包没收到 [DONE] 就断了（已收到 {} 字{}）——这条答案不完整，没有采信。",
+        全文.chars().count(),
+        if 想了 > 0 {
+            format!("，另有 {想了} 字思考")
         } else {
-            "流式回包里一个字都没有（对方可能不支持 stream，或中途断了）".into()
-        }));
-    }
-    Ok((全文, 量))
+            String::new()
+        }
+    ))
 }
 
 /// 一行 SSE。`data: {...}` / `data: [DONE]` / 注释行 / 心跳空行。
@@ -855,7 +884,14 @@ fn 流式请求体(cfg: &AiConfig, 系统: &str, 内容: &str) -> serde_json::Va
 
 /// 建请求、带上 Key、发出去。**chat 与 chat流 共用这一份**——两条路各写一遍请求头，
 /// 早晚一条改了另一条没改（Key 那条尤其：漏了就是"配了却 401"）。
-fn 发一次(cfg: &AiConfig, 体: &serde_json::Value) -> Result<reqwest::blocking::Response> {
+///
+/// `流式` 只决定超时口径：180 秒那条只给真正的 SSE；非流式的问答与重排必须回到 20 秒，
+/// 否则一次挂住的重排能让搜索干等三分钟（docs/03 §后端调用纪律）。
+fn 发一次(
+    cfg: &AiConfig,
+    体: &serde_json::Value,
+    流式: bool,
+) -> Result<reqwest::blocking::Response> {
     // 没填模型名就别发：这条原先在 `chat` 里，挪到这里是因为 `chat流` 也得有同样的拦截
     cfg.chat_model
         .as_deref()
@@ -863,7 +899,12 @@ fn 发一次(cfg: &AiConfig, 体: &serde_json::Value) -> Result<reqwest::blockin
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Invalid("没填对话模型名".into()))?;
     let url = 地址(cfg)?;
-    let 客 = 流式客户端().map_err(|e| Error::Invalid(format!("建不出 HTTP 客户端：{e}")))?;
+    let 客 = if 流式 {
+        流式客户端()
+    } else {
+        客户端()
+    }
+    .map_err(|e| Error::Invalid(format!("建不出 HTTP 客户端：{e}")))?;
     let 请 = 客.post(&url).json(体);
     let 请 = match 钥() {
         Some(k) => 请.header("authorization", format!("Bearer {k}")),
@@ -967,6 +1008,37 @@ mod tests {
         }
         // 坏 JSON 不许 panic，也不许当成内容
         assert!(matches!(解流行("data: {不是 json"), 块::忽略));
+    }
+
+    /// EOF 与 `[DONE]` 在 `read_line` 眼里都是 0，区别只能靠这个布尔。半路断掉的流
+    /// 可能正少在引用之前，不能当完整答案——幻觉门只查编号，查不出半句话被截断。
+    #[test]
+    fn 读到done才算流收完() {
+        let 收 = |文: &str| {
+            let mut 出 = Vec::new();
+            let (全, _, 想, 见) = 收流(&mut std::io::Cursor::new(文), &mut |b| 出.push(b)).unwrap();
+            (全, 想, 见, 出)
+        };
+        let (全, _, 见, 出) = 收(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"甲\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n",
+        );
+        assert_eq!(全, "甲");
+        assert!(见, "收到 [DONE] 才算收尾");
+        assert_eq!(出, vec![流::答案("甲".into())]);
+
+        let (全, _, 见, _) = 收("data: {\"choices\":[{\"delta\":{\"content\":\"甲\"}}]}\r\n\r\n");
+        assert_eq!(全, "甲", "断之前收到的字照样要播出去");
+        assert!(!见, "读到 EOF 不等于收到 [DONE]");
+    }
+
+    #[test]
+    fn 没收到done的流不算完整答案() {
+        let 错 = 缺收尾("半句", 0, false).expect("没收到 [DONE] 必须报");
+        assert!(错.contains("[DONE]"), "{错}");
+        assert!(错.contains("没有采信"), "要把结论说清：{错}");
+        assert!(缺收尾("半句", 0, true).is_none(), "正常收尾不该报");
+        assert!(缺收尾("", 0, false).is_none(), "零字归上一条分支");
+        assert!(缺收尾("", 12, false).is_none(), "只有思考也归上一条分支");
     }
 
     #[test]

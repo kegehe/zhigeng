@@ -13,6 +13,7 @@ import {
   Quote,
   Redo2,
   RemoveFormatting,
+  Sparkles,
   Strikethrough,
   Table,
   Undo2,
@@ -33,6 +34,7 @@ export type 图标名 =
   | "strike"
   | "code"
   | "link"
+  | "ai"
   | "clear"
   | "divider"
   | "quote"
@@ -136,6 +138,7 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   strike: Strikethrough,
   code: Code,
   link: Link2,
+  ai: Sparkles,
   clear: RemoveFormatting,
   divider: Minus,
   quote: Quote,

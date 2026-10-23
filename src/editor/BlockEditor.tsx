@@ -19,6 +19,9 @@ import {
 import { 归一 } from "./tableSelect";
 import { 改选区, 定锚点, 矩形of, 选区of } from "./tableSelectPlugin";
 import { mdExtensions } from "./schema";
+import { 就绪后标出 } from "./citeFocus";
+import { RewritePanel } from "./RewritePanel";
+import { 取选段 } from "./rewrite";
 import { 工具图标, type 图标名 } from "./icons";
 import { LinkEditor, Toolbar } from "./Toolbar";
 
@@ -53,6 +56,8 @@ export function BlockEditor({
   onEditStart,
   onNotice,
   editApi,
+  focusBlock,
+  aiReady = false,
 }: {
   doc: EditDoc;
   editable: boolean;
@@ -62,6 +67,10 @@ export function BlockEditor({
   /** 编辑器里发生了一件"什么都没改成"的事（粘的文件不是图片、图存不下）。界面上要说一句 */
   onNotice?: (文本: string) => void;
   editApi: RefObject<(() => string) | null>;
+  /** 引用落点：顶层块序号 + 每次点击递增的 nonce（同一块再点一次也要重新滚） */
+  focusBlock?: { ordinal: number; nonce: number } | null;
+  /** 对话模型配好了没有（地址 + 对话模型）。没配时 AI 按钮点了只说下一步，不发请求 */
+  aiReady?: boolean;
 }) {
   // **必须 memo 住**：这是整篇的行内解析，写成 `content: docToJson(doc)` 的话每次渲染都
   // 重新算一遍——CPU profile 实测 3000 块下每次击键 38ms 全花在 parseInline 上。
@@ -89,6 +98,8 @@ export function BlockEditor({
   const [drop, setDrop] = useState<{ top: number; index: number } | null>(null);
   const dropRef = useRef<{ top: number; index: number } | null>(null);
   const [linking, setLinking] = useState(false);
+  /** 选区改写浮层。位置在打开那一刻固定——输入框一拿焦点，正文选区就不在 DOM 里了 */
+  const [ai面板, setAi面板] = useState<{ top: number; left: number } | null>(null);
 
   const editor = useEditor({
     extensions: mdExtensions,
@@ -108,6 +119,11 @@ export function BlockEditor({
     editableRef.current = editable;
     if (editor && editor.isEditable !== editable) editor.setEditable(editable);
   }, [editor, editable]);
+
+  useEffect(() => {
+    if (!editor || !focusBlock) return;
+    return 就绪后标出(editor, focusBlock.ordinal);
+  }, [editor, focusBlock]);
 
   useEffect(() => {
     if (!editor) return;
@@ -503,7 +519,7 @@ export function BlockEditor({
           // 浮层不能抢走正文焦点：焦点一走选区就空，工具条自己就消失了
           onMouseDown={(e) => e.preventDefault()}
           role="toolbar"
-          aria-label="选区格式"
+          aria-label="选区工具"
         >
           {MARKS.map((m) => {
             const Icon = 工具图标[m.图];
@@ -543,7 +559,49 @@ export function BlockEditor({
             // 另一处没改，链接就会吃掉或漏掉半个词
             <LinkEditor editor={editor} onDone={() => setLinking(false)} />
           ) : null}
+          {/*
+            文档内的 AI 入口。**只对"一段里的文字"开口**：跨块 / 整块 / 含换行的选区
+            会先把原因说出来，不把按钮灰掉让人猜。没配模型时也不装死——那句下一步
+            比一个点了没反应的图标有用。
+          */}
+          <button
+            type="button"
+            className="ai ml-1"
+            title="AI 改写选中文字"
+            aria-label="AI 改写选中文字"
+            onClick={() => {
+              if (!aiReady) {
+                noticeRef.current?.(
+                  "先在左下角「AI」里填好接口地址与对话模型",
+                );
+                return;
+              }
+              const r = 取选段(editor.state);
+              if (!r.ok) {
+                noticeRef.current?.(r.why);
+                return;
+              }
+              const 宿主宽 = wrap.current?.clientWidth ?? 0;
+              const 左 = Math.max(
+                8,
+                Math.min(sel.left - 192, Math.max(8, 宿主宽 - 400)),
+              );
+              setLinking(false);
+              setAi面板({ top: sel.top + 42, left: 左 });
+            }}
+          >
+            <工具图标.ai />
+          </button>
         </div>
+      ) : null}
+      {ai面板 ? (
+        <RewritePanel
+          editor={editor}
+          top={ai面板.top}
+          left={ai面板.left}
+          onClose={() => setAi面板(null)}
+          onNotice={(文) => noticeRef.current?.(文)}
+        />
       ) : null}
       {hover && !drop ? (
         <div

@@ -21,7 +21,7 @@ import {
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
-import { 徽标, 徽标红, 可检索, 缺项, 步骤名, 探针结论 } from "./ui/ai";
+import { 徽标, 徽标红, 可对话, 可检索, 缺项, 步骤名, 探针结论 } from "./ui/ai";
 import { 来源徽章, 走了那句, 面板标题 } from "./ui/search";
 import {
   buildTree,
@@ -77,6 +77,8 @@ type Mode =
   | "ask";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
+/** 引用落点。nonce 让"同一块再点一次"也能重新滚动，而不是因为值没变被 React 忽略 */
+type 块定位 = { ordinal: number; nonce: number };
 
 function useTheme() {
   const [theme, set档] = useState<Theme>(读主题);
@@ -172,6 +174,9 @@ export function App() {
   const [baseHash, setBaseHash] = useState("");
   const [savedDraft, setSavedDraft] = useState("");
   const [editDoc, setEditDoc] = useState<EditDoc | null>(null);
+  /** 当前这次打开要把正文滚到哪一块（引用点击）；普通打开是 null */
+  const [blockFocus, setBlockFocus] = useState<块定位 | null>(null);
+  const 块定位序号 = useRef(0);
   /** 反链面板。null = 还没拿到或这篇没有链接；面板自己判空，不占位 */
   const [links, setLinks] = useState<LinkPanel | null>(null);
   const [editEpoch, setEditEpoch] = useState(0);
@@ -737,6 +742,7 @@ export function App() {
    * 留着等于每开一篇白付一次 IPC。标题只用于一条提示文案，由列表行带进来。
    */
   const loadNote = async (rel: string, title?: string) => {
+    setBlockFocus(null);
     const [src, blocks] = await Promise.all([api.readRaw(rel), api.noteEditDoc(rel)]);
     setSelected({
       rel,
@@ -752,7 +758,7 @@ export function App() {
     loadLinks(rel);
   };
 
-  const openNote = async (rel: string, title?: string) => {
+  const openNote = async (rel: string, title?: string, blockOrdinal?: number) => {
     if (editing && !(await persist())) {
       setFlash("这篇还没存下来——先处理冲突提示");
       return;
@@ -763,6 +769,10 @@ export function App() {
     setFlash(null);
     try {
       await loadNote(rel, title);
+      if (blockOrdinal) {
+        块定位序号.current += 1;
+        setBlockFocus({ ordinal: blockOrdinal, nonce: 块定位序号.current });
+      }
     } catch (e) {
       setError(describeError(e).message);
     }
@@ -1962,6 +1972,7 @@ export function App() {
                   答案只从检索出来的片段里组装：<span className="text-fg">模型引用了没给过的编号，
                   这一条就不采信</span>；库里找不到依据时一次模型都不打，直接说没有。
                   送出去的是片段摘录，不是整篇笔记；隐私位与视图根本不进候选。
+                  要让 AI 改正文：回到文档里选中一段文字，气泡条上的「AI」只改这一段。
                 </p>
                 <div className="mt-4 flex max-w-2xl gap-2">
                   <input
@@ -2026,7 +2037,7 @@ export function App() {
                         {答.citations.map((c) => (
                           <button
                             key={c.label}
-                            onClick={() => void openNote(c.path, c.title)}
+                            onClick={() => void openNote(c.path, c.title, c.blockOrdinal)}
                             className="block rounded-md border border-line px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover focus-visible:border-accent"
                           >
                             <span className="flex items-baseline gap-2">
@@ -2196,6 +2207,8 @@ export function App() {
                           onEdit={() => setInlineRev((n) => n + 1)}
                           onNotice={(文) => setFlash(文)}
                           editApi={editApi}
+                          focusBlock={blockFocus}
+                          aiReady={!!aiView && 可对话(aiView)}
                         />
                       </div>
                     ) : mode === "source" ? (
