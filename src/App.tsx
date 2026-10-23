@@ -15,13 +15,17 @@ import {
   Minus,
   Plus,
   RotateCw,
+  Settings,
   Square,
   X,
 } from "lucide-react";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
-import { 徽标, 徽标红, 可对话, 可检索, 缺项, 步骤名, 探针结论 } from "./ui/ai";
+import { 徽标, 徽标红, 可对话, 可检索 } from "./ui/ai";
+import { btn, btnOn, btnPrimary } from "./ui/controls";
+import { SettingsView } from "./ui/SettingsView";
+import { 判备份, 备份角标, type AI忙, type AI表单 } from "./ui/settings";
 import { 来源徽章, 走了那句, 面板标题 } from "./ui/search";
 import {
   buildTree,
@@ -73,7 +77,7 @@ type Mode =
   | "trash"
   | "backup"
   | "import"
-  | "ai"
+  | "settings"
   | "ask";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
@@ -117,21 +121,9 @@ const baseOf = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1);
 const stemOf = (rel: string) => baseOf(rel).replace(/\.markdown$/, "").replace(/\.md$/, "");
 
 /**
- * 按钮基线。两条来自 [06] §3 而以前没落地的：
- * - **禁用态降透明度，不降对比**——`disabled:text-fg-disabled` 那套写法把字与底一起调淡，
- *   实测 2.88:1，比"降透明度"更糟的是它看着像"能点但很弱"而不是"不能点"。
- * - **按下去要有 `translateY(1px)`**：动的是 transform，不触发布局（§动效那条允许）。
+ * 按钮基线在 `ui/controls.ts`——设置页要用同一副，这里再留一份字符串常量，
+ * [06] §3 那张"Button 变体体系"的欠账就从两份变三份。
  */
-const btn =
-  "rounded-md border border-line px-2 py-1 text-xs text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover active:translate-y-px";
-const btnPrimary =
-  "rounded-md bg-accent px-3 py-1 text-xs text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover active:translate-y-px disabled:opacity-55";
-/**
- * 侧栏底栏那一排入口的"当前开着哪一格"。选中那一格连字一起提到主色：
- * 底色加深之后次要色压上去实测 6.2:1、主色 14.5:1——过线是过线，但"这一格开着"
- * 是这一排唯一的定位信息，不该靠一层 1.46:1 的底色去猜。
- */
-const btnOn = (开着: boolean) => btn + (开着 ? " bg-active text-fg" : "");
 
 export function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
@@ -186,6 +178,8 @@ export function App() {
   const [history, setHistory] = useState<SnapshotRow[]>([]);
   const [backupDraft, setBackupDraft] = useState("");
   const [backupBusy, setBackupBusy] = useState(false);
+  /** 换库那一格自己的一枚忙碌标记：它走的是 `vault_open`，与刷新那条 `busy` 不是一回事 */
+  const [库忙, set库忙] = useState(false);
   const [importSrc, setImportSrc] = useState("");
   const [importPlan, setImportPlan] = useState<ImportEntry[] | null>(null);
   const [importResult, setImportResult] = useState<ImportReport | null>(null);
@@ -196,7 +190,7 @@ export function App() {
    * `ai测过` 刻意不持久化：重启之后还挂着"已连通"，说的是上次开机时的事实。
    */
   const [aiView, setAiView] = useState<AiView | null>(null);
-  const [aiForm, setAiForm] = useState({
+  const [aiForm, setAiForm] = useState<AI表单>({
     baseUrl: "",
     chatModel: "",
     embeddingModel: "",
@@ -204,7 +198,7 @@ export function App() {
   });
   const [aiKey, setAiKey] = useState("");
   const [aiReport, setAiReport] = useState<AiProbeReport | null>(null);
-  const [aiBusy, setAiBusy] = useState<"save" | "key" | "test" | "models" | null>(null);
+  const [aiBusy, setAiBusy] = useState<AI忙>(null);
   const [ai测过, setAi测过] = useState<boolean | null>(null);
   /** 「这家有哪些模型」的结果。它**不持久化**：清单是端点此刻的事实，重启就可能变了 */
   const [ai发现, setAi发现] = useState<AiDiscovery | null>(null);
@@ -243,6 +237,9 @@ export function App() {
   const editing = mode === "source" || mode === "inline";
   const dirty = inlineRev > 0 || draft !== savedDraft;
   const unsaved = editing && dirty;
+  /** 备份那一格的判据只有一份（`判备份`）：侧栏角标、这一格、设置页与备份面板都从它取 */
+  const 备份格 = 判备份(info);
+  const 备角 = info ? 备份角标(备份格) : null;
 
   const apply = useCallback(async (app: AppInfo) => {
     setInfo(app);
@@ -1072,11 +1069,18 @@ export function App() {
           焦点回.current = document.activeElement;
           setPalette(true);
         }
+      } else if (e.key === "Escape" && mode === "settings" && !palette) {
+        // 设置页自己带一条回正文的路（标题栏那枚齿轮是**入口**不是开关，再按它不会关掉设置）。
+        // 输入框里不抢这一键：那里 Esc 该管的是它自己那点内容，不是整页。
+        const t = e.target as HTMLElement | null;
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+        e.preventDefault();
+        backToNote();
       }
     };
     window.addEventListener("keydown", on键);
     return () => window.removeEventListener("keydown", on键);
-  }, [palette]);
+  }, [palette, mode, selected]);
   const 填回 = (v: AiView) => {
     setAiView(v);
     setAiForm({
@@ -1131,12 +1135,48 @@ export function App() {
     }
   };
 
-  const openAi = async () => {
-    setMode("ai");
+  /**
+   * 设置页的入口。**先落盘再切**：切走会把编辑器卸载，而自动保存那条 effect 在
+   * `editing` 变假的那一刻就撤了待发的定时器——不先 persist，改的字要等回到正文才重新排上队。
+   * 备份 / 回收站 / 导入那三个入口早就是这么做的。
+   */
+  const openSettings = async () => {
+    if (editing && !(await persist())) return;
+    setMode("settings");
+    setBackupDraft(info?.backupDir ?? "");
     try {
       填回(await api.aiView());
     } catch (e) {
       setError(describeError(e).message);
+    }
+  };
+
+  /**
+   * 换库。设置页里唯一会把**整个界面**换掉的动作，所以它自己清旧库的编辑态：
+   * `apply` 只管 info 与列表，`selected` / `draft` / `links` 揣的还是上一篇，
+   * 不清就是"在新库里显示旧库那一篇"——标题对不上路径，一保存还会写回旧目录。
+   */
+  const 打开库 = async (路径: string) => {
+    if (editing && !(await persist())) return;
+    set库忙(true);
+    setError(null);
+    try {
+      const 新 = await api.vaultOpen(路径);
+      setSelected(null);
+      setEditDoc(null);
+      setDraft("");
+      setSavedDraft("");
+      setBaseHash("");
+      setLinks(null);
+      setBlockFocus(null);
+      setSaveState("clean");
+      setMode("view");
+      await apply(新);
+      setFlash(`已切到 ${新.vaultPath ?? 路径}`);
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      set库忙(false);
     }
   };
 
@@ -1215,7 +1255,7 @@ export function App() {
       { id: "a-trash", group: "动作", label: "打开回收站", run: () => void openTrash() },
       { id: "a-import", group: "动作", label: "导入外部 Markdown", run: () => void openImport() },
       { id: "a-backup", group: "动作", label: "打开备份面板", run: () => void openBackup() },
-      { id: "a-ai", group: "动作", label: "接入模型（AI 设置）", run: () => void openAi() },
+      { id: "a-settings", group: "动作", label: "打开设置（主题 / 备份 / 模型 / 库）", run: () => void openSettings() },
       { id: "a-ask", group: "动作", label: "问 AI（带引用）", run: () => void openAsk() },
       { id: "a-t1", group: "动作", label: "主题：跟随系统", run: () => setTheme("system") },
       { id: "a-t2", group: "动作", label: "主题：亮色", run: () => setTheme("light") },
@@ -1257,18 +1297,21 @@ export function App() {
         <span className="title" data-tauri-drag-region>
           {info?.vaultPath ?? ""}
         </span>
-        <label className="flex items-center gap-1 px-2 text-xs">
-          <span>主题</span>
-          <select
-            className="rounded-md border border-line bg-raised px-2 py-1 text-xs"
-            value={theme}
-            onChange={(e) => setTheme(e.target.value as Theme)}
-          >
-            <option value="system">跟随系统</option>
-            <option value="light">亮色</option>
-            <option value="dark">暗色</option>
-          </select>
-        </label>
+        {/* 主题那一格搬进了设置页。标题栏这里只留一枚入口 + 一句状态：
+            AI 的角标原来挂在左下角那格上，那格没了，状态就跟着入口走——
+            "配齐没有 + 这次测过没有"仍然不用点开才看得见 */}
+        <button
+          className="win-btn flex w-auto gap-1 px-2"
+          onClick={() => void openSettings()}
+          title="设置：主题、备份、模型与 Key、库"
+        >
+          <Settings aria-hidden="true" />
+          {aiView && 徽标(aiForm, ai测过) ? (
+            <span className={"text-xs " + (徽标红(ai测过) ? "text-danger" : "text-fg-2")}>
+              AI·{徽标(aiForm, ai测过)}
+            </span>
+          ) : null}
+        </button>
         <button className="win-btn" onClick={() => void refresh()} title="重新读取索引与列表">
           {busy ? "…" : <RotateCw aria-hidden="true" />}
         </button>
@@ -1540,30 +1583,17 @@ export function App() {
               >
                 导入
               </button>
-              {/* 没备份是产品最坏的状态（docs/03：唯一副本 = 没有副本），入口上要看得见 */}
+              {/* 没备份是产品最坏的状态（docs/03：唯一副本 = 没有副本），入口上要看得见。
+                  判据只有 `判备份` 一份——设置页那一格与这枚角标不许各拼一次 */}
               <button
                 className={btnOn(mode === "backup")}
                 onClick={() => void (mode === "backup" ? backToNote() : openBackup())}
               >
                 备份
-                {info && (info.backupUnconfigured || info.backupDisabled) ? (
-                  <span className="ml-1 text-danger">· 没开</span>
-                ) : null}
+                {备角 ? <span className="ml-1 text-danger">· {备角}</span> : null}
               </button>
-              {/* AI 那一档的入口。角标只说"配齐没有 + 这次测过没有"，不吹成"能用了" */}
-              <button
-                className={btnOn(mode === "ai")}
-                onClick={() => void (mode === "ai" ? backToNote() : openAi())}
-              >
-                AI
-                {aiView && 徽标(aiForm, ai测过) ? (
-                  <span
-                    className={"ml-1 " + (徽标红(ai测过) ? "text-danger" : "text-fg-2")}
-                  >
-                    · {徽标(aiForm, ai测过)}
-                  </span>
-                ) : null}
-              </button>
+              {/* 「AI」那一格没了：配置搬进了设置页，角标跟着入口去了标题栏。
+                  问答是"用"不是"配"，它留在这里 */}
               <button
                 className={btnOn(mode === "ask")}
                 onClick={() => void (mode === "ask" ? backToNote() : openAsk())}
@@ -1667,18 +1697,16 @@ export function App() {
                   30 份。文件原样存着，不压缩：备份要能被资源管理器直接看懂。
                 </p>
                 <div className="mt-4 rounded-md border border-line bg-raised px-4 py-3 text-sm">
-                  {info?.backupDisabled ? (
-                    <span className="text-danger">备份已关闭：你的笔记只存在一块盘上。</span>
-                  ) : info?.backupUnconfigured ? (
-                    <span className="text-danger">还没配置备份目录：同上。</span>
-                  ) : (
+                  {备份格.档 === "开着" ? (
                     <span>
                       备份到{" "}
-                      <span className="font-mono text-mono">{info?.backupDir}</span>
-                      {info?.backupLastAt
-                        ? ` · 最近一次 ${new Date(info.backupLastAt).toLocaleString()}`
+                      <span className="font-mono text-mono">{备份格.目录}</span>
+                      {备份格.时刻
+                        ? ` · 最近一次 ${new Date(备份格.时刻).toLocaleString()}`
                         : " · 还没做过快照"}
                     </span>
+                  ) : (
+                    <span className="text-danger">{备份格.文}</span>
                   )}
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -1689,22 +1717,10 @@ export function App() {
                   >
                     立即备份
                   </button>
-                  <input
-                    className="min-w-64 flex-1 rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
-                    value={backupDraft}
-                    spellCheck={false}
-                    placeholder="E:\\笔记备份"
-                    onChange={(e) => setBackupDraft(e.target.value)}
-                  />
-                  <button
-                    className={btn}
-                    disabled={backupBusy || !backupDraft.trim()}
-                    onClick={() => void applyBackup(backupDraft.trim())}
-                  >
-                    用这个目录
-                  </button>
-                  <button className={btn} disabled={backupBusy} onClick={() => void applyBackup(null)}>
-                    不备份
+                  {/* 目录与"不备份"是**配置**，搬进了设置页；这一格留的是"看历史、找回某一版"。
+                      没备份的人在这儿点一下就到改的地方，不用自己去找齿轮 */}
+                  <button className={btn} onClick={() => void openSettings()}>
+                    改目录 / 不备份 → 设置
                   </button>
                 </div>
 
@@ -1755,216 +1771,34 @@ export function App() {
                   ))}
                 </div>
               </div>
-            ) : mode === "ai" ? (
-              <div className="measure-ui px-6 py-8">
-                <h2 className="text-xl text-fg">接入模型</h2>
-                <p className="mt-2 text-sm text-fg-2">
-                  填一个 <span className="font-mono text-mono">OpenAI 兼容</span>{" "}
-                  端点就行：OpenAI、DeepSeek、Kimi、通义，或本机的 Ollama（
-                  <span className="font-mono text-mono">http://localhost:11434/v1</span>
-                  ）都走这一套。地址一般填到 <span className="font-mono text-mono">/v1</span>{" "}
-                  为止。
-                </p>
-                <p className="mt-2 text-sm text-fg-2">
-                  <span className="text-fg">Key 存在 Windows 凭据管理器里</span>
-                  ：不落盘、不进这个库、也不回到界面脚本里，所以下面只显示末 4 位。换一台电脑要重输一次
-                  Key，笔记本身跟着库走。
-                </p>
-                <div className="mt-5 flex max-w-2xl flex-col gap-3">
-                  {(
-                    [
-                      ["接口地址 base_url", "baseUrl", "https://api.openai.com/v1"],
-                      ["对话模型 chat_model", "chatModel", "gpt-4o-mini"],
-                      ["嵌入模型 embedding_model（可留空）", "embeddingModel", "text-embedding-3-small"],
-                    ] as const
-                  ).map(([标签, 键, 占位]) => (
-                    <label key={键} className="flex flex-col gap-1">
-                      <span className="text-xs text-fg-2">{标签}</span>
-                      <input
-                        className="rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
-                        value={aiForm[键]}
-                        spellCheck={false}
-                        placeholder={占位}
-                        onChange={(e) => setAiForm({ ...aiForm, [键]: e.target.value })}
-                      />
-                    </label>
-                  ))}
-                  {/* 重排是合并之后的**一道工序**，不是"第四路"，所以它不进右上角那句话的
-                      主体，只在生效时加一段"· 已重排"。**默认关**：那是每次搜索多打一趟模型，
-                      不能替用户决定花这个钱。回包读不出时后端会明说"这一趟用 RRF 名次"——
-                      "配了"与"生效了"在界面上必须是两件事。 */}
-                  <label className="mt-1 flex items-start gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="mt-1 accent-(--accent)"
-                      checked={aiForm.rerank}
-                      onChange={(e) => setAiForm({ ...aiForm, rerank: e.target.checked })}
-                    />
-                    <span className="text-fg-2">
-                      检索时让对话模型把候选排一遍（listwise 重排）
-                      <span className="block text-xs text-fg-disabled">
-                        每次搜索多打一趟模型，最多送前 30 条片段摘录（不含路径与块 ID）。
-                        没填对话模型时这一格不起作用；排不出来会自动退回按名次合并的结果，并在这里说清。
-                      </span>
-                    </span>
-                  </label>
-                  <label className="mt-1 flex flex-col gap-1">
-                    <span className="text-xs text-fg-2">
-                      API Key
-                      {aiView?.keyHint ? (
-                        <span className="ml-2 font-mono text-mono text-fg-2">
-                          现在：{aiView.keyHint}
-                        </span>
-                      ) : (
-                        <span className="ml-2 text-fg-disabled">
-                          没填（本地模型不需要；云端多半会回 401）
-                        </span>
-                      )}
-                    </span>
-                    <div className="flex gap-2">
-                      <input
-                        className="min-w-0 flex-1 rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
-                        value={aiKey}
-                        type="password"
-                        spellCheck={false}
-                        placeholder={aiView?.keySet ? "留空并按「存 Key」= 删掉这把" : "sk-…"}
-                        onChange={(e) => setAiKey(e.target.value)}
-                      />
-                      <button
-                        className={btn}
-                        disabled={aiBusy !== null || !aiKey.trim()}
-                        onClick={() => void ai存Key()}
-                      >
-                        存 Key
-                      </button>
-                    </div>
-                  </label>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <button
-                      className={btnPrimary}
-                      disabled={aiBusy !== null}
-                      onClick={() => void ai保存()}
-                    >
-                      {aiBusy === "save" ? "保存中…" : "保存配置"}
-                    </button>
-                    <button
-                      className={btn}
-                      disabled={aiBusy !== null || 缺项(aiForm).length > 0}
-                      onClick={() => void ai测试()}
-                    >
-                      {aiBusy === "test" ? "测试中…" : "测试连通"}
-                    </button>
-                    <button
-                      className={btn}
-                      disabled={aiBusy !== null || !aiForm.baseUrl.trim()}
-                      title="问这个端点要一份模型清单，把能当嵌入模型用的那些列出来。它只发一个 GET 请求，你的笔记一个字节都不出去。"
-                      onClick={() => void ai发现模型()}
-                    >
-                      {aiBusy === "models" ? "问端点中…" : "看看这家有哪些模型"}
-                    </button>
-                    {缺项(aiForm).length > 0 ? (
-                      <span className="text-xs text-fg-disabled">
-                        还差：{缺项(aiForm).join(" / ")}
-                      </span>
-                    ) : null}
-                  </div>
-                  <p className="text-xs text-fg-disabled">
-                    嵌入模型那一格<strong className="text-fg-2">可以留空</strong>
-                    ：DeepSeek、Anthropic 这类只有对话端点，Kimi 的嵌入要单独申请。留空不是
-                    "没配好"，是语义那一路不开、检索只走关键词与链接——问答照旧能用（它靠的是
-                    检索回来的片段）。这一格与"测试连通"读的都是
-                    <strong className="text-fg-2">已经存进盘上的那份地址</strong>
-                    ，改完先按「保存配置」。
-                  </p>
-                </div>
-                {ai发现 ? (
-                  <div className="mt-5 max-w-2xl rounded-md border border-line bg-raised px-4 py-3">
-                    <div className="font-mono text-xs text-fg-2">
-                      端点给了 {ai发现.all.length} 个模型｜{ai发现.ms}ms｜其中含
-                      <span className="mx-1">embed</span>的 {ai发现.embedCandidates.length} 个
-                    </div>
-                    {ai发现.embedCandidates.length > 0 ? (
-                      <div className="mt-2 flex flex-wrap items-center gap-2">
-                        <span className="text-xs text-fg-2">可以填进嵌入模型那一格：</span>
-                        {ai发现.embedCandidates.map((m) => (
-                          <button
-                            key={m}
-                            className={
-                              "rounded-md border px-3 py-1 font-mono text-xs transition-colors duration-(--dur-1) " +
-                              (aiForm.embeddingModel === m
-                                ? "border-accent text-fg"
-                                : "border-line text-fg-2 hover:bg-hover")
-                            }
-                            title="点一下就填进上面那一格（还要按「保存配置」才落盘）"
-                            onClick={() => setAiForm({ ...aiForm, embeddingModel: m })}
-                          >
-                            {m}
-                          </button>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-sm text-fg-2">
-                        这一家<strong className="text-fg">没有</strong>名字里含
-                        <span className="mx-1 font-mono">embed</span>
-                        的模型，多半确实不提供嵌入接口。那就把上面那一格空着——
-                        检索走关键词与链接，问答照旧。
-                      </p>
-                    )}
-                    {ai发现.all.length > 0 ? (
-                      <details className="mt-2">
-                        <summary className="cursor-pointer text-xs text-fg-2">
-                          它给的全部模型（{ai发现.all.length}）
-                        </summary>
-                        <div className="mt-1 flex flex-wrap gap-2">
-                          {ai发现.all.map((m) => (
-                            <span key={m} className="font-mono text-xs text-fg-2">
-                              {m}
-                            </span>
-                          ))}
-                        </div>
-                      </details>
-                    ) : null}
-                  </div>
-                ) : null}
-                {aiReport ? (
-                  <div className="mt-7 flex max-w-2xl flex-col gap-1">
-                    <h3 className="text-sm text-fg-2">
-                      测试结果
-                      <span
-                        className={
-                          "ml-2 text-xs " + (aiReport.ok ? "text-success" : "text-danger")
-                        }
-                      >
-                        {探针结论(aiReport.ok, aiReport.steps)}
-                      </span>
-                    </h3>
-                    {aiReport.steps.map((r, i) => (
-                      <div
-                        key={i}
-                        className={
-                          "rounded-md border px-3 py-2 text-sm " +
-                          (r.ok ? "border-line" : "border-danger bg-danger-soft")
-                        }
-                      >
-                        <span className="text-fg">{步骤名(r.stage)}</span>
-                        <span className="ml-2 font-mono text-xs text-fg-2">
-                          {r.ms}ms
-                        </span>
-                        <div className="mt-1 break-words text-xs text-fg-2">{r.detail}</div>
-                      </div>
-                    ))}
-                    <p className="mt-1 text-xs text-fg-disabled">
-                      每个启用的探针只发一个最小请求，内容是一段固定文本{" "}
-                      <span className="font-mono text-mono">ping</span>
-                      ，不会把任何笔记内容发出去。
-                    </p>
-                  </div>
-                ) : null}
-                <p className="mt-8 max-w-2xl text-sm text-fg-2">
-                  配好之后左下角「问答」那一格就能问了（<span className="font-mono text-mono">Ctrl+K</span>{" "}
-                  里也有）。整理建议、自动打标还没做——那是 M3 的活。
-                </p>
-              </div>
+            ) : mode === "settings" ? (
+              <SettingsView
+                info={info}
+                flash={flash}
+                onBack={backToNote}
+                外观={{ theme, setTheme }}
+                备份={{
+                  draft: backupDraft,
+                  setDraft: setBackupDraft,
+                  忙: backupBusy,
+                  应用: (dir) => void applyBackup(dir),
+                }}
+                模型={{
+                  view: aiView,
+                  form: aiForm,
+                  setForm: setAiForm,
+                  key: aiKey,
+                  setKey: setAiKey,
+                  忙: aiBusy,
+                  报告: aiReport,
+                  发现: ai发现,
+                  保存: () => void ai保存(),
+                  存Key: () => void ai存Key(),
+                  测试: () => void ai测试(),
+                  发现模型: () => void ai发现模型(),
+                }}
+                库={{ 忙: 库忙, 打开: (p) => void 打开库(p) }}
+              />
             ) : mode === "ask" ? (
               <div className="measure-ui px-6 py-8">
                 <h2 className="text-xl text-fg">问 AI</h2>
@@ -1994,8 +1828,11 @@ export function App() {
                 </div>
                 {!(aiView?.chatModel ?? "").trim() ? (
                   <p className="mt-2 text-xs text-fg-disabled">
-                    没填对话模型名，问不了。左下角「AI」那一格里填上——
-                    检索那一路不受它影响。
+                    没填对话模型名，问不了。
+                    <button className="underline" onClick={() => void openSettings()}>
+                      去设置里的「模型与 Key」填上
+                    </button>
+                    ——检索那一路不受它影响。
                   </p>
                 ) : null}
                 {/*

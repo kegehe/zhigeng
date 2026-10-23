@@ -104,7 +104,7 @@ export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
             {err ? (
               <span className="text-danger">{err}</span>
             ) : (
-              "备份目录不能选在库里面。这一步以后也能在界面左下角改。"
+              "备份目录不能选在库里面。这一步以后也能在标题栏那枚齿轮（设置 → 备份）里改。"
             )}
           </p>
         </div>

@@ -572,7 +572,7 @@ export function BlockEditor({
             onClick={() => {
               if (!aiReady) {
                 noticeRef.current?.(
-                  "先在左下角「AI」里填好接口地址与对话模型",
+                  "先在标题栏那枚齿轮（设置 → 模型与 Key）里填好接口地址与对话模型",
                 );
                 return;
               }

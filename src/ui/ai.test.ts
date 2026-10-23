@@ -102,12 +102,12 @@ describe("后端指引里点名的按钮，就是界面上那枚", () => {
   // 只有这种写法拦得住：两边都从**源码**里读，改一处就红。
   // jsdom 环境里 `import.meta.url` 是 vite 给的 http URL，`fileURLToPath` 会直接抛
   // "The URL must be of scheme file"（真跑出来过一次）。vitest 的工作目录恒等于仓库根，
-  // 所以按根拼路径。
-  const 界面 = fs.readFileSync("src/App.tsx", "utf8");
+  // 所以按根拼路径。这一枚按钮跟着 AI 配置搬进了设置页（2026-10-23），读的文件也换了。
+  const 界面 = fs.readFileSync("src/ui/SettingsView.tsx", "utf8");
   const 后端 = fs.readFileSync("crates/note-core/src/ai.rs", "utf8");
 
   it("两边都还在，且能各读到一次按钮名", () => {
-    const 按钮 = /aiBusy === "models" \? "[^"]*" : "([^"]+)"/.exec(界面)?.[1];
+    const 按钮 = /模型\.忙 === "models" \? "[^"]*" : "([^"]+)"/.exec(界面)?.[1];
     const 指引 = /pub const 发现按钮名: &str = "([^"]+)";/.exec(后端)?.[1];
     expect(按钮, "界面上那枚按钮的文案要还能被读到（改了写法就要同步改这条用例）").toBeTruthy();
     expect(指引, "后端那份常量要还在").toBeTruthy();
