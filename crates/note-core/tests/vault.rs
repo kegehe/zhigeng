@@ -2,8 +2,8 @@
 //! Vault 层测试：目录约定、路径安全、原子写、回收站、冲突判定。
 
 use note_core::vault::{
-    classify_change, default_new_rel, is_indexable_rel, kind_of_rel, sanitize_file_stem,
-    status_of_rel, Change, NoteKind, NoteStatus, Vault,
+    check_dir_name, classify_change, default_new_rel, is_indexable_rel, is_tree_dir, kind_of_rel,
+    norm_rel, sanitize_file_stem, status_of_rel, Change, NoteKind, NoteStatus, Vault,
 };
 use std::path::Path;
 
@@ -191,6 +191,191 @@ fn 新笔记默认落点不覆盖已有文件() {
     let rel = default_new_rel(v.root(), "甲");
     assert_eq!(rel, "notes/甲-1.md", "{rel}");
     assert!(!v.root().join(&rel).exists());
+}
+
+#[test]
+fn 目录判据把应用私有与资产视图树挡在外面() {
+    assert!(is_tree_dir("notes"));
+    assert!(is_tree_dir("notes/工作/深层"));
+    assert!(is_tree_dir("项目"));
+    for bad in [
+        "",
+        "/",
+        ".note",
+        "notes/.hidden",
+        "../notes",
+        "notes/../x",
+        "node_modules/包",
+        "notes/target",
+        "attachments",
+        "attachments/ab",
+        "views",
+        "views/日报",
+    ] {
+        assert!(!is_tree_dir(bad), "{bad} 不该算笔记目录");
+    }
+    assert_eq!(norm_rel(r"\notes\工作\"), "notes/工作");
+}
+
+#[test]
+fn 目录名只拒不改() {
+    assert_eq!(check_dir_name(" 工作 ").unwrap(), "工作");
+    assert_eq!(check_dir_name("2026 Q4").unwrap(), "2026 Q4");
+    for bad in [
+        "",
+        ".",
+        "..",
+        ".草稿",
+        "a/b",
+        r"a\b",
+        "a:b",
+        "a?b",
+        "工作.",
+        "node_modules",
+        "Target",
+        "CON",
+        "nul.txt",
+    ] {
+        assert!(check_dir_name(bad).is_err(), "{bad} 不该被接受");
+    }
+    assert!(check_dir_name(&"长".repeat(81)).is_err(), "超长目录名该拒");
+}
+
+#[test]
+fn 建目录只能在笔记树里且父目录得先存在() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    assert_eq!(v.create_dir("notes", "工作").unwrap(), "notes/工作");
+    assert_eq!(
+        v.create_dir("notes/工作", "子目录").unwrap(),
+        "notes/工作/子目录"
+    );
+    assert_eq!(v.create_dir("", "项目").unwrap(), "项目");
+    assert!(v.create_dir("notes", "工作").is_err(), "同名该报冲突");
+    assert!(matches!(
+        v.create_dir("notes/没有", "x"),
+        Err(note_core::Error::NotFound(_))
+    ));
+    // 附件与视图那两棵树不收笔记目录，也不能在里面建
+    assert!(matches!(
+        v.create_dir("attachments", "x"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(
+        v.create_dir("views", "x"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    // 顶层的保留名不能拿来新建
+    assert!(matches!(
+        v.create_dir("", "notes"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(
+        v.create_dir("notes", "../外面"),
+        Err(note_core::Error::Invalid(_))
+    ));
+}
+
+#[test]
+fn 列目录包含空目录并排除树外() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    for rel in [
+        "notes/工作",
+        "notes/空/更深",
+        "inbox/待办",
+        "archive/2024",
+        "attachments/ab",
+        "views/日报",
+        "node_modules/包",
+        ".note/trash",
+    ] {
+        std::fs::create_dir_all(dir.path().join(rel)).unwrap();
+    }
+    assert_eq!(
+        v.list_dirs().unwrap(),
+        vec![
+            "archive",
+            "archive/2024",
+            "inbox",
+            "inbox/待办",
+            "notes",
+            "notes/工作",
+            "notes/空",
+            "notes/空/更深",
+        ]
+    );
+    // 顶层自建目录也要出现（中文按码位排在 ASCII 之后）
+    v.create_dir("", "项目").unwrap();
+    let got = v.list_dirs().unwrap();
+    assert_eq!(got.last().map(String::as_str), Some("项目"), "{got:?}");
+}
+
+#[test]
+fn 空目录能改名能删非空一律拒() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    v.create_dir("notes", "旧名").unwrap();
+    assert_eq!(v.rename_dir("notes/旧名", "新名").unwrap(), "notes/新名");
+    assert!(dir.path().join("notes/新名").is_dir());
+    assert!(!dir.path().join("notes/旧名").exists());
+
+    // 非空按**物理空**判：隐藏文件也算占着位置
+    std::fs::write(dir.path().join("notes/新名/.keep"), "x").unwrap();
+    assert!(matches!(
+        v.rename_dir("notes/新名", "另一个"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(
+        v.remove_dir("notes/新名"),
+        Err(note_core::Error::Invalid(_))
+    ));
+    std::fs::remove_file(dir.path().join("notes/新名/.keep")).unwrap();
+    v.remove_dir("notes/新名").unwrap();
+    assert!(!dir.path().join("notes/新名").exists());
+
+    // 保留目录既不能改名也不能删；树外目录同样不行
+    for rel in ["notes", "inbox", "archive"] {
+        assert!(matches!(
+            v.rename_dir(rel, "别的"),
+            Err(note_core::Error::Invalid(_))
+        ));
+        assert!(matches!(
+            v.remove_dir(rel),
+            Err(note_core::Error::Invalid(_))
+        ));
+    }
+    std::fs::create_dir_all(dir.path().join("attachments/ab")).unwrap();
+    assert!(v.remove_dir("attachments/ab").is_err());
+}
+
+#[test]
+fn 改名撞上同级同名目录要报冲突() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    v.create_dir("notes", "甲").unwrap();
+    v.create_dir("notes", "乙").unwrap();
+    assert!(matches!(
+        v.rename_dir("notes/甲", "乙"),
+        Err(note_core::Error::Conflict(_))
+    ));
+    assert_eq!(v.rename_dir("notes/甲", "甲").unwrap(), "notes/甲");
+}
+
+#[test]
+fn 新建笔记的父目录必须是存在的笔记目录() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    v.create_dir("notes", "工作").unwrap();
+    assert_eq!(v.check_note_parent("notes/工作").unwrap(), "notes/工作");
+    assert_eq!(v.check_note_parent(r"notes\工作\").unwrap(), "notes/工作");
+    for bad in ["", "views", "attachments", ".note", "notes/../外面"] {
+        assert!(v.check_note_parent(bad).is_err(), "{bad} 不该能挂笔记");
+    }
+    assert!(matches!(
+        v.check_note_parent("notes/没有"),
+        Err(note_core::Error::NotFound(_))
+    ));
 }
 
 #[cfg(windows)]

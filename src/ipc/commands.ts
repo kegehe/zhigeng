@@ -61,8 +61,9 @@ export const api = {
   readRaw: (rel: string) => invoke<NoteSource>("read_raw", { rel }),
   saveNote: (rel: string, content: string, expectHash?: string) =>
     invoke<string>("save_note", { rel, content, expectHash: expectHash ?? null }),
-  /** 返回新建笔记的相对路径 */
-  noteCreate: (title: string) => invoke<string>("note_create", { title }),
+  /** 返回新建笔记的相对路径。给了 `parent` 就落在那个目录里，不给 = 默认 `notes/` */
+  noteCreate: (title: string, parent?: string) =>
+    invoke<string>("note_create", { title, parent: parent ?? null }),
   /**
    * 把剪贴板来的图片字节存进 `attachments/`，拿回内容寻址路径。
    *
@@ -81,6 +82,17 @@ export const api = {
    */
   treeOrder: () => invoke<SiblingOrder[]>("tree_order"),
   treeOrderSave: (orders: SiblingOrder[]) => invoke<void>("tree_order_save", { orders }),
+  /**
+   * 侧栏全部目录（含空目录、任意层级）。空目录不会出现在任何一篇的 `rel` 里，
+   * 树要从这单独拿一次。递归遍历所以是异步命令，别在它后面假设"已经画完了"。
+   */
+  dirList: () => invoke<string[]>("dir_list"),
+  /** `parent` 空串 = 顶层。返回新目录的库根相对路径 */
+  dirCreate: (parent: string, name: string) =>
+    invoke<string>("dir_create", { parent, name }),
+  dirRename: (rel: string, newName: string) =>
+    invoke<string>("dir_rename", { rel, newName }),
+  dirDelete: (rel: string) => invoke<void>("dir_delete", { rel }),
   noteTrash: (rel: string) => invoke<void>("note_trash", { rel }),
   listTrash: () => invoke<TrashRow[]>("list_trash"),
   noteRestore: (batch: string, rel: string) =>

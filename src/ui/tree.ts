@@ -5,7 +5,8 @@ import type { ListNotes, SiblingOrder } from "../ipc/types";
  *
  * 为什么在前端拼而不是 Rust 侧返回一棵树：库里那份真相就是目录结构（[02] §Vault 目录结构，
  * 归档状态 = 所在目录），`rel` 已经是全部所需信息。多一个后端形状就多一处会与盘上事实
- * 分叉的地方，而这里没有"只有后端知道"的东西。
+ * 分叉的地方。**唯一补进来的是空目录**：它不在任何 `rel` 里，所以后端另外给一份扁平的
+ * 目录清单（`dir_list`），前端按路径接回树——形状仍只在这里拼。
  *
  * 顶层三条是**有语义的默认序**（[02]：`notes/` 正式、`inbox/` 待整理、`archive/` 归档），
  * 用户自己建的目录排在后面按名字走。库根上直接躺着的 `.md` 不塞进假目录——
@@ -82,8 +83,28 @@ function 建位次表(顺序: readonly SiblingOrder[]): 位次表 {
   return 表;
 }
 
-function 建节点(行们: 行[]): 节点 {
+/**
+ * 把目录路径铺进节点树。**空目录只能靠这一条**：`rel` 里没有它的影子。
+ * 顺序先目录后笔记，所以空目录先铺好，笔记再往里挂。
+ */
+function 铺目录(顶层: 节点, 目录们: readonly string[]) {
+  for (const d of 目录们) {
+    const 段 = 归一父(d).split("/").filter(Boolean);
+    let 当前 = 顶层;
+    for (const s of 段) {
+      let 下 = 当前.子目录.get(s);
+      if (!下) {
+        下 = { 子目录: new Map(), 笔记: [], 篇数: 0 };
+        当前.子目录.set(s, 下);
+      }
+      当前 = 下;
+    }
+  }
+}
+
+function 建节点(行们: 行[], 目录们: readonly string[]): 节点 {
   const 顶层: 节点 = { 子目录: new Map(), 笔记: [], 篇数: 0 };
+  铺目录(顶层, 目录们);
   for (const 行 of 行们) {
     const 段 = 行.rel.replace(/\\/g, "/").split("/");
     段.pop(); // 最后一段是文件名
@@ -171,8 +192,16 @@ function 序(a: string, b: string): number {
 const 顶层显示名 = (路径: string, 本名: string) =>
   路径 === 本名 ? PINNED.find((p) => p.dir === 本名)?.标签 ?? 本名 : 本名;
 
-export function buildTree(行们: 行[], 顺序: readonly SiblingOrder[] = []): Branch[] {
-  return 转成树(建节点(行们), "", 0, 顶层显示名, 建位次表(顺序));
+/**
+ * `目录们` 是后端 `dir_list` 给的全部目录：**空目录不会出现在任何一篇的 `rel` 里**，
+ * 不单独铺一遍就永远看不见刚建出来的文件夹。传空数组时行为与以前完全一样。
+ */
+export function buildTree(
+  行们: 行[],
+  顺序: readonly SiblingOrder[] = [],
+  目录们: readonly string[] = []
+): Branch[] {
+  return 转成树(建节点(行们, 目录们), "", 0, 顶层显示名, 建位次表(顺序));
 }
 
 /**

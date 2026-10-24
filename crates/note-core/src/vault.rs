@@ -239,6 +239,160 @@ impl Vault {
         Ok(out)
     }
 
+    /// 全部可见目录（库根相对、正斜杠、已排序）。
+    ///
+    /// 笔记树在前端由 `rel` 拼出来，但**空目录拼不出来**——目录得单独列一次，
+    /// 否则刚建出来的空目录在侧栏里永远不出现，等于没建成。
+    ///
+    /// 走 `walkdir` 而不是自己递归 `read_dir`：排除规则与"不跟随符号链接"
+    /// 必须与 `scan` 同源，不然列表里有、扫描器不认，用户建了个永远空着的目录。
+    pub fn list_dirs(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(&self.root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                if is_excluded_entry(e) {
+                    return false;
+                }
+                let name = e.file_name().to_string_lossy();
+                // 两棵有别的语义的树整棵剪掉：资产目录可能有几万张图，遍历它纯浪费
+                !(e.depth() == 1 && matches!(name.as_ref(), ATTACHMENTS_DIR | VIEWS_DIR))
+            })
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                // 一个读不动的子目录不该让整棵树从侧栏消失
+                Err(e) => {
+                    tracing::warn!("列目录时跳过一个读不动的条目：{e}");
+                    continue;
+                }
+            };
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                continue;
+            }
+            let Ok(rel) = self.relative(entry.path()) else {
+                continue;
+            };
+            if is_tree_dir(&rel) {
+                out.push(rel);
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// 建目录。`parent` 必须是已存在的笔记目录（空串 = 库根）。
+    pub fn create_dir(&self, parent: &str, name: &str) -> Result<String> {
+        let parent = norm_rel(parent);
+        let name = check_dir_name(name)?;
+        if parent.is_empty() {
+            if is_reserved_top(&name) {
+                return Err(Error::Invalid(format!("{name} 是保留目录名")));
+            }
+        } else if !is_tree_dir(&parent) {
+            return Err(Error::Invalid(format!("不能在 {parent} 里建目录")));
+        }
+        let rel = if parent.is_empty() {
+            name
+        } else {
+            format!("{parent}/{name}")
+        };
+        let abs = self.resolve(&rel)?;
+        let at = abs
+            .parent()
+            .ok_or_else(|| Error::Invalid(format!("目录名不合法: {rel}")))?;
+        if !at.is_dir() {
+            return Err(Error::NotFound(parent));
+        }
+        if abs.exists() {
+            return Err(Error::Conflict(rel));
+        }
+        std::fs::create_dir(&abs).map_err(|e| Error::Io {
+            path: rel.clone(),
+            source: e,
+        })?;
+        Ok(rel)
+    }
+
+    /// 空目录改名（同一层里换名字）。非空目录要连整棵子树搬、还要逐篇重索引，
+    /// 路径即笔记 id，那是下一档，这里一律拒——**拒得早**比搬一半再失败好收拾。
+    pub fn rename_dir(&self, rel: &str, new_name: &str) -> Result<String> {
+        let rel = norm_rel(rel);
+        if !is_tree_dir(&rel) || is_reserved_top(&rel) {
+            return Err(Error::Invalid(format!("这个目录不能改名: {rel}")));
+        }
+        let name = check_dir_name(new_name)?;
+        if name == base_name(&rel) {
+            return Ok(rel);
+        }
+        let parent = parent_rel(&rel);
+        let new_rel = if parent.is_empty() {
+            name
+        } else {
+            format!("{parent}/{name}")
+        };
+        if is_reserved_top(&new_rel) {
+            return Err(Error::Invalid(format!("{new_rel} 是保留目录名")));
+        }
+        let src = self.resolve(&rel)?;
+        if !src.is_dir() {
+            return Err(Error::NotFound(rel));
+        }
+        if !dir_is_empty(&src)? {
+            return Err(Error::Invalid(
+                "目录里还有东西——改名要连内容一起搬，这一版只改空目录".into(),
+            ));
+        }
+        let dst = self.resolve(&new_rel)?;
+        if dst.exists() {
+            return Err(Error::Conflict(new_rel));
+        }
+        std::fs::rename(&src, &dst).map_err(|e| Error::Io {
+            path: rel,
+            source: e,
+        })?;
+        Ok(new_rel)
+    }
+
+    /// 删空目录。非空目录进回收站要整棵搬（回收站是文件级镜像），那是下一档。
+    pub fn remove_dir(&self, rel: &str) -> Result<()> {
+        let rel = norm_rel(rel);
+        if !is_tree_dir(&rel) || is_reserved_top(&rel) {
+            return Err(Error::Invalid(format!("这个目录不能删: {rel}")));
+        }
+        let abs = self.resolve(&rel)?;
+        if !abs.is_dir() {
+            return Err(Error::NotFound(rel));
+        }
+        if !dir_is_empty(&abs)? {
+            return Err(Error::Invalid(
+                "目录里还有东西——删除要连内容一起进回收站，这一版只删空目录".into(),
+            ));
+        }
+        std::fs::remove_dir(&abs).map_err(|e| Error::Io {
+            path: rel,
+            source: e,
+        })
+    }
+
+    /// 新建笔记的父目录判据：必须已存在，且是笔记目录（不是附件/视图/元数据）。
+    /// 返回归一后的路径——调用方拿它拼 `rel`，不能再拿用户原样输入的字符串。
+    pub fn check_note_parent(&self, parent: &str) -> Result<String> {
+        let parent = norm_rel(parent);
+        if !is_tree_dir(&parent) {
+            return Err(Error::Invalid(format!("不能在这里建笔记: {parent}")));
+        }
+        let abs = self.resolve(&parent)?;
+        if !abs.is_dir() {
+            return Err(Error::NotFound(parent));
+        }
+        Ok(parent)
+    }
+
     /// 原子写入：同目录临时文件 → 刷盘 → rename 覆盖。
     /// 崩溃只可能留下临时文件，绝不会把笔记写成半截（docs/02 §写入与外部修改）。
     pub fn write_atomic(&self, rel: &str, bytes: &[u8]) -> Result<String> {
@@ -509,6 +663,122 @@ fn sibling_tmp(target: &Path) -> PathBuf {
     target.with_file_name(format!(".{name}.tmp"))
 }
 
+/// 库根相对路径归一：反斜杠换正斜杠、去首尾斜杠。库根是空串。
+///
+/// 目录树、`tree.toml`、IPC 三条路都拿它做**相等比较**，所以归一只能有一份：
+/// `notes/` 与 `notes\` 算两层的时侯，拖一次就会留下两条互不相认的顺序。
+pub fn norm_rel(p: &str) -> String {
+    p.replace('\\', "/").trim_matches('/').to_string()
+}
+
+/// 父目录路径。库根上的条目给空串。
+fn parent_rel(rel: &str) -> &str {
+    rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("")
+}
+
+/// 路径末段（同一层里的名字）。
+fn base_name(rel: &str) -> &str {
+    rel.rsplit_once('/').map(|(_, n)| n).unwrap_or(rel)
+}
+
+/// Windows 保留名。大小写无关，且带扩展名的 `CON.txt` 一样不合法。
+const WINDOWS_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
+];
+
+const BAD_NAME_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+/// 顶层那几个有语义的目录：改名/删除/新建同名一律拒绝。
+/// 往它们**里面**建子目录是另一回事（`notes/工作/` 完全正常）。
+fn is_reserved_top(rel: &str) -> bool {
+    !rel.contains('/')
+        && matches!(
+            rel,
+            META_DIR | INBOX_DIR | NOTES_DIR | ARCHIVE_DIR | VIEWS_DIR | ATTACHMENTS_DIR
+        )
+}
+
+/// 侧栏里该出现的目录，也是"能往里建笔记/建子目录"的唯一判据。
+///
+/// 排除三类：点开头的（`.note` 等应用私有）、扫描规则里的 `node_modules`/`target`、
+/// 以及 `attachments/` 与 `views/` 这两棵有别的语义的树（资产与视图定义）。
+pub fn is_tree_dir(rel: &str) -> bool {
+    let rel = norm_rel(rel);
+    if rel.is_empty() {
+        return false;
+    }
+    let segs: Vec<&str> = rel.split('/').collect();
+    if segs
+        .iter()
+        .any(|s| s.is_empty() || s.starts_with('.') || matches!(*s, "node_modules" | "target"))
+    {
+        return false;
+    }
+    !matches!(segs[0], ATTACHMENTS_DIR | VIEWS_DIR)
+}
+
+/// 目录名判据：**拒绝而不是改写**。文件名那边 `sanitize_file_stem` 会悄悄换字，
+/// 目录名是用户刚在输入框里敲的，被换掉他会看到一个不是自己写的名字。
+pub fn check_dir_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::Invalid("目录名不能为空".into()));
+    }
+    if name == "." || name == ".." {
+        return Err(Error::Invalid("目录名不能是 . 或 ..".into()));
+    }
+    if name.starts_with('.') {
+        return Err(Error::Invalid(
+            "目录名不能以点开头（点开头是应用私有目录）".into(),
+        ));
+    }
+    if name
+        .chars()
+        .any(|c| BAD_NAME_CHARS.contains(&c) || c.is_control())
+    {
+        return Err(Error::Invalid(
+            r#"目录名不能带 \ / : * ? " < > | 或控制字符"#.into(),
+        ));
+    }
+    if name.ends_with('.') {
+        return Err(Error::Invalid("目录名不能以点结尾".into()));
+    }
+    if name.chars().count() > 80 {
+        return Err(Error::Invalid("目录名太长（上限 80 字）".into()));
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower == "node_modules" || lower == "target" {
+        return Err(Error::Invalid(format!(
+            "{name} 是扫描排除目录，建了也不会进索引"
+        )));
+    }
+    let head = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if WINDOWS_RESERVED.contains(&head.as_str()) {
+        return Err(Error::Invalid(format!(
+            "{name} 是 Windows 保留名，换个名字"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+/// 目录里有没有东西。**物理空**才算空：隐藏文件、临时文件都算占着位置——
+/// 改名/删除是按目录搬的，看得见的文件搬得动，看不见的一样得搬。
+fn dir_is_empty(abs: &Path) -> Result<bool> {
+    let mut it = std::fs::read_dir(abs).map_err(|e| Error::Io {
+        path: abs.display().to_string(),
+        source: e,
+    })?;
+    match it.next() {
+        None => Ok(true),
+        Some(Ok(_)) => Ok(false),
+        Some(Err(e)) => Err(Error::Io {
+            path: abs.display().to_string(),
+            source: e,
+        }),
+    }
+}
+
 /// 排除规则（docs/02 §扫描与排除规则）。剪枝用，作用于目录与文件。
 fn is_excluded_entry(e: &walkdir::DirEntry) -> bool {
     let name = e.file_name().to_string_lossy().to_string();
@@ -594,10 +864,9 @@ pub fn default_new_rel(root: &Path, title: &str) -> String {
 
 /// Windows 保留字符与保留名都要处理，否则 create 报晦涩错误。
 pub fn sanitize_file_stem(title: &str) -> String {
-    const BAD: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
     let mut s: String = title
         .chars()
-        .map(|c| if BAD.contains(&c) { ' ' } else { c })
+        .map(|c| if BAD_NAME_CHARS.contains(&c) { ' ' } else { c })
         .collect();
     s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if s.is_empty() {
@@ -607,12 +876,8 @@ pub fn sanitize_file_stem(title: &str) -> String {
     while s.ends_with('.') || s.ends_with(' ') {
         s.pop();
     }
-    const RESERVED: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
-    ];
     let head = s.split('.').next().unwrap_or("").to_ascii_uppercase();
-    if RESERVED.contains(&head.as_str()) {
+    if WINDOWS_RESERVED.contains(&head.as_str()) {
         s = format!("_{s}");
     }
     if s.chars().count() > 80 {

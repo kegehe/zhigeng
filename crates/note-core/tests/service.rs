@@ -93,7 +93,7 @@ fn 新建改名归档删除恢复全程索引不漂() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
 
-    let rel = hub.note_create("周会纪要").unwrap();
+    let rel = hub.note_create("周会纪要", None).unwrap();
     assert!(rel.starts_with("notes/"), "{rel}");
     assert_eq!(hub.read_note(&rel).unwrap().title, "周会纪要");
 
@@ -145,7 +145,7 @@ fn link_stats(conn: &rusqlite::Connection) -> (i64, i64) {
 fn 删掉被引用的笔记时入链退回悬空而不是静默消失() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
-    let target = hub.note_create("目标笔记").unwrap();
+    let target = hub.note_create("目标笔记", None).unwrap();
     hub.save_note("notes/引用者.md", "看 [[目标笔记]] 那篇。\n")
         .unwrap();
 
@@ -166,7 +166,7 @@ fn 删掉被引用的笔记时入链退回悬空而不是静默消失() {
 fn 同名笔记删两次在回收站里不互相覆盖() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
-    let rel = hub.note_create("同名").unwrap();
+    let rel = hub.note_create("同名", None).unwrap();
     hub.save_note(
         &rel,
         "---\nid: n-keep0001\ntitle: \"同名\"\n---\n\n第一条内容\n",
@@ -253,7 +253,7 @@ fn 写路径拒绝落在应用私有目录与非_md_目标() {
         Err(note_core::Error::Invalid(_))
     ));
     assert!(matches!(
-        hub.note_create("   "),
+        hub.note_create("   ", None),
         Err(note_core::Error::Invalid(_))
     ));
     // 深层点目录同样不可写：扫描器不索引它，写进去就是一条永远对不上的漂移行
@@ -274,7 +274,7 @@ fn 写路径拒绝落在应用私有目录与非_md_目标() {
 fn 保存被引用的笔记不能弄丢别人的入链() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
-    let target = hub.note_create("被引用者").unwrap();
+    let target = hub.note_create("被引用者", None).unwrap();
     hub.save_note(
         "notes/引用方.md",
         "看 [[被引用者]]。
@@ -307,7 +307,7 @@ title: \"被引用者\"
 fn 失败的操作不能把索引改坏() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
-    let target = hub.note_create("被引用者").unwrap();
+    let target = hub.note_create("被引用者", None).unwrap();
     hub.save_note(
         "notes/引用方.md",
         "看 [[被引用者]]。
@@ -675,4 +675,61 @@ fn 收敛不收扫描器排除的路径() {
     assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
     assert_eq!(hub.drift().unwrap(), 0, "排除目录不该造成漂移");
     assert!(hub.orphan_counts().unwrap().is_clean());
+}
+
+#[test]
+fn 在指定目录里新建笔记落在那一层() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    std::fs::create_dir_all(d.path().join("notes")).unwrap();
+    let dir = hub.create_dir("notes", "工作").unwrap();
+    let rel = hub.note_create("周报", Some(&dir)).unwrap();
+    assert!(rel.starts_with("notes/工作/"), "{rel}");
+    assert!(d.path().join(&rel).is_file());
+    assert_eq!(hub.read_note(&rel).unwrap().title, "周报");
+    assert!(hub.list_dirs().unwrap().contains(&dir));
+    // 落点不能挂到视图 / 附件 / 不存在的目录
+    assert!(matches!(
+        hub.note_create("x", Some("views")),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(
+        hub.note_create("x", Some("attachments")),
+        Err(note_core::Error::Invalid(_))
+    ));
+    assert!(matches!(
+        hub.note_create("x", Some("notes/没有")),
+        Err(note_core::Error::NotFound(_))
+    ));
+    assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
+    assert_eq!(hub.drift().unwrap(), 0, "目录里的笔记不该造成漂移");
+}
+
+#[test]
+fn 目录改名删名之后tree_toml跟着走() {
+    use note_core::tree_order::TreeOrder;
+    let d = tempfile::tempdir().unwrap();
+    let hub = hub_in(d.path());
+    std::fs::create_dir_all(d.path().join("notes")).unwrap();
+    hub.create_dir("notes", "旧").unwrap();
+    hub.save_tree_order(&[
+        TreeOrder {
+            parent: "notes".into(),
+            names: vec!["旧".into()],
+        },
+        TreeOrder {
+            parent: "notes/旧".into(),
+            names: vec!["甲.md".into()],
+        },
+    ])
+    .unwrap();
+
+    assert_eq!(hub.rename_dir("notes/旧", "新").unwrap(), "notes/新");
+    let orders = hub.tree_order().unwrap();
+    assert_eq!(orders[0].parent, "notes");
+    assert_eq!(orders[0].names, vec!["新".to_string()]);
+    assert_eq!(orders[1].parent, "notes/新");
+
+    hub.delete_dir("notes/新").unwrap();
+    assert!(hub.tree_order().unwrap().is_empty(), "删掉后两层都该没了");
 }

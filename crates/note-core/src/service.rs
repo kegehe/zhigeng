@@ -584,6 +584,39 @@ impl Hub {
         crate::tree_order::save(&self.vault, orders)
     }
 
+    /// 侧栏要展示的全部目录（含空目录、任意层级）。
+    ///
+    /// 递归遍历是文件系统活，库大了会超过同步命令的 8ms——GUI 侧走
+    /// `spawn_blocking`（见 `src-tauri/src/lib.rs` 的 `dir_list`），CLI 与测试里直接调。
+    pub fn list_dirs(&self) -> Result<Vec<String>> {
+        self.vault.list_dirs()
+    }
+
+    pub fn create_dir(&self, parent: &str, name: &str) -> Result<String> {
+        self.vault.create_dir(parent, name)
+    }
+
+    /// 改名之后跟着改 `tree.toml`。顺序文件写失败**不回滚改名**：
+    /// 文件系统那一步已经成功了，报失败只会让界面以为没改成、再点一次就是冲突。
+    /// 代价是一层的自定义序退回默认，比"目录改了一半"轻得多。
+    pub fn rename_dir(&self, rel: &str, new_name: &str) -> Result<String> {
+        let new_rel = self.vault.rename_dir(rel, new_name)?;
+        if new_rel != rel {
+            if let Err(e) = crate::tree_order::rename_path(&self.vault, rel, &new_rel) {
+                tracing::warn!("目录改名后更新 tree.toml 失败：{e}");
+            }
+        }
+        Ok(new_rel)
+    }
+
+    pub fn delete_dir(&self, rel: &str) -> Result<()> {
+        self.vault.remove_dir(rel)?;
+        if let Err(e) = crate::tree_order::remove_path(&self.vault, rel) {
+            tracing::warn!("目录删除后更新 tree.toml 失败：{e}");
+        }
+        Ok(())
+    }
+
     pub fn read_note(&self, rel: &str) -> Result<NoteDetail> {
         let (title, blocks) = self.index.note_blocks(rel)?;
         Ok(NoteDetail {
@@ -757,12 +790,29 @@ impl Hub {
     }
 
     /// 新建一篇空笔记的**落盘**部分，返回相对路径（索引留给 `index_one`）。
-    pub fn note_create_file(&mut self, title: &str) -> Result<String> {
+    ///
+    /// `parent` 是"在哪一层新建"（侧栏某个目录）；`None` = 默认的 `notes/`。
+    /// 默认那条要顺手把 `notes/` 建出来：老库可能只有根上的散篇，当初是
+    /// `write_atomic` 顺手建父目录，现在落点先验存在，不补这一步就会建不出来。
+    pub fn note_create_file(&mut self, title: &str, parent: Option<&str>) -> Result<String> {
         let title = title.trim();
         if title.is_empty() {
             return Err(Error::Invalid("标题不能为空".into()));
         }
-        let rel = crate::capture::new_note_rel(&self.vault, title);
+        let parent = match parent.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => self.vault.check_note_parent(p)?,
+            None => {
+                let abs = self.vault.resolve(NOTES_DIR)?;
+                if !abs.is_dir() {
+                    std::fs::create_dir_all(&abs).map_err(|e| Error::Io {
+                        path: abs.display().to_string(),
+                        source: e,
+                    })?;
+                }
+                NOTES_DIR.to_string()
+            }
+        };
+        let rel = crate::capture::new_note_rel_in(&self.vault, title, &parent)?;
         let content = crate::capture::compose_new(
             title,
             &crate::capture::gen_note_id(),
@@ -773,8 +823,8 @@ impl Hub {
     }
 
     /// 新建一篇空笔记（标题只进 front-matter，正文留给用户写），返回相对路径。
-    pub fn note_create(&mut self, title: &str) -> Result<String> {
-        let rel = self.note_create_file(title)?;
+    pub fn note_create(&mut self, title: &str, parent: Option<&str>) -> Result<String> {
+        let rel = self.note_create_file(title, parent)?;
         self.index_one(&rel)?;
         Ok(rel)
     }

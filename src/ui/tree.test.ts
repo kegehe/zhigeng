@@ -85,6 +85,34 @@ describe("目录树的形状", () => {
   });
 });
 
+describe("空目录", () => {
+  it("只存在于 dir_list 里的目录也进树，篇数为 0", () => {
+    const 树 = buildTree([篇("notes/甲.md", 1)], [], [
+      "notes",
+      "notes/空",
+      "notes/空/更深",
+      "项目",
+    ]);
+    expect(形状(树)).toEqual([
+      "笔记(1)",
+      "  空(0)",
+      "    更深(0)",
+      "  甲@1",
+      "项目(0)",
+    ]);
+  });
+
+  it("有笔记的目录不会被铺目录那一步弄重，用户顺序照样管得到空目录", () => {
+    const 树 = buildTree(
+      [篇("notes/甲.md", 1), 篇("notes/工作/乙.md", 2)],
+      [{ parent: "notes", names: ["空", "甲.md"] }],
+      ["notes", "notes/工作", "notes/空"]
+    );
+    expect(层内名字(树, "notes")).toEqual(["空", "甲.md", "工作"]);
+    expect(目录(树, "notes/工作")!.notes).toBe(1);
+  });
+});
+
 describe("折叠与展平", () => {
   const 树 = buildTree([
     篇("notes/a/一.md", 1),

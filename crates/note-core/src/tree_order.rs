@@ -41,9 +41,9 @@ fn 批次() -> u128 {
 
 /// 归一父路径：反斜杠换正斜杠、去首尾斜杠。
 /// 前端从 `rel` 切出来的路径在 Windows 上可能是反斜杠形式，两边统一一次，
-/// 否则同一个目录会存成两条互不相认的序。
+/// 否则同一个目录会存成两条互不相认的序。判据本体在 `vault::norm_rel`（目录那条路也用）。
 fn norm_parent(p: &str) -> String {
-    p.replace('\\', "/").trim_matches('/').to_string()
+    crate::vault::norm_rel(p)
 }
 
 /// 只挡会让这份文件失去意义的形状：子条目名里不能带路径分隔符（那是完整路径，
@@ -198,6 +198,108 @@ pub fn save(vault: &Vault, orders: &[TreeOrder]) -> Result<()> {
     // 走 Vault 的原子写：半截的 tree.toml 下次启动会被判成坏档，等于顺序全丢
     vault.write_atomic(".note/tree.toml", text.as_bytes())?;
     Ok(())
+}
+
+/// 路径改名后，把这份顺序表里指向它的键与名字跟着换。
+///
+/// 两处要动：以旧路径为键的那一层（整层搬过去），以及**父层里那个目录名**。
+/// 名字不换的话，父层的自定义顺序认不出新目录——旧名字还挂在那儿，新目录按默认
+/// 规则排到末尾，用户看到的是"改个名顺序就乱了"。
+///
+/// 文件系统那边已经成功了才调这里；失败只由调用方记日志，**不能反过来报改名失败**。
+pub fn rename_path(vault: &Vault, old: &str, new: &str) -> Result<()> {
+    let old = norm_parent(old);
+    let new = norm_parent(new);
+    if old.is_empty() || new.is_empty() || old == new {
+        return Ok(());
+    }
+    let 旧本名 = old.rsplit('/').next().unwrap_or(&old).to_string();
+    let 新本名 = new.rsplit('/').next().unwrap_or(&new).to_string();
+    let 父 = old
+        .rsplit_once('/')
+        .map(|(p, _)| p)
+        .unwrap_or("")
+        .to_string();
+    let mut orders = load(vault)?;
+    if orders.is_empty() {
+        return Ok(()); // 没排过序：不凭空造一份文件
+    }
+    let 原 = orders.clone();
+    let 旧键: BTreeSet<String> = orders
+        .iter()
+        .filter(|o| o.parent == old || o.parent.starts_with(&format!("{old}/")))
+        .map(|o| o.parent.clone())
+        .collect();
+    for o in &mut orders {
+        if o.parent == old {
+            o.parent = new.clone();
+        } else if let Some(rest) = o.parent.strip_prefix(&format!("{old}/")) {
+            o.parent = format!("{new}/{rest}");
+        }
+        if o.parent == 父 {
+            for n in &mut o.names {
+                if *n == 旧本名 {
+                    *n = 新本名.clone();
+                }
+            }
+        }
+    }
+    // `save` 是按父整条替换的：旧键得显式给一条空序列才会从文件里消失，
+    // 不然改名之后旧路径那一层还留在盘上，下次建出同名目录会继承它。
+    for k in 旧键 {
+        if !orders.iter().any(|o| o.parent == k) {
+            orders.push(TreeOrder {
+                parent: k,
+                names: Vec::new(),
+            });
+        }
+    }
+    if orders == 原 {
+        return Ok(());
+    }
+    save(vault, &orders)
+}
+
+/// 路径删掉后，把指向它的层与名字一起摘掉。
+/// 不摘的话，用户下次在同一位置建出同名目录，会继承一份莫名其妙的旧顺序。
+pub fn remove_path(vault: &Vault, rel: &str) -> Result<()> {
+    let rel = norm_parent(rel);
+    if rel.is_empty() {
+        return Ok(());
+    }
+    let 本名 = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+    let 父 = rel
+        .rsplit_once('/')
+        .map(|(p, _)| p)
+        .unwrap_or("")
+        .to_string();
+    let mut orders = load(vault)?;
+    if orders.is_empty() {
+        return Ok(());
+    }
+    let 原 = orders.clone();
+    let 旧键: Vec<String> = orders
+        .iter()
+        .filter(|o| o.parent == rel || o.parent.starts_with(&format!("{rel}/")))
+        .map(|o| o.parent.clone())
+        .collect();
+    for o in &mut orders {
+        if o.parent == 父 {
+            o.names.retain(|n| *n != 本名);
+        }
+    }
+    orders.retain(|o| o.parent != rel && !o.parent.starts_with(&format!("{rel}/")));
+    // 同 `rename_path`：不给空序列，`save` 不会碰旧键，删掉的目录还会留下它的层
+    for k in 旧键 {
+        orders.push(TreeOrder {
+            parent: k,
+            names: Vec::new(),
+        });
+    }
+    if orders == 原 {
+        return Ok(());
+    }
+    save(vault, &orders)
 }
 
 fn to_row(o: &TreeOrder) -> toml::Value {
@@ -445,6 +547,58 @@ mod tests {
         assert_eq!(存住的.len(), 1, "坏档原文得留一份可查的副本：{存住的:?}");
         let 文本 = std::fs::read(vault.meta_dir().join("conflicts").join(&存住的[0])).unwrap();
         assert_eq!(文本, 遗言.as_bytes(), "副本必须逐字节等于当时那份");
+    }
+
+    #[test]
+    fn 目录改名后父层名字与以它为键的层一起搬() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        save(
+            &vault,
+            &[
+                一层("", &["notes"]),
+                一层("notes", &["项目", "其他.md"]),
+                一层("notes/项目", &["甲.md"]),
+                一层("notes/项目/子", &["乙.md"]),
+            ],
+        )
+        .unwrap();
+        rename_path(&vault, "notes/项目", "notes/新项目").unwrap();
+        assert_eq!(
+            载入(&vault),
+            vec![
+                一层("", &["notes"]),
+                一层("notes", &["新项目", "其他.md"]),
+                一层("notes/新项目", &["甲.md"]),
+                一层("notes/新项目/子", &["乙.md"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn 目录删掉后指向它的层与名字一起摘掉() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        save(
+            &vault,
+            &[
+                一层("notes", &["项目", "甲.md"]),
+                一层("notes/项目", &["x.md"]),
+                一层("notes/项目/子", &["y.md"]),
+            ],
+        )
+        .unwrap();
+        remove_path(&vault, "notes/项目").unwrap();
+        assert_eq!(载入(&vault), vec![一层("notes", &["甲.md"])]);
+    }
+
+    #[test]
+    fn 没排过序时目录改名删名不凭空造文件() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        rename_path(&vault, "notes/旧", "notes/新").unwrap();
+        remove_path(&vault, "notes/旧").unwrap();
+        assert!(!tree_file(&vault).exists());
     }
 
     #[test]

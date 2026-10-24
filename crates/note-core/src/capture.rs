@@ -107,17 +107,21 @@ pub fn compose_new(title: &str, id: &str, created: &str) -> String {
     )
 }
 
-/// 新建笔记的落点：`notes/YYYY-MM-DD-<slug>.md`，重名自动加序号。
-pub fn new_note_rel(vault: &Vault, title: &str) -> String {
+/// 新建笔记的落点：`<parent>/YYYY-MM-DD-<slug>.md`，重名自动加序号。
+///
+/// `parent` 走 `Vault::check_note_parent`：目录必须已存在且是笔记目录。
+/// 落点不替调用方猜——挂错目录的笔记在侧栏里会跑到别处，而用户点的是"在这里新建"。
+pub fn new_note_rel_in(vault: &Vault, title: &str, parent: &str) -> Result<String> {
+    let parent = vault.check_note_parent(parent)?;
     let stem = sanitize_file_stem(title);
     let day = today();
-    let mut rel = format!("notes/{day}-{stem}.md");
+    let mut rel = format!("{parent}/{day}-{stem}.md");
     let mut n = 1;
     while vault.resolve(&rel).map(|p| p.exists()).unwrap_or(false) {
-        rel = format!("notes/{day}-{stem}-{n}.md");
+        rel = format!("{parent}/{day}-{stem}-{n}.md");
         n += 1;
     }
-    rel
+    Ok(rel)
 }
 
 /// 只改 front-matter 里的 `title:`，其余字节原样不动。

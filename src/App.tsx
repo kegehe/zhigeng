@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -12,7 +13,9 @@ import { listen } from "@tauri-apps/api/event";
 import {
   ChevronDown,
   ChevronRight,
+  FolderPlus,
   Minus,
+  MoreHorizontal,
   Plus,
   RotateCw,
   Settings,
@@ -36,6 +39,7 @@ import {
   层内名字,
   合并层,
   type Branch,
+  type DirBranch,
 } from "./ui/tree";
 import { 判落点, 算动作, type 行 as 拖行, type 落点 } from "./ui/dragdrop";
 import { LinkPanelView } from "./ui/Links";
@@ -83,6 +87,51 @@ type Mode =
 type Opened = { rel: string; title: string };
 /** 引用落点。nonce 让"同一块再点一次"也能重新滚动，而不是因为值没变被 React 忽略 */
 type 块定位 = { ordinal: number; nonce: number };
+/**
+ * 侧栏目录上正在等输入的那一个动作。只留一个：同一时刻树里只该有一行是输入框，
+ * 两行同时开着等于让用户猜回车会落到哪一行。
+ */
+type 树动作 =
+  | { 类型: "建目录"; 父: string }
+  | { 类型: "建笔记"; 父: string }
+  | { 类型: "改名"; 目录: string }
+  | { 类型: "删除"; 目录: string };
+
+/** 树里那行输入框。与"新建笔记"那一格同一副样子，只是缩进跟着层级走 */
+function 树输入({
+  depth,
+  value,
+  placeholder,
+  onChange,
+  onCommit,
+  onCancel,
+}: {
+  depth: number;
+  value: string;
+  placeholder: string;
+  onChange: (v: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="py-1 pe-2"
+      style={{ paddingInlineStart: `calc(var(--space-3) + ${depth} * var(--space-4))` }}
+    >
+      <input
+        autoFocus
+        className="w-full rounded-md border border-accent bg-page px-2 py-1 text-sm"
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onCommit();
+          else if (e.key === "Escape") onCancel();
+        }}
+      />
+    </div>
+  );
+}
 
 function useTheme() {
   const [theme, set档] = useState<Theme>(读主题);
@@ -120,6 +169,21 @@ const baseOf = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1);
 /** 文件名去掉扩展名——改名框里不该让用户自己处理 `.md` */
 const stemOf = (rel: string) => baseOf(rel).replace(/\.markdown$/, "").replace(/\.md$/, "");
 
+/** 顶层三条是语义目录：能往里建东西，但改名/删除不是用户该做的事 */
+const 是语义顶层 = (b: DirBranch) =>
+  b.depth === 0 && (b.path === "notes" || b.path === "inbox" || b.path === "archive");
+
+/** 按路径找回目录节点。菜单只记路径，渲染时要拿回节点上的名字与子项数 */
+function 找目录(分支们: Branch[], path: string): DirBranch | null {
+  for (const b of 分支们) {
+    if (b.kind !== "dir") continue;
+    if (b.path === path) return b;
+    const 下 = 找目录(b.children, path);
+    if (下) return 下;
+  }
+  return null;
+}
+
 /**
  * 按钮基线在 `ui/controls.ts`——设置页要用同一副，这里再留一份字符串常量，
  * [06] §3 那张"Button 变体体系"的欠账就从两份变三份。
@@ -134,6 +198,18 @@ export function App() {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   /** 侧栏自定义顺序（`.note/tree.toml`）。空表 = 谁都没拖过，一切按默认规则 */
   const [order, setOrder] = useState<SiblingOrder[]>([]);
+  /**
+   * 后端列出的全部目录（含空目录）。**空目录不会出现在任何一篇的 `rel` 里**，
+   * 只靠 `list_notes` 拼树永远看不见刚建出来的文件夹。
+   */
+  const [dirs, setDirs] = useState<string[]>([]);
+  /**
+   * 打开着的目录操作菜单。坐标是**视口坐标**：菜单挂在 `nav` 外面用 `position: fixed`，
+   * 否则侧栏那层 `overflow-y-auto` 会把靠底部的行弹出来的菜单裁掉一半。
+   */
+  const [dirMenu, setDirMenu] = useState<{ 路径: string; 右: number; 下: number } | null>(null);
+  const [dirAction, setDirAction] = useState<树动作 | null>(null);
+  const [dirDraft, setDirDraft] = useState("");
   /**
    * 正在拖的行、当前落点、指示线位置。`线顶` 用的是 nav 的**内容坐标**——
    * 线要跟着滚动内容走，拿视口坐标画会在滚动时飘掉。
@@ -313,6 +389,12 @@ export function App() {
       .treeOrder()
       .then(setOrder)
       .catch(() => setOrder([]));
+    // 目录跟着库读一次：它不从 `list_notes` 来，没有"索引事件"会顺带刷新它。
+    // 外部新建的空目录要重启后才会出现——这一条写进 docs/05 的已知限制。
+    void api
+      .dirList()
+      .then(setDirs)
+      .catch(() => setDirs([]));
   }, [info?.vaultPath]);
 
   /**
@@ -500,7 +582,7 @@ export function App() {
    * 目录树。搜索态**仍然是平铺命中**——命中带的是相关度，按目录分组会把"最像的那篇"
    * 埋进某个折叠目录里，那是把搜索变差。
    */
-  const tree = useMemo(() => buildTree(list, order), [list, order]);
+  const tree = useMemo(() => buildTree(list, order, dirs), [list, order, dirs]);
   const sidebarRows = useMemo(() => flatten(tree, collapsed), [tree, collapsed]);
   const toggleDir = (path: string) =>
     setCollapsed((c) => {
@@ -546,6 +628,20 @@ export function App() {
     };
   };
 
+  /**
+   * 命中行之后**下一行树行**。目录行与它下面那行之间可能夹着输入/确认行
+   * （`data-tree-key` 为空），所以不能直接拿 `nextElementSibling`——拿错了，
+   * 那条缝会被算成"这一层末尾"，用户拖到空目录下方就会跑到父层最后去。
+   */
+  const 下一行of = (el: Element | null | undefined): 拖行 | null => {
+    let e = el?.nextElementSibling ?? null;
+    while (e) {
+      if (e instanceof HTMLElement && e.dataset.treeKey !== undefined) return 行of(e);
+      e = e.nextElementSibling;
+    }
+    return null;
+  };
+
   /** 此刻指针下的落点。判据本体在 `ui/dragdrop.ts`（那里测得到，这里只负责量像素） */
   const 落点在此刻 = (被拖: 拖行, x: number, y: number) => {
     const nav = navRef.current;
@@ -553,7 +649,7 @@ export function App() {
     const 命中 = 行of(el);
     if (!nav || !el || !命中) return { 被拖, 落: null as 落点, 线顶: null };
     const r = el.getBoundingClientRect();
-    const 落 = 判落点(被拖, 命中, 行of(el.nextElementSibling), y - r.top, r.height);
+    const 落 = 判落点(被拖, 命中, 下一行of(el), y - r.top, r.height);
     const 原点 = nav.getBoundingClientRect().top - nav.scrollTop;
     const 线顶 =
       !落 || 落.kind === "into"
@@ -894,22 +990,116 @@ export function App() {
     }
   };
 
-  const createNote = async (标题?: string) => {
-    const title = (标题 ?? newTitle).trim();
-    if (!title) return;
-    if (editing && !(await persist())) return;
+  /** 重建目录清单。建/改名/删之后都要来一次：树里那一份是后端遍历出来的，改不了乐观值 */
+  const 刷新目录 = useCallback(async () => {
     try {
-      const rel = await api.noteCreate(title);
-      setNewTitle("");
-      setCreating(false);
-      setQuery("");
-      // 建笔记是为了写，不是为了看一个空壳：直接进正文编辑态。
-      // 装载交给 startEdit——它会把列表元信息、块树与 baseHash 一次取齐
-      await startEdit(rel);
+      setDirs(await api.dirList());
+    } catch (e) {
+      setError(describeError(e).message);
+    }
+  }, []);
+
+  /** 把某个目录的整条路径（含它自己）展开，让刚建出来的东西当场看得见 */
+  const 展开目录 = (rel: string) =>
+    setCollapsed((c) => {
+      const 链 = [...dirsOf(rel), rel];
+      if (!链.some((p) => c.has(p))) return c;
+      const next = new Set(c);
+      for (const p of 链) next.delete(p);
+      return next;
+    });
+
+  const 开树动作 = (动作: 树动作) => {
+    setDirDraft(动作.类型 === "改名" ? baseOf(动作.目录) : "");
+    setDirAction(动作);
+    // 树里同一时刻只该有一行输入框：顶上那一格开着就收掉
+    setCreating(false);
+    setNewTitle("");
+    // 删除要在菜单里再确认一次，所以菜单不关；其余动作关掉菜单，让输入行露出来
+    if (动作.类型 !== "删除") setDirMenu(null);
+    if (动作.类型 === "删除") return;
+    const 展开谁 = 动作.类型 === "改名" ? 动作.目录 : 动作.父;
+    if (!展开谁) return;
+    setCollapsed((c) => {
+      if (!c.has(展开谁)) return c;
+      const next = new Set(c);
+      next.delete(展开谁);
+      return next;
+    });
+  };
+
+  const 取消树动作 = () => {
+    setDirAction(null);
+    setDirDraft("");
+    setDirMenu(null);
+  };
+
+  const 提交树动作 = async () => {
+    const 动作 = dirAction;
+    if (!动作) return;
+    const 文 = dirDraft.trim();
+    if (动作.类型 !== "删除" && !文) return;
+    try {
+      if (动作.类型 === "建目录") {
+        const rel = await api.dirCreate(动作.父, 文);
+        await 刷新目录();
+        展开目录(rel);
+      } else if (动作.类型 === "建笔记") {
+        if (await createNote(文, 动作.父)) 取消树动作();
+        return;
+      } else if (动作.类型 === "改名") {
+        await api.dirRename(动作.目录, 文);
+        await 刷新目录();
+        setOrder(await api.treeOrder());
+      } else {
+        await api.dirDelete(动作.目录);
+        await 刷新目录();
+        setOrder(await api.treeOrder());
+      }
+      取消树动作();
     } catch (e) {
       setError(describeError(e).message);
     }
   };
+
+  const createNote = async (标题?: string, parent?: string): Promise<boolean> => {
+    const title = (标题 ?? newTitle).trim();
+    if (!title) return false;
+    if (editing && !(await persist())) return false;
+    try {
+      const rel = await api.noteCreate(title, parent);
+      setNewTitle("");
+      setCreating(false);
+      setQuery("");
+      revealPath(rel);
+      // 默认落点 `notes/` 可能是后端这一次才建出来的（老库只有根上的散篇），
+      // 目录清单要跟上，否则新笔记所在的目录在树里没有那一行
+      void 刷新目录();
+      // 建笔记是为了写，不是为了看一个空壳：直接进正文编辑态。
+      // 装载交给 startEdit——它会把列表元信息、块树与 baseHash 一次取齐
+      await startEdit(rel);
+      return true;
+    } catch (e) {
+      setError(describeError(e).message);
+      return false;
+    }
+  };
+
+  /**
+   * 菜单的"点外面就关"。删除动作也在这里一起放弃：菜单没了还留着一个待确认的删除，
+   * 下一次误触回车就会删掉一个目录。
+   */
+  useEffect(() => {
+    if (!dirMenu) return;
+    const 关 = (e: PointerEvent) => {
+      const t = e.target;
+      if (t instanceof Element && t.closest(".tree-menu, [data-tree-more]")) return;
+      setDirMenu(null);
+      setDirAction((a) => (a?.类型 === "删除" ? null : a));
+    };
+    window.addEventListener("pointerdown", 关);
+    return () => window.removeEventListener("pointerdown", 关);
+  }, [dirMenu]);
 
   const openTrash = async () => {
     if (editing && !(await persist())) return;
@@ -1374,6 +1564,21 @@ export function App() {
               >
                 <Plus aria-hidden="true" />
               </button>
+              {/* 空目录进树之后，顶层也得有个入口：不然第一层目录只能从菜单里建出来，
+                  而菜单挂在目录行上——鸡生蛋 */}
+              <button
+                className={btn + " grid place-items-center"}
+                title="新建目录"
+                onClick={() => {
+                  if (dirAction?.类型 === "建目录" && dirAction.父 === "") {
+                    取消树动作();
+                    return;
+                  }
+                  开树动作({ 类型: "建目录", 父: "" });
+                }}
+              >
+                <FolderPlus aria-hidden="true" />
+              </button>
             </div>
             {creating ? (
               <div className="px-2 pb-2">
@@ -1394,6 +1599,21 @@ export function App() {
               </div>
             ) : null}
             <nav ref={navRef} className="relative min-h-0 flex-1 overflow-y-auto pb-4">
+              {/* 库根那一层没有"目录行"可以挂输入框，所以顶层建目录的输入行单独立在这里 */}
+              {dirAction &&
+              (dirAction.类型 === "建目录" || dirAction.类型 === "建笔记") &&
+              dirAction.父 === "" ? (
+                <树输入
+                  depth={0}
+                  value={dirDraft}
+                  placeholder={
+                    dirAction.类型 === "建目录" ? "目录名，回车创建" : "标题，回车创建"
+                  }
+                  onChange={setDirDraft}
+                  onCommit={() => void 提交树动作()}
+                  onCancel={取消树动作}
+                />
+              ) : null}
               {/* 落位线。必须 pointer-events:none，否则它会吃掉 elementFromPoint，
                   指针一压到线上就量不到真正的行 */}
               {drag?.线顶 != null ? (
@@ -1439,38 +1659,91 @@ export function App() {
                       const 信 = 行信息(b);
                       const 落 = drag?.落;
                       const 移入 = !!落 && 落.kind === "into" && 落.目录 === b.path;
+                      const 改名中 = dirAction?.类型 === "改名" && dirAction.目录 === b.path;
+                      const 建中 =
+                        dirAction &&
+                        (dirAction.类型 === "建目录" || dirAction.类型 === "建笔记") &&
+                        dirAction.父 === b.path
+                          ? dirAction
+                          : null;
+                      const 菜单开着 = dirMenu?.路径 === b.path;
+                      const 可改删 = !是语义顶层(b) && b.children.length === 0;
                       return (
-                        <button
-                          key={信.键}
-                          onClick={() => {
-                            if (刚拖过(信.键)) return;
-                            toggleDir(b.path);
-                          }}
-                          onPointerDown={(e) => onRowDown(e, 信)}
-                          data-tree-key={信.键}
-                          data-tree-parent={信.父}
-                          data-tree-name={信.名}
-                          data-tree-dir="1"
-                          data-tree-self={信.自身}
-                          aria-expanded={!folded}
-                          style={pad}
-                          className={
-                            "flex w-full cursor-grab items-baseline gap-1 px-3 py-1 text-left text-sm text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover" +
-                            (移入 ? " tree-into" : "")
-                          }
-                        >
-                          <span className="flex w-3 shrink-0 items-center text-xs text-fg-disabled">
-                            {folded ? (
-                              <ChevronRight aria-hidden="true" />
-                            ) : (
-                              <ChevronDown aria-hidden="true" />
-                            )}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate">{b.name}</span>
-                          <span className="shrink-0 font-mono text-xs text-fg-2">
-                            {b.notes}
-                          </span>
-                        </button>
+                        <Fragment key={信.键}>
+                          {改名中 ? (
+                            <树输入
+                              depth={b.depth}
+                              value={dirDraft}
+                              placeholder="目录名，回车改名"
+                              onChange={setDirDraft}
+                              onCommit={() => void 提交树动作()}
+                              onCancel={取消树动作}
+                            />
+                          ) : (
+                            <div
+                              data-tree-key={信.键}
+                              data-tree-parent={信.父}
+                              data-tree-name={信.名}
+                              data-tree-dir="1"
+                              data-tree-self={信.自身}
+                              style={pad}
+                              className={"tree-row" + (移入 ? " tree-into" : "")}
+                            >
+                              <button
+                                onClick={() => {
+                                  if (刚拖过(信.键)) return;
+                                  toggleDir(b.path);
+                                }}
+                                onPointerDown={(e) => onRowDown(e, 信)}
+                                aria-expanded={!folded}
+                                className="tree-main cursor-grab text-fg-2"
+                              >
+                                <span className="flex w-3 shrink-0 items-center text-xs text-fg-disabled">
+                                  {folded ? (
+                                    <ChevronRight aria-hidden="true" />
+                                  ) : (
+                                    <ChevronDown aria-hidden="true" />
+                                  )}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate">{b.name}</span>
+                                <span className="shrink-0 font-mono text-xs text-fg-2">
+                                  {b.notes}
+                                </span>
+                              </button>
+                              {/* 一行一个"…"会盖过标题，所以平时藏着：指到这一行、键盘聚焦到它、
+                                  或菜单正开着时才露出来 */}
+                              <button
+                                className={"tree-more" + (菜单开着 ? " on" : "")}
+                                data-tree-more="1"
+                                title="目录操作"
+                                aria-label={`${b.name}：新建子目录、在此新建笔记${可改删 ? "、重命名、删除" : ""}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (菜单开着) {
+                                    setDirMenu(null);
+                                    return;
+                                  }
+                                  const r = e.currentTarget.getBoundingClientRect();
+                                  setDirMenu({ 路径: b.path, 右: r.right, 下: r.bottom + 4 });
+                                }}
+                              >
+                                <MoreHorizontal aria-hidden="true" />
+                              </button>
+                            </div>
+                          )}
+                          {建中 ? (
+                            <树输入
+                              depth={b.depth + 1}
+                              value={dirDraft}
+                              placeholder={
+                                建中.类型 === "建目录" ? "目录名，回车创建" : "标题，回车创建"
+                              }
+                              onChange={setDirDraft}
+                              onCommit={() => void 提交树动作()}
+                              onCancel={取消树动作}
+                            />
+                          ) : null}
+                        </Fragment>
                       );
                     }
                     const active = selected?.rel === b.rel;
@@ -1490,7 +1763,7 @@ export function App() {
                         data-tree-self={信.自身}
                         style={pad}
                         className={
-                          "flex w-full cursor-grab items-baseline gap-1 px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) " +
+                          "flex w-full cursor-grab items-baseline gap-1 py-1 ps-3 pe-6 text-left text-sm transition-colors duration-(--dur-1) " +
                           (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
                         }
                       >
@@ -1582,6 +1855,76 @@ export function App() {
                 </div>
               ) : null}
             </nav>
+            {/* 菜单挂在 nav 外面：nav 是 overflow-y-auto，贴着底部的行弹出来的菜单会被裁掉。
+                坐标在打开那一刻量好（视口坐标），滚动/折叠都不再跟——它是一次性的操作面 */}
+            {dirMenu
+              ? (() => {
+                  const 目 = 找目录(tree, dirMenu.路径);
+                  if (!目) return null;
+                  const 可改删 = !是语义顶层(目) && 目.children.length === 0;
+                  const 确认中 =
+                    dirAction?.类型 === "删除" && dirAction.目录 === 目.path;
+                  return (
+                    <div
+                      className="tree-menu"
+                      role="menu"
+                      style={{
+                        left: dirMenu.右,
+                        top: Math.min(dirMenu.下, window.innerHeight - 220),
+                        transform: "translateX(-100%)",
+                      }}
+                    >
+                      {确认中 ? (
+                        <>
+                          <div className="tree-menu-tip">删除「{层名(目)}」？</div>
+                          <div className="tree-menu-actions">
+                            <button onClick={取消树动作}>取消</button>
+                            <button className="danger" onClick={() => void 提交树动作()}>
+                              删除
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            role="menuitem"
+                            onClick={() => 开树动作({ 类型: "建目录", 父: 目.path })}
+                          >
+                            新建子目录
+                          </button>
+                          <button
+                            role="menuitem"
+                            onClick={() => 开树动作({ 类型: "建笔记", 父: 目.path })}
+                          >
+                            在此新建笔记
+                          </button>
+                          {可改删 ? (
+                            <>
+                              <button
+                                role="menuitem"
+                                onClick={() => 开树动作({ 类型: "改名", 目录: 目.path })}
+                              >
+                                重命名
+                              </button>
+                              <button
+                                role="menuitem"
+                                className="danger"
+                                onClick={() => 开树动作({ 类型: "删除", 目录: 目.path })}
+                              >
+                                删除空目录
+                              </button>
+                            </>
+                          ) : 是语义顶层(目) ? null : (
+                            <div className="tree-menu-tip">
+                              这一版只改空目录——先把它里面的东西挪走
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()
+              : null}
             {/* flex + gap：这一排以前是裸的 inline-block，JSX 换行的空白被 React 丢掉，
                 五枚按钮之间实测 **0 间距**（边框两两贴合）。挂上徽标就换行，而换行后
                 行间距同样是 0——两排方框粘成一张格子。 */}

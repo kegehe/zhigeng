@@ -382,6 +382,37 @@ fn tree_order_save(
     with_hub_write(&state, |h| h.save_tree_order(&orders)).map_err(|e| e.message)
 }
 
+/// 侧栏要的全部目录（含空目录、任意层级）。
+///
+/// 递归遍历是文件系统活，所以走线程池：库大了会超过同步命令的 8ms
+/// （docs/03 §后端调用纪律）。和 `list_notes` 分开是因为笔记有 300 条上限，
+/// 而**空目录不进任何一篇的 `rel`**——不单独列一次，刚建出来的空目录永远看不见。
+#[tauri::command]
+async fn dir_list(state: State<'_, Shared>) -> Result<Vec<String>, String> {
+    let (vault, _) = bg_handles(&state).ok_or("尚未选择 Vault")?;
+    tauri::async_runtime::spawn_blocking(move || vault.list_dirs().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 建目录。`parent` 是库根相对路径，空串 = 顶层。
+#[tauri::command]
+fn dir_create(state: State<'_, Shared>, parent: String, name: String) -> Result<String, WriteErr> {
+    with_hub_write(&state, |h| h.create_dir(&parent, &name))
+}
+
+/// 改空目录的名字。非空的在服务层就被拒（搬子树是下一档）。
+#[tauri::command]
+fn dir_rename(state: State<'_, Shared>, rel: String, new_name: String) -> Result<String, WriteErr> {
+    with_hub_write(&state, |h| h.rename_dir(&rel, &new_name))
+}
+
+/// 删空目录。非空的在服务层就被拒（整棵进回收站是下一档）。
+#[tauri::command]
+fn dir_delete(state: State<'_, Shared>, rel: String) -> Result<(), WriteErr> {
+    with_hub_write(&state, |h| h.delete_dir(&rel))
+}
+
 #[tauri::command]
 fn read_note(state: State<'_, Shared>, rel: String) -> Result<NoteDetail, String> {
     with_hub(&state, |h| h.read_note(&rel))
@@ -466,8 +497,9 @@ fn note_create(
     app: AppHandle,
     state: State<'_, Shared>,
     title: String,
+    parent: Option<String>,
 ) -> Result<String, WriteErr> {
-    let rel = with_hub_write(&state, |h| h.note_create_file(&title))?;
+    let rel = with_hub_write(&state, |h| h.note_create_file(&title, parent.as_deref()))?;
     let shown = rel.clone();
     reindex_async(app, vec![rel.clone()], move |vault, index| {
         reindex_note(vault, index, &rel)
@@ -943,6 +975,10 @@ pub fn run() {
             list_notes,
             tree_order,
             tree_order_save,
+            dir_list,
+            dir_create,
+            dir_rename,
+            dir_delete,
             read_note,
             read_raw,
             note_edit_doc,
