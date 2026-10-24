@@ -3,6 +3,7 @@ import type { Transaction } from "@tiptap/pm/state";
 import { useEffect, useRef, useState } from "react";
 
 import { api, describeError, inTauri } from "../ipc/commands";
+import { 是回车提交 } from "../ui/keys";
 import {
   取选段,
   能替换,
@@ -219,7 +220,7 @@ export function RewritePanel({
           set预设id("custom");
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !busy && 指令.trim()) {
+          if (是回车提交(e) && !busy && 指令.trim()) {
             e.preventDefault();
             void 生成();
           }

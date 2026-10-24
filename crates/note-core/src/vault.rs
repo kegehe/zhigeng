@@ -260,7 +260,7 @@ impl Vault {
                 }
                 let name = e.file_name().to_string_lossy();
                 // 两棵有别的语义的树整棵剪掉：资产目录可能有几万张图，遍历它纯浪费
-                !(e.depth() == 1 && matches!(name.as_ref(), ATTACHMENTS_DIR | VIEWS_DIR))
+                !(e.depth() == 1 && (同名(&name, ATTACHMENTS_DIR) || 同名(&name, VIEWS_DIR)))
             })
         {
             let entry = match entry {
@@ -349,7 +349,17 @@ impl Vault {
         }
         let dst = self.resolve(&new_rel)?;
         if dst.exists() {
-            return Err(Error::Conflict(new_rel));
+            // 只差大小写：大小写不敏感的文件系统上 `dst` 与 `src` 是同一份，
+            // 直接 rename 一次把盘上的大小写改过来。canonicalize 相等这一条比
+            // "忽略大小写比较"更准——区分大小写的盘上 `Foo` 与 `foo` 是两个目录，
+            // 那才是真冲突（直接 rename 在 POSIX 上会把空目录顶掉）。
+            let 同一份 = matches!(
+                (src.canonicalize(), dst.canonicalize()),
+                (Ok(a), Ok(b)) if a == b
+            );
+            if !同一份 {
+                return Err(Error::Conflict(new_rel));
+            }
         }
         std::fs::rename(&src, &dst).map_err(|e| Error::Io {
             path: rel,
@@ -377,6 +387,21 @@ impl Vault {
             path: rel,
             source: e,
         })
+    }
+
+    /// 目录是不是**物理空**的。侧栏菜单据此决定要不要给"改名 / 删除"——
+    /// 不拿 `list_notes` 那份被截断的结果推断：库里超过一页时，一个非空目录
+    /// 在界面上看起来就是空的（菜单给了入口，后端才拒）。
+    pub fn is_empty_dir(&self, rel: &str) -> Result<bool> {
+        let rel = norm_rel(rel);
+        if !is_tree_dir(&rel) {
+            return Err(Error::Invalid(format!("不是笔记目录: {rel}")));
+        }
+        let abs = self.resolve(&rel)?;
+        if !abs.is_dir() {
+            return Err(Error::NotFound(rel));
+        }
+        dir_is_empty(&abs)
     }
 
     /// 新建笔记的父目录判据：必须已存在，且是笔记目录（不是附件/视图/元数据）。
@@ -689,14 +714,33 @@ const WINDOWS_RESERVED: &[&str] = &[
 
 const BAD_NAME_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
+/// ASCII 名比较。**NTFS 与 APFS 都是大小写不敏感的**：`NOTES` 与 `notes`
+/// 在盘上是同一个目录，所以保留名与扫描排除名一律按这一条比——精确比较的话，
+/// 用户建一个 `NOTES` 就同时绕过了保留名检查与树外过滤（新库上 `notes/` 是
+/// 第一次建笔记才补出来的，这一下真能建成功）。
+fn 同名(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// 扫描排除的目录名。大小写同样不敏感（`Node_Modules` 在 Windows 上就是同一个目录）。
+fn 是排除名(s: &str) -> bool {
+    同名(s, "node_modules") || 同名(s, "target")
+}
+
 /// 顶层那几个有语义的目录：改名/删除/新建同名一律拒绝。
 /// 往它们**里面**建子目录是另一回事（`notes/工作/` 完全正常）。
 fn is_reserved_top(rel: &str) -> bool {
     !rel.contains('/')
-        && matches!(
-            rel,
-            META_DIR | INBOX_DIR | NOTES_DIR | ARCHIVE_DIR | VIEWS_DIR | ATTACHMENTS_DIR
-        )
+        && [
+            META_DIR,
+            INBOX_DIR,
+            NOTES_DIR,
+            ARCHIVE_DIR,
+            VIEWS_DIR,
+            ATTACHMENTS_DIR,
+        ]
+        .iter()
+        .any(|n| 同名(rel, n))
 }
 
 /// 侧栏里该出现的目录，也是"能往里建笔记/建子目录"的唯一判据。
@@ -711,17 +755,22 @@ pub fn is_tree_dir(rel: &str) -> bool {
     let segs: Vec<&str> = rel.split('/').collect();
     if segs
         .iter()
-        .any(|s| s.is_empty() || s.starts_with('.') || matches!(*s, "node_modules" | "target"))
+        .any(|s| s.is_empty() || s.starts_with('.') || 是排除名(s))
     {
         return false;
     }
-    !matches!(segs[0], ATTACHMENTS_DIR | VIEWS_DIR)
+    !同名(segs[0], ATTACHMENTS_DIR) && !同名(segs[0], VIEWS_DIR)
 }
 
 /// 目录名判据：**拒绝而不是改写**。文件名那边 `sanitize_file_stem` 会悄悄换字，
 /// 目录名是用户刚在输入框里敲的，被换掉他会看到一个不是自己写的名字。
 pub fn check_dir_name(name: &str) -> Result<String> {
-    let name = name.trim();
+    // **只拒不改**：首尾带空格就报错，不替用户修剪——他敲的是「 项目 」，目录名
+    // 却变成「项目」，看到的不是自己写的名字。前端的输入框已经 trim 过一次，
+    // 走到这里的空白只会是从别处（脚本 / 手改）进来的。
+    if name.trim() != name {
+        return Err(Error::Invalid("目录名首尾不能有空格".into()));
+    }
     if name.is_empty() {
         return Err(Error::Invalid("目录名不能为空".into()));
     }
@@ -747,8 +796,7 @@ pub fn check_dir_name(name: &str) -> Result<String> {
     if name.chars().count() > 80 {
         return Err(Error::Invalid("目录名太长（上限 80 字）".into()));
     }
-    let lower = name.to_ascii_lowercase();
-    if lower == "node_modules" || lower == "target" {
+    if 是排除名(name) {
         return Err(Error::Invalid(format!(
             "{name} 是扫描排除目录，建了也不会进索引"
         )));
@@ -785,7 +833,7 @@ fn is_excluded_entry(e: &walkdir::DirEntry) -> bool {
     if name.starts_with('.') {
         return true; // 含 .note、.git、以及任何点开头目录
     }
-    matches!(name.as_str(), "node_modules" | "target")
+    是排除名(&name)
 }
 
 /// 该相对路径是否作为笔记索引。
@@ -795,7 +843,7 @@ pub fn is_indexable_rel(rel: &str) -> bool {
     if segs.iter().any(|s| s.starts_with('.')) {
         return false;
     }
-    if segs.iter().any(|s| matches!(*s, "node_modules" | "target")) {
+    if segs.iter().any(|s| 是排除名(s)) {
         return false;
     }
     rel.ends_with(".md") || rel.ends_with(".markdown")
@@ -830,23 +878,20 @@ pub fn resolve_in(root: &Path, rel: &str) -> Result<PathBuf> {
 /// 目录推导状态。`archive/` 子树整体归档；`inbox/` 待整理；其余在用。
 pub fn status_of_rel(rel: &str) -> Option<NoteStatus> {
     let rel = rel.replace('\\', "/");
-    if rel.starts_with(&format!("{INBOX_DIR}/")) {
-        Some(NoteStatus::Inbox)
-    } else if rel.starts_with(&format!("{ARCHIVE_DIR}/")) {
-        Some(NoteStatus::Archived)
-    } else if rel.starts_with(&format!("{META_DIR}/")) {
-        None
-    } else {
-        Some(NoteStatus::Active)
+    // 首段按大小写不敏感比：盘上真有一个 `Inbox/` 的话，它就是 `inbox/`。
+    match rel.split_once('/') {
+        Some((首, _)) if 同名(首, INBOX_DIR) => Some(NoteStatus::Inbox),
+        Some((首, _)) if 同名(首, ARCHIVE_DIR) => Some(NoteStatus::Archived),
+        Some((首, _)) if 同名(首, META_DIR) => None,
+        _ => Some(NoteStatus::Active),
     }
 }
 
 pub fn kind_of_rel(rel: &str) -> NoteKind {
     let rel = rel.replace('\\', "/");
-    if rel.starts_with(&format!("{VIEWS_DIR}/")) {
-        NoteKind::View
-    } else {
-        NoteKind::Note
+    match rel.split_once('/') {
+        Some((首, _)) if 同名(首, VIEWS_DIR) => NoteKind::View,
+        _ => NoteKind::Note,
     }
 }
 

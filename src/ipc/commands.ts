@@ -93,6 +93,8 @@ export const api = {
   dirRename: (rel: string, newName: string) =>
     invoke<string>("dir_rename", { rel, newName }),
   dirDelete: (rel: string) => invoke<void>("dir_delete", { rel }),
+  /** 物理空才返回 true——菜单据此决定给不给"改名 / 删除" */
+  dirEmpty: (rel: string) => invoke<boolean>("dir_empty", { rel }),
   noteTrash: (rel: string) => invoke<void>("note_trash", { rel }),
   listTrash: () => invoke<TrashRow[]>("list_trash"),
   noteRestore: (batch: string, rel: string) =>

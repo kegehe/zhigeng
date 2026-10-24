@@ -617,6 +617,11 @@ impl Hub {
         Ok(())
     }
 
+    /// 菜单里"能不能改名 / 删除"的判据。一次 `read_dir`，同步命令守得住 8ms。
+    pub fn dir_is_empty(&self, rel: &str) -> Result<bool> {
+        self.vault.is_empty_dir(rel)
+    }
+
     pub fn read_note(&self, rel: &str) -> Result<NoteDetail> {
         let (title, blocks) = self.index.note_blocks(rel)?;
         Ok(NoteDetail {

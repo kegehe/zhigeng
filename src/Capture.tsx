@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { X } from "lucide-react";
 import type { CapturedOut } from "./ipc/types";
+import { 是回车提交 } from "./ui/keys";
 import { 套主题, 盯主题变化, 读主题 } from "./ui/theme";
 
 type Phase = "idle" | "saving" | "saved" | "error";
@@ -99,7 +100,7 @@ export function Capture() {
           if (phase === "error") setPhase("idle");
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
+          if (是回车提交(e) && !e.shiftKey) {
             e.preventDefault();
             void submit();
           } else if (e.key === "Escape") {

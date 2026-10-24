@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { btn, btnPrimary, 路径框 } from "./controls";
 import { 缺项, 步骤名, 探针结论 } from "./ai";
+import { 是回车提交 } from "./keys";
 import { 主题档位, 判备份, 配置归属, type AI忙, type AI表单 } from "./settings";
 import type { Theme } from "./theme";
 import type { AppInfo, AiDiscovery, AiProbeReport, AiView } from "../ipc/types";
@@ -357,7 +358,7 @@ export function SettingsView(props: {
             placeholder={info?.vaultPath ?? "D:\\Notes"}
             onChange={(e) => set库草稿(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && 库草稿.trim()) 库.打开(库草稿.trim());
+              if (是回车提交(e) && 库草稿.trim()) 库.打开(库草稿.trim());
             }}
           />
           <button

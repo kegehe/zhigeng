@@ -219,10 +219,13 @@ fn 目录判据把应用私有与资产视图树挡在外面() {
 
 #[test]
 fn 目录名只拒不改() {
-    assert_eq!(check_dir_name(" 工作 ").unwrap(), "工作");
+    assert_eq!(check_dir_name("工作").unwrap(), "工作");
     assert_eq!(check_dir_name("2026 Q4").unwrap(), "2026 Q4");
     for bad in [
         "",
+        " 工作 ",
+        "\t工作",
+        "工作 ",
         ".",
         "..",
         ".草稿",
@@ -239,6 +242,78 @@ fn 目录名只拒不改() {
         assert!(check_dir_name(bad).is_err(), "{bad} 不该被接受");
     }
     assert!(check_dir_name(&"长".repeat(81)).is_err(), "超长目录名该拒");
+}
+
+#[test]
+fn 保留名与排除名不看大小写() {
+    // NTFS / APFS 上 `NOTES` 与 `notes` 是**同一个目录**。精确比较的话，新库上
+    // （`notes/` 要等第一次建笔记才补出来）真能建出一个"叫 NOTES、实际是 notes"
+    // 的顶层目录，树里从此两行指同一份。
+    let 空库 = tempfile::tempdir().unwrap();
+    let v = Vault::open(空库.path()).unwrap();
+    for name in ["NOTES", "Notes", "INBOX", "Archive", "Attachments", "VIEWS"] {
+        assert!(
+            matches!(v.create_dir("", name), Err(note_core::Error::Invalid(_))),
+            "{name} 是保留名，大小写不同也不行"
+        );
+    }
+    for bad in ["ATTACHMENTS", "Views", "Node_Modules/包", "notes/Target"] {
+        assert!(!is_tree_dir(bad), "{bad} 不该算笔记目录");
+    }
+    for bad in ["Node_Modules/包/a.md", "notes/TARGET/b.md"] {
+        assert!(!is_indexable_rel(bad), "{bad} 不该进索引");
+    }
+    // 修复之前建的盘上大写目录：列目录不给出来，也不进树
+    std::fs::create_dir_all(空库.path().join("Attachments")).unwrap();
+    std::fs::create_dir_all(空库.path().join("Node_Modules/包")).unwrap();
+    let got = v.list_dirs().unwrap();
+    assert!(
+        !got.iter()
+            .any(|d| d.to_ascii_lowercase().contains("attachments")),
+        "{got:?}"
+    );
+    assert!(
+        !got.iter()
+            .any(|d| d.to_ascii_lowercase().contains("node_modules")),
+        "{got:?}"
+    );
+    // 状态与种类也按同一个口径判
+    assert_eq!(status_of_rel("Inbox/甲.md"), Some(NoteStatus::Inbox));
+    assert_eq!(kind_of_rel("Views/日报.md"), NoteKind::View);
+}
+
+#[test]
+fn 空目录判据看盘上有没有东西() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    v.create_dir("notes", "空").unwrap();
+    assert!(v.is_empty_dir("notes/空").unwrap());
+    // 不是笔记文件也算占着位置（删除要连内容一起搬，改名要连内容一起搬）
+    std::fs::write(dir.path().join("notes/空/图.png"), b"x").unwrap();
+    assert!(!v.is_empty_dir("notes/空").unwrap());
+    // 保留目录照样能问（菜单靠 `是语义顶层` 自己藏起改删），树外目录问不出结果
+    assert!(!v.is_empty_dir("notes").unwrap(), "notes 里已经有东西了");
+    assert!(v.is_empty_dir("attachments").is_err());
+    assert!(matches!(
+        v.is_empty_dir("notes/没有"),
+        Err(note_core::Error::NotFound(_))
+    ));
+}
+
+#[test]
+fn 只改大小写的改名能落盘() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    v.create_dir("notes", "Foo").unwrap();
+    assert_eq!(v.rename_dir("notes/Foo", "foo").unwrap(), "notes/foo");
+    // 大小写不敏感的盘上 `exists("notes/Foo")` 照样是 true，所以看盘上的真名字
+    let 名: Vec<String> = std::fs::read_dir(dir.path().join("notes"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.eq_ignore_ascii_case("foo"))
+        .collect();
+    assert_eq!(名, vec!["foo".to_string()], "盘上的大小写要真的改过来");
 }
 
 #[test]

@@ -54,6 +54,7 @@ pub fn 现在() -> i64 {
 /// 同步那一半只把前像读进内存排进队列；blob 与行由后台那一半落。理由见
 /// [`落待落`]：同步路径要守 8ms 红线，而往 SQLite 写一行会跟后台那条连接
 /// 抢写锁——主锁被后台事务占住时，前台任何一条命令都得排队。
+#[derive(Clone)]
 pub struct 待落 {
     /// 库根相对、正斜杠。**它是钥匙**：版本按路径分组。
     pub rel: String,
@@ -120,8 +121,16 @@ fn blob_rel(note_id: &str, rel: &str, hash: &str) -> String {
 /// 前台任何一条命令都得排队（那是 3.26 秒那次事故的形状）。读盘不花钱：冲突
 /// 判定本来就要读同一份。
 pub fn 落待落(vault: &Vault, index: &Index, rel: &str) -> Result<()> {
-    for 待 in index.取待落(rel) {
-        落一条(vault, index, &待)?;
+    let 待落们 = index.取待落(rel);
+    for (i, 待) in 待落们.iter().enumerate() {
+        if let Err(e) = 落一条(vault, index, 待) {
+            // `取待落` 是取走即离队：不补回去的话，失败这一条之后的所有快照都
+            // 凭空消失（磁盘满、blob 路径被占这些情况下会一次丢好几版）。
+            for 剩 in &待落们[i..] {
+                index.推待落(剩.clone());
+            }
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -536,5 +545,32 @@ mod tests {
         drop(hub);
         let _重开的 = Hub::open(d.path()).unwrap();
         assert!(!残留.exists(), "没人指着的残留该被清掉");
+    }
+
+    /// 落不下来的时候，没落成的那些要回到队列里——不能"取走即丢"。
+    ///
+    /// 触发条件很实在：磁盘满、`.note/versions` 被同名文件顶掉、权限没了。
+    #[test]
+    fn 落不下来时快照留在队列里() {
+        let (d, hub) = 造库();
+        std::fs::create_dir_all(d.path().join(".note")).unwrap();
+        // 拿同名文件顶掉 blob 目录：写 blob 必然失败
+        std::fs::write(d.path().join(".note/versions"), "占位").unwrap();
+        let h = hub.indexer();
+        let g = h.lock().unwrap();
+        for 正文 in ["第一版\n", "第二版\n"] {
+            g.推待落(待落 {
+                rel: "notes/甲.md".into(),
+                前像: 正文.as_bytes().to_vec(),
+                reason: 手工,
+                时刻: 现在(),
+            });
+        }
+        assert!(落待落(hub.vault(), &g, "notes/甲.md").is_err());
+        assert_eq!(
+            g.取待落("notes/甲.md").len(),
+            2,
+            "两条都没落成，都得回到队列里"
+        );
     }
 }

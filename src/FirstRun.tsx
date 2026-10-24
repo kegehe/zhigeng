@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./ipc/commands";
 import type { AppInfo } from "./ipc/types";
+import { 是回车提交 } from "./ui/keys";
 
 const btnPrimary =
   "rounded-md bg-accent px-4 py-2 text-sm text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover active:translate-y-px disabled:opacity-55";
@@ -85,7 +86,7 @@ export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
             placeholder="E:\\笔记备份"
             onChange={(e) => setBackup(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && backup.trim()) void choose(backup.trim());
+              if (是回车提交(e) && backup.trim()) void choose(backup.trim());
             }}
           />
           <div className="mt-6 flex items-center gap-3">
@@ -128,7 +129,7 @@ export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
           spellCheck={false}
           onChange={(e) => setPath(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") void open();
+            if (是回车提交(e)) void open();
           }}
         />
         <div className="mt-6 flex items-center gap-3">

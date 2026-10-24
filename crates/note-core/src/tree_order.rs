@@ -71,6 +71,29 @@ fn check(order: &TreeOrder) -> Result<()> {
     Ok(())
 }
 
+/// 同一个父层只留一条。手改 `tree.toml` 可能留出两条同键的条目，目录改名也会
+/// 让两个原本不同的键撞到一起。`save` 是按"先出现的赢"去重的，不先合并的话，
+/// 另一侧的自定义序会被静默丢掉（用户看到的是"改个名顺序就乱了"）。
+/// 名字按出现顺序合并：先出现的那条在前，后出现的追加在后面，重复名字去掉。
+fn 去重同键(orders: &mut Vec<TreeOrder>) {
+    let mut 见过: BTreeSet<String> = BTreeSet::new();
+    let mut 合并: Vec<TreeOrder> = Vec::new();
+    for mut o in orders.drain(..) {
+        if 见过.insert(o.parent.clone()) {
+            合并.push(o);
+            continue;
+        }
+        if let Some(首) = 合并.iter_mut().find(|x| x.parent == o.parent) {
+            for n in o.names.drain(..) {
+                if !首.names.contains(&n) {
+                    首.names.push(n);
+                }
+            }
+        }
+    }
+    *orders = 合并;
+}
+
 /// 读全部同级顺序。三种"读不出内容"要分开对待：
 /// - 没有这个文件 = 用户还没拖过 → 空表（空库、老库、手工建的库都该正常起）
 /// - 有文件但不是合法 TOML = 坏档 → 空表（按没排过序处理，绝不能让侧栏起不来）
@@ -224,6 +247,7 @@ pub fn rename_path(vault: &Vault, old: &str, new: &str) -> Result<()> {
     if orders.is_empty() {
         return Ok(()); // 没排过序：不凭空造一份文件
     }
+    去重同键(&mut orders);
     let 原 = orders.clone();
     let 旧键: BTreeSet<String> = orders
         .iter()
@@ -254,6 +278,9 @@ pub fn rename_path(vault: &Vault, old: &str, new: &str) -> Result<()> {
             });
         }
     }
+    // 搬过来的旧键可能和新路径上本来就有的层撞成同一条：先并名字，别让 `save`
+    // 的"先出现的赢"把另一侧的自定义序静默吃掉。
+    去重同键(&mut orders);
     if orders == 原 {
         return Ok(());
     }
@@ -277,6 +304,7 @@ pub fn remove_path(vault: &Vault, rel: &str) -> Result<()> {
     if orders.is_empty() {
         return Ok(());
     }
+    去重同键(&mut orders);
     let 原 = orders.clone();
     let 旧键: Vec<String> = orders
         .iter()
@@ -442,6 +470,27 @@ mod tests {
         assert_eq!(全.len(), 1, "同一层不该存成两条");
         assert_eq!(全[0].parent, "notes/工作");
         assert_eq!(全[0].names, vec!["乙.md".to_string()]);
+    }
+
+    #[test]
+    fn 改名撞上已有的一层时先并名字() {
+        // 手改过的 tree.toml 里可能已经有一条新路径的层（旧目录以前存在过、
+        // 又被改回来）。改名后两个键撞成一条，`save` 的"先出现的赢"会把另一侧
+        // 的自定义序静默吃掉——先合并，名字都留住。
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        std::fs::create_dir_all(vault.meta_dir()).unwrap();
+        std::fs::write(
+            tree_file(&vault),
+            "[[order]]\nparent = \"新\"\nnames = [\"b\"]\n\n\
+             [[order]]\nparent = \"旧\"\nnames = [\"a\"]\n",
+        )
+        .unwrap();
+        rename_path(&vault, "旧", "新").unwrap();
+        let 全 = 载入(&vault);
+        assert_eq!(全.len(), 1, "同键要合成一条：{全:?}");
+        assert_eq!(全[0].parent, "新");
+        assert_eq!(全[0].names, vec!["b".to_string(), "a".to_string()]);
     }
 
     #[test]

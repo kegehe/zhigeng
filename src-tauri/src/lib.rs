@@ -413,6 +413,13 @@ fn dir_delete(state: State<'_, Shared>, rel: String) -> Result<(), WriteErr> {
     with_hub_write(&state, |h| h.delete_dir(&rel))
 }
 
+/// 目录是不是物理空的。侧栏菜单据此决定给不给"改名 / 删除"——不拿被截断的
+/// 笔记表推断（库大了，一个非空目录看起来就是空的）。
+#[tauri::command]
+fn dir_empty(state: State<'_, Shared>, rel: String) -> Result<bool, String> {
+    with_hub(&state, |h| h.dir_is_empty(&rel))
+}
+
 #[tauri::command]
 fn read_note(state: State<'_, Shared>, rel: String) -> Result<NoteDetail, String> {
     with_hub(&state, |h| h.read_note(&rel))
@@ -979,6 +986,7 @@ pub fn run() {
             dir_create,
             dir_rename,
             dir_delete,
+            dir_empty,
             read_note,
             read_raw,
             note_edit_doc,

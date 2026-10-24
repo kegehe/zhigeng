@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { 是回车提交 } from "./keys";
 import { 补新建, 匹配, type PaletteItem } from "./palette";
 
 /**
@@ -90,7 +91,7 @@ export function CommandPalette({
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
               set选((i) => Math.max(i - 1, 0));
-            } else if (e.key === "Enter") {
+            } else if (是回车提交(e)) {
               e.preventDefault();
               执行(出[中]);
             } else if (e.key === "Escape") {

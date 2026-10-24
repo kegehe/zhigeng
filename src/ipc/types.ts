@@ -148,6 +148,7 @@ export type CommandName =
   | "dir_create"
   | "dir_rename"
   | "dir_delete"
+  | "dir_empty"
   | "note_create"
   | "note_edit_doc"
   | "note_move"

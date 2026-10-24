@@ -2,6 +2,7 @@ import { undo, redo, undoDepth, redoDepth } from "@tiptap/pm/history";
 import { NodeSelection } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
 import { useEffect, useState } from "react";
+import { 是回车提交 } from "../ui/keys";
 import {
   addColumn,
   addRow,
@@ -343,7 +344,7 @@ export function LinkEditor({ editor, onDone }: { editor: Editor; onDone: () => v
         spellCheck={false}
         onChange={(e) => setHref(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") 应用();
+          if (是回车提交(e)) 应用();
           else if (e.key === "Escape") onDone();
         }}
       />
