@@ -1597,7 +1597,9 @@ export function App() {
           title="设置：主题、备份、模型与 Key、库"
         >
           <Settings aria-hidden="true" />
-          {aiView && 徽标(aiForm, ai测过) ? (
+          {/* 四档都说话：没配 / 已配置 / 不通 / 能检索（或只对话）。**配齐没测过也要有字**——
+              从前这一档返回 null，整段被条件渲染掉，保存完配置那枚入口反而变成空白。 */}
+          {aiView ? (
             <span className={"text-xs " + (徽标红(ai测过) ? "text-danger" : "text-fg-2")}>
               AI·{徽标(aiForm, ai测过)}
             </span>
