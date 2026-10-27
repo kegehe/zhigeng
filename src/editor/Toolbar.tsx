@@ -38,7 +38,20 @@ import { 工具图标, type 图标名 } from "./icons";
  * 单独一个组件、自己订阅编辑器事件：放在 `BlockEditor` 里 `setState` 的话，每次选区变化
  * 都会连带重渲染 `EditorContent`，等于在打字路径上凭空加一次整棵子树的协调。
  */
-export function Toolbar({ editor }: { editor: Editor }) {
+export function Toolbar({
+  editor,
+  onAi,
+  aiReady,
+  提示,
+}: {
+  editor: Editor;
+  /** 打开改写浮层。判据（模型配没配、选段改不改得）在 `准备改写` 里，这里只管传话 */
+  onAi: () => void;
+  /** 对话模型配好了没有。没配时按钮照样在，点了说下一步，不画成灰的让人猜 */
+  aiReady: boolean;
+  /** 入口被拦下的原因（没配模型 / 没选中文字）。贴在工具栏下沿，4 秒自散 */
+  提示?: string | null;
+}) {
   const [, bump] = useState(0);
   const [linking, setLinking] = useState(false);
 
@@ -245,12 +258,12 @@ export function Toolbar({ editor }: { editor: Editor }) {
           {btn("cells-clear", "清空所选的每一格（Delete）", "cellsClear", () =>
             走批量(清场所选)
           )}
-          {btn("cells-fill", "把左上那一格抄进其余格（Ctrl+D）", "cellsFill", () =>
+          {btn("cells-fill", "把左上角的内容填到其余格（Ctrl+D）", "cellsFill", () =>
             走批量(填充所选)
           )}
           {btn(
             "cells-row-",
-            "删掉所选覆盖的每一行（表头行不给删）",
+            "删掉所选的每一行（表头行不能删）",
             "rowRemove",
             () => 走批量(删所选行),
             false,
@@ -258,23 +271,23 @@ export function Toolbar({ editor }: { editor: Editor }) {
           )}
           {btn(
             "cells-col-",
-            矩.c0 === 0 && 矩.c1 >= 列数 - 1 ? "整张表都是列，删不动" : "删掉所选覆盖的每一列",
+            矩.c0 === 0 && 矩.c1 >= 列数 - 1 ? "整张表都是列，不能再删" : "删掉所选的每一列",
             "colRemove",
             () => 走批量(删所选列),
             false,
             矩.c0 === 0 && 矩.c1 >= 列数 - 1,
           )}
           {/* 对齐是**列**的属性，所以按覆盖到的每一列逐列生效（分隔行与格子一起改，同 setAlign） */}
-          {btn("cal-l", "所选各列靠左（产出 `:---`）", "alignLeft", () =>
+          {btn("cal-l", "所选的列靠左", "alignLeft", () =>
             走批量((s, 表, 矩) => 对所齐所选(s, 表, 矩, "left"))
           )}
-          {btn("cal-c", "所选各列居中（产出 `:---:`）", "alignCenter", () =>
+          {btn("cal-c", "所选的列居中", "alignCenter", () =>
             走批量((s, 表, 矩) => 对所齐所选(s, 表, 矩, "center"))
           )}
-          {btn("cal-r", "所选各列靠右（产出 `---:`）", "alignRight", () =>
+          {btn("cal-r", "所选的列靠右", "alignRight", () =>
             走批量((s, 表, 矩) => 对所齐所选(s, 表, 矩, "right"))
           )}
-          {btn("cal-x", "取消所选各列的对齐（产出 `---`）", "alignNone", () =>
+          {btn("cal-x", "取消所选的列对齐", "alignNone", () =>
             走批量((s, 表, 矩) => 对所齐所选(s, 表, 矩, ""))
           )}
         </>
@@ -284,7 +297,7 @@ export function Toolbar({ editor }: { editor: Editor }) {
           {btn("row", "在下面加一行（末格按 Tab 也可以）", "rowAdd", () => 改表(addRow))}
           {btn(
             "row-",
-            格 && 格.行 === 0 ? "表头行不给删：GFM 的表格必须有表头" : "删掉这一行",
+            格 && 格.行 === 0 ? "表头行不能删：表格必须有表头" : "删掉这一行",
             "rowRemove",
             () => 改表(removeRow),
             false,
@@ -293,19 +306,19 @@ export function Toolbar({ editor }: { editor: Editor }) {
           {btn("col", "在右边加一列", "colAdd", () => 改表(addColumn))}
           {btn(
             "col-",
-            格 && 格.列数 <= 1 ? "最后一列不给删：空表不是表" : "删掉这一列",
+            格 && 格.列数 <= 1 ? "最后一列不能删：表格至少要有一列" : "删掉这一列",
             "colRemove",
             () => 改表(removeColumn),
             false,
             !格 || 格.列数 <= 1,
           )}
           {/* 对齐是这一列的属性：分隔行与每格的样子必须一起改（见 setAlign） */}
-          {btn("al-l", "本列靠左（产出 `:---`）", "alignLeft", () => 改对齐("left"), 当前对齐 === "left")}
-          {btn("al-c", "本列居中（产出 `:---:`）", "alignCenter", () => 改对齐("center"), 当前对齐 === "center")}
-          {btn("al-r", "本列靠右（产出 `---:`）", "alignRight", () => 改对齐("right"), 当前对齐 === "right")}
+          {btn("al-l", "本列靠左", "alignLeft", () => 改对齐("left"), 当前对齐 === "left")}
+          {btn("al-c", "本列居中", "alignCenter", () => 改对齐("center"), 当前对齐 === "center")}
+          {btn("al-r", "本列靠右", "alignRight", () => 改对齐("right"), 当前对齐 === "right")}
           {btn(
             "al-x",
-            "取消本列的对齐（产出 `---`）",
+            "取消本列的对齐",
             "alignNone",
             () => 改对齐(""),
             // 不做"开着"态：默认那档就是"没有对齐"，亮着它等于四个按钮里永远有一个是亮的，
@@ -319,6 +332,33 @@ export function Toolbar({ editor }: { editor: Editor }) {
       <span className="sep" aria-hidden="true" />
       {btn("undo", "撤销", "undo", () => undo(editor.state, (tr) => editor.view.dispatch(tr)), false, undoDepth(editor.state) <= 0)}
       {btn("redo", "重做", "redo", () => redo(editor.state, (tr) => editor.view.dispatch(tr)), false, redoDepth(editor.state) <= 0)}
+      <span className="sep" aria-hidden="true" />
+      {/*
+        文档内 AI 的**常驻**入口。只在选区气泡上留一枚的话，用户不选中文字就完全看不见
+        这个能力（气泡本身就不出现），于是"没有入口"——这一枚补的就是这一步。点了以后
+        "先选一段文字" / "先去设置配模型" 都由 `准备改写` 说清楚，按钮不做灰态。
+      */}
+      <button
+        type="button"
+        className="ai"
+        title={
+          aiReady ? "AI 改写（先选中一段文字）" : "AI 改写（先在设置里配好模型）"
+        }
+        aria-label="AI 改写选中文字"
+        onClick={onAi}
+      >
+        <工具图标.ai />
+      </button>
+      {/*
+        入口被拦下时的原因贴在工具栏下沿：**工具栏是 sticky 的**，正文滚到哪儿它都在眼前；
+        全局 flash 在正文顶部，滚下去就看不见——"点了没反应"就是这么来的。绝对定位，
+        不占行（与 `.hint` 同一条理由），`pointer-events: none` 不挡下面的字。
+      */}
+      {提示 ? (
+        <span className="ai-hint" role="status" aria-live="polite">
+          {提示}
+        </span>
+      ) : null}
     </div>
   );
 }

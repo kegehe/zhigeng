@@ -11,7 +11,9 @@ import {
   随事务,
   预设,
   type 锚,
+  type 浮层放,
 } from "./rewrite";
+import { 新运行号 } from "./runId";
 
 /** 与 App 里那两枚按钮同一套基线；这里只差字号，不另发明一套按钮。 */
 const btn =
@@ -30,14 +32,13 @@ const 字数 = (s: string) => [...s].length;
  */
 export function RewritePanel({
   editor,
-  top,
-  left,
+  放,
   onClose,
   onNotice,
 }: {
   editor: Editor;
-  top: number;
-  left: number;
+  /** 落点 + 这一侧能给的高度，由 `浮层位置` 一次算好（竖屏翻转也在这里面） */
+  放: 浮层放;
   onClose: () => void;
   onNotice?: (文本: string) => void;
 }) {
@@ -53,20 +54,27 @@ export function RewritePanel({
   const [错误, set错误] = useState<string | null>(null);
   const [用量, set用量] = useState<string | null>(null);
   const 锚 = useRef<锚 | null>(null);
-  /** 这一次的号。关掉或重开时加一：旧请求的字不能落到新一次下面 */
+  /**
+   * 手上这一趟的号（0 = 还没有请求）。关掉时归零：旧请求还会继续吐字，
+   * 归零之后它们的号对不上，就落不进任何一次回稿里。
+   */
   const 号 = useRef(0);
   const 关Ref = useRef(onClose);
   关Ref.current = onClose;
 
   const 关 = () => {
-    号.current++;
+    号.current = 0;
     onClose();
   };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        号.current++;
+      // 中文输入法用 Esc 取消组词（Chromium 带 isComposing，老内核只给 keyCode 229）：
+      // 那一下归输入法，不能顺手把浮层关掉——已经到的回稿会跟着一起没。
+      // **已被别人处理过的 Esc 也不算我的**：命令面板开着时那一键归面板（它 preventDefault
+      // 关自己），事件照样冒到 window——不挡就会把浮层连同已到的回稿一起关掉。
+      if (e.key === "Escape" && !e.defaultPrevented && !e.isComposing && e.keyCode !== 229) {
+        号.current = 0;
         关Ref.current();
       }
     };
@@ -128,7 +136,8 @@ export function RewritePanel({
     }
     锚.current = r.锚;
     set原文(r.锚.text);
-    const 本号 = ++号.current;
+    // 号从模块那一层取：同一次浮层里重新生成要新号，重开浮层更不许复用上一次的号
+    const 本号 = (号.current = 新运行号());
     setBusy(true);
     set错误(null);
     set回稿("");
@@ -160,26 +169,26 @@ export function RewritePanel({
   const 应用 = () => {
     const a = 锚.current;
     if (!a) {
-      set错误("没有可替换的选区——重新选一段再生成");
+      set错误("找不到原来选中的文字了，请重新选中再生成");
       return;
     }
     const tr = 替换选区(editor.state, a, 回稿);
     if (!tr) {
       set错误(
-        "选中的文字在这期间被改过，这次回稿没有应用。重新选中后再来一次。",
+        "选中的文字刚被改过，这次没有替换。请重新选中再生成。",
       );
       return;
     }
     editor.view.dispatch(tr.scrollIntoView());
     editor.view.focus();
-    onNotice?.("已替换选中文字（Ctrl+Z 可撤销）");
+    onNotice?.("已替换，按 Ctrl+Z 可以撤销");
     关();
   };
 
   return (
     <div
       className="rewrite"
-      style={{ top, left }}
+      style={{ top: 放.top, bottom: 放.bottom, left: 放.left, maxHeight: 放.maxHeight }}
       role="dialog"
       aria-label="AI 改写选中文字"
       data-md-ai
@@ -237,7 +246,7 @@ export function RewritePanel({
         </button>
         {busy ? (
           <span className="text-xs text-fg-2">
-            {想字 ? `它在想…（${想字} 字）` : "等第一个字…"}
+            {想字 ? `正在思考…（${想字} 字）` : "正在等待回应…"}
             {回稿 ? `｜已到 ${字数(回稿)} 字` : ""}
           </span>
         ) : 用量 ? (
@@ -255,7 +264,7 @@ export function RewritePanel({
       ) : null}
       {回稿 || busy ? (
         <div className="rounded-md border border-line bg-raised px-2 py-1">
-          <div className="text-xs text-fg-2">回稿</div>
+          <div className="text-xs text-fg-2">改写结果</div>
           <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-sm text-fg">
             {回稿}
             {busy ? (
@@ -264,7 +273,11 @@ export function RewritePanel({
           </p>
         </div>
       ) : null}
-      <div className="flex justify-end gap-2">
+      <p className="text-xs text-fg-2">
+        只发送你选中的这段文字；替换后可以按 Ctrl+Z 撤销。
+      </p>
+      {/* 动作行贴在浮层底部：回稿把面板撑到 `maxHeight` 之后，用户不必滚到底也能点「替换选中」 */}
+      <div className="rewrite-actions flex justify-end gap-2">
         <button type="button" className={btn} onClick={关}>
           丢弃
         </button>
@@ -277,9 +290,6 @@ export function RewritePanel({
           替换选中
         </button>
       </div>
-      <p className="text-xs text-fg-disabled">
-        只把选中的这一段发给模型；替换是一次编辑，Ctrl+Z 可撤销。
-      </p>
     </div>
   );
 }

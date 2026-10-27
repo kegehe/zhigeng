@@ -314,7 +314,7 @@ pub fn 语义路(
     )?;
     if 有 == 0 {
         return Err(Error::Invalid(format!(
-            "还没有 {模型} 的向量表。先跑 `note ai embed`（或界面上点嵌入），再搜"
+            "还没有 {模型} 的向量表。先跑一次 `note ai embed`，再搜。"
         )));
     }
     // KNN 那一段用 CTE 包着，**不给虚拟表起别名**：`v.k = ?` 这种写法在 vec0 上没验过，
@@ -730,13 +730,13 @@ fn 跑一趟(
     match (&模型, 表在, &语义错) {
         // 配了却没能跑通：说清错在哪，**别把它说成"没开"**
         (Some(_), _, Some(错)) => 提示.push(format!(
-            "语义那一路没能跑通（{错}），这一趟走{走了}。关键词与链接两路是本地的，结果照常可用。"
+            "语义搜索这次没跑通（{错}），只搜了{走了}；其余结果照常可用。"
         )),
         (None, _, _) => 提示.push(format!(
-            "没填嵌入模型名，语义那一路没开，这一趟走{走了}。要加语义那一路：设置里填好，再点嵌入。"
+            "没填嵌入模型，这次只搜了{走了}。想加上语义搜索，先在设置里填好嵌入模型，再跑一次 `note ai embed`。"
         )),
         (Some(_), false, None) => 提示.push(format!(
-            "还没嵌过向量，语义那一路没开，这一趟走{走了}。跑 `note ai embed`，或在设置里点嵌入。"
+            "还没生成向量，这次只搜了{走了}。跑一次 `note ai embed` 就能用上语义搜索。"
         )),
         // 配了、也嵌过了、这一趟真的跑通了：没有要说的话
         (Some(_), true, None) => {}
@@ -1309,7 +1309,7 @@ mod tests {
         assert!(结.graph, "链接那一路不配模型也在跑");
         assert!(!结.semantic);
         let 提 = 结.hint.unwrap();
-        assert!(提.contains("没填嵌入模型名"), "{提}");
+        assert!(提.contains("没填嵌入模型"), "{提}");
         assert!(
             提.contains("关键词 + 链接"),
             "少了什么要说清，走了什么也要说清：{提}"
@@ -1463,7 +1463,7 @@ expect_none = true
         assert!(结.graph, "链接那一路不该因为没配模型就关掉");
         assert_eq!(结.hits.len(), 1, "关键词那一路照样要出结果");
         assert!(结.hits[0].path.ends_with("备份.md"));
-        assert!(结.hint.unwrap().contains("没填嵌入模型名"));
+        assert!(结.hint.unwrap().contains("没填嵌入模型"));
 
         // 配了模型但一张向量表都没有 → 提示换一条，仍然不报错
         crate::ai::save(
@@ -1478,7 +1478,7 @@ expect_none = true
         .unwrap();
         let 结2 = 混合或退回(&v, idx.conn(), "唯一副本").unwrap();
         assert!(!结2.semantic);
-        assert!(结2.hint.unwrap().contains("还没嵌过"), "提示要指下一步");
+        assert!(结2.hint.unwrap().contains("还没生成向量"), "提示要指下一步");
         assert_eq!(结2.hits.len(), 1);
     }
 
@@ -1779,7 +1779,7 @@ expect_paths = ["notes/提到它的.md"]
         assert_eq!(结.hits.len(), 1, "开关配不齐不该把手里的结果一起扔掉");
         let 提 = 结.hint.unwrap();
         assert!(提.contains("开了重排但没填对话模型"), "{提}");
-        assert!(提.contains("没填嵌入模型名"), "两句都该在：{提}");
+        assert!(提.contains("没填嵌入模型"), "两句都该在：{提}");
     }
 
     /// 覆盖率是**拒答门的尺子**，所以它的边界要一条条钉死。
@@ -1899,10 +1899,10 @@ q = "乙"
             结.hits
         );
         let 提 = 结.hint.unwrap();
-        assert!(提.contains("语义那一路没能跑通"), "{提}");
+        assert!(提.contains("语义搜索这次没跑通"), "{提}");
         assert!(提.contains("关键词 + 链接"), "{提}");
         assert!(
-            !提.contains("没填嵌入模型名") && !提.contains("还没嵌过向量"),
+            !提.contains("没填嵌入模型") && !提.contains("还没生成向量"),
             "配过了就别说成没配：{提}"
         );
     }
@@ -1912,7 +1912,7 @@ q = "乙"
     /// 两种提示混起来比没有提示更坏：说"还没嵌过"会让用户跑去点嵌入，
     /// 而向量明明早就嵌好了——他点了多少次都是同一句话。
     #[test]
-    fn 语义跑通了就不说还没嵌过向量() {
+    fn 语义跑通了就不说还没生成向量() {
         let dir = tempfile::tempdir().unwrap();
         let v = crate::vault::Vault::open(dir.path()).unwrap();
         v.write_atomic(
@@ -1946,9 +1946,9 @@ q = "乙"
         let 结 = 混合或退回(&v, conn, "向量检索").unwrap();
         assert!(结.semantic, "这一路跑通了：{:?}", 结.hits);
         let 提 = 结.hint.unwrap_or_default();
-        assert!(!提.contains("还没嵌过向量"), "跑通了就不许说还没嵌过：{提}");
-        assert!(!提.contains("没填嵌入模型名"), "配过了就不许说没配：{提}");
-        assert!(!提.contains("没能跑通"), "跑通了就不许说没能跑通：{提}");
+        assert!(!提.contains("还没生成向量"), "跑通了就不许说还没生成：{提}");
+        assert!(!提.contains("没填嵌入模型"), "配过了就不许说没配：{提}");
+        assert!(!提.contains("没跑通"), "跑通了就不许说没跑通：{提}");
     }
 
     // ---- M2 ④：私密那篇经任何一条路都召不回 ---------------------------------

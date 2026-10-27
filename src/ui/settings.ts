@@ -61,7 +61,7 @@ export function 备份角标(s: 备份状态): string | null {
  * docs/03 §备份与迁移 明写了"这个事实要写在设置页，不要让用户以为拷完就全能用"。
  */
 export const 配置归属: { 项: string; 落在哪: string; 随库走: boolean }[] = [
-  { 项: "备份目录、AI 端点与模型名", 落在哪: "这个库的 .note/config.toml", 随库走: true },
-  { 项: "主题", 落在哪: "这台电脑（应用自己的存储）", 随库走: false },
-  { 项: "API Key", 落在哪: "这台电脑的 Windows 凭据管理器", 随库走: false },
+  { 项: "备份目录、AI 端点与模型名", 落在哪: ".note/config.toml", 随库走: true },
+  { 项: "主题", 落在哪: "本机设置", 随库走: false },
+  { 项: "API Key", 落在哪: "Windows 凭据管理器", 随库走: false },
 ];

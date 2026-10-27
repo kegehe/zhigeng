@@ -866,28 +866,74 @@
     background: var(--bg-active);
     color: var(--text-primary);
   }
-  /* 气泡上只有「AI」说的是"把这段交给模型"：用主色把入口从格式按钮里分出来，
-     不填底色——它不是警告，也不是当前开着的那一项。 */
-  .block-editor .bubble button.ai {
+  /* 只有「AI」说的是"把这段交给模型"：用主色把入口从格式按钮里分出来，不填底色——
+     它不是警告，也不是当前开着的那一项。选区气泡与常驻工具栏同一副面孔。 */
+  .block-editor .bubble button.ai,
+  .block-editor .toolbar button.ai {
     color: var(--accent);
   }
-  .block-editor .bubble button.ai:hover {
+  .block-editor .bubble button.ai:hover,
+  .block-editor .toolbar button.ai:hover {
     color: var(--accent-hover);
   }
+  /* 工具栏下沿那枚提示：入口被拦下时（没配模型 / 没选中文字）贴在 AI 按钮下方。
+     工具栏是 sticky 的，正文滚到哪儿它都在眼前——全局 flash 在正文顶部，滚下去就看不见，
+     正好落进"点了没反应"那一类。绝对定位 + 不吃事件：不挤占一行，也不把正文推下去
+     （与表格那句「已选 N 格」同一条理由）。 */
+  .block-editor .toolbar .ai-hint {
+    position: absolute;
+    top: calc(100% + var(--space-2));
+    right: var(--space-2);
+    z-index: var(--z-popover);
+    max-width: calc(100% - var(--space-4));
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow-2);
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    line-height: var(--leading-ui);
+    pointer-events: none;
+  }
   /* 选区改写浮层。材质与气泡同一套（raised + 1px 边 + shadow-2）；位置由界面在打开
-     那一刻算好并固定——输入框一拿焦点，浏览器选区就不在正文里了，跟着矩形重算会甩走。 */
+     那一刻算好并固定——输入框一拿焦点，浏览器选区就不在正文里了，跟着矩形重算会甩走。
+     宽度与 `src/editor/rewrite.ts` 的 `浮层宽` 同数（384px，4px 栅格）：那边夹左右
+     边界要按这个宽度算，写成 rem 的话根字号一变两边就对不上了。 */
   .block-editor .rewrite {
     position: absolute;
     z-index: var(--z-popover);
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    width: min(24rem, calc(100% - var(--space-4)));
-    padding: var(--space-3);
+    width: min(384px, calc(100% - var(--space-4)));
+    /* 高度上限由 `src/editor/rewrite.ts` 的 `浮层位置` 算好后内联给：那一侧空间不够时
+       在浮层内部滚，不撑出可见区。 */
+    overflow-y: auto;
+    /* 一个轴不是 visible，另一个 visible 就会按规范算成 auto：不给换行规则的话，
+       回稿里一条长 URL 会在浮层底下多出一条横向滚动条。 */
+    overflow-wrap: anywhere;
+    /* 底边留给动作行：它 sticky 到滚动口底部时，靠自己的 padding 与面板留白对齐 */
+    padding: var(--space-3) var(--space-3) 0;
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     background: var(--bg-raised);
     box-shadow: var(--shadow-2);
+  }
+  /* 列向 flex 的默认 flex-shrink 是 1：到了限高那一刻，孩子会被压扁而不是滚动。
+     写成独立的选择器而不是嵌套——这份 CSS 是原生级联，不赌解析器认不认嵌套。 */
+  .block-editor .rewrite > * {
+    flex: none;
+  }
+  /* 动作行贴在浮层底部：回稿把面板撑到 maxHeight 之后，「替换选中」不必滚到底才够得着。
+     横向出血到内边距外，内容从两侧滚过去时不会露出来。 */
+  .block-editor .rewrite-actions {
+    position: sticky;
+    bottom: 0;
+    margin-inline: calc(-1 * var(--space-3));
+    padding: var(--space-2) var(--space-3) var(--space-3);
+    background: var(--bg-raised);
+    border-top: 1px solid var(--border-subtle);
   }
   /* 常驻工具栏（语雀式）：不用先选中文本也知道有什么可用。sticky 跟着正文这一列走，
      真机验过滚动之后仍在屏内（不验就不知道滚动容器是不是它的祖先）。 */

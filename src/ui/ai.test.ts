@@ -57,18 +57,18 @@ describe("探针个数是数出来的，不是写死的", () => {
   it("嵌入未启用时只剩一个探针", () => {
     const 步 = [{ stage: "chat" }, { stage: "embeddings-off" }];
     expect(探针数(步)).toBe(1);
-    expect(探针结论(true, 步)).toBe("1 个探针都通了");
+    expect(探针结论(true, 步)).toBe("1 项测试通过");
   });
 
   it("两个都打了才说两个", () => {
     const 步 = [{ stage: "config" }, { stage: "chat" }, { stage: "embeddings" }];
     expect(探针数(步)).toBe(2);
-    expect(探针结论(true, 步)).toBe("2 个探针都通了");
+    expect(探针结论(true, 步)).toBe("2 项测试都通过");
   });
 
   it("不通就是不通，不数个数；一个都没打要说一个都没打", () => {
-    expect(探针结论(false, [{ stage: "chat" }, { stage: "embeddings" }])).toBe("有一步不通");
-    expect(探针结论(true, [{ stage: "config" }])).toBe("没有可测的探针");
+    expect(探针结论(false, [{ stage: "chat" }, { stage: "embeddings" }])).toBe("有一步没通过");
+    expect(探针结论(true, [{ stage: "config" }])).toBe("没有可测试的项目");
   });
 });
 

@@ -9,7 +9,7 @@
  * 这一层只保证**同一副按钮在两个文件里是同一串字**。
  */
 export const btn =
-  "rounded-md border border-line px-2 py-1 text-xs text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover active:translate-y-px";
+  "rounded-md border border-line px-2 py-1 text-xs text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover active:translate-y-px disabled:opacity-55";
 export const btnPrimary =
   "rounded-md bg-accent px-3 py-1 text-xs text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover active:translate-y-px disabled:opacity-55";
 /**

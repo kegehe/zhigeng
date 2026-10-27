@@ -180,7 +180,7 @@ export type AiStep = { stage: string; ok: boolean; ms: number; detail: string };
 export type AiProbeReport = { ok: boolean; steps: AiStep[] };
 
 /**
- * 「看看这家有哪些模型」的结果。`all` 是端点给的全部 id（原样，界面上要能翻），
+ * 「列出可用模型」的结果。`all` 是端点给的全部 id（原样，界面上要能翻），
  * `embedCandidates` 是其中含 `embed` 的那些——挑哪个是用户的事实，不是程序的猜测。
  */
 export type AiDiscovery = { all: string[]; embedCandidates: string[]; ms: number };

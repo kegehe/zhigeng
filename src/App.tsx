@@ -762,7 +762,7 @@ export function App() {
        */
       if (selected?.rel === 被拖.自身) {
         if (dirty && !(await persist())) {
-          setFlash("这篇还没存下来——先处理冲突提示");
+          setFlash("这篇还没保存——先处理冲突或错误提示");
           return;
         }
         if (saveTimer.current !== null) {
@@ -888,7 +888,7 @@ export function App() {
 
   const openNote = async (rel: string, title?: string, blockOrdinal?: number) => {
     if (editing && !(await persist())) {
-      setFlash("这篇还没存下来——先处理冲突提示");
+      setFlash("这篇还没保存——先处理冲突或错误提示");
       return;
     }
     // 打开即编辑：不再有"先看着，要改再按编辑"这一步
@@ -1321,6 +1321,28 @@ export function App() {
         if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
         e.preventDefault();
         backToNote();
+      } else if (e.key === "Escape" && mode === "ask" && !palette) {
+        // 问答页同样是主区的一页、也没有返回按钮，但它没有"输入框里那一键归自己"这层：
+        // 提问框里的 Esc 没有自己的含义，不留这条出口，这一页在键盘上就是死路。
+        // **组词时除外**：中文输入法用 Esc 取消候选（isComposing / 229），
+        // 那一下归输入法——照常跳走等于用户想取消一个词、结果整页没了。
+        if (e.isComposing || e.keyCode === 229) return;
+        /*
+         * **侧栏自己管着的 Esc 不算我的**：新建笔记、树内改名、目录菜单各自处理这一键，
+         * 它们只关自己、也不 preventDefault（菜单那条还是 window 监听，注册得比这里晚），
+         * 放行就会"想取消一个输入框，结果整页跳回正文"，那一趟问答还在后台继续花钱。
+         *
+         * 只挡这三处而不是整个 `aside`：刚在侧栏点「问答」时焦点还留在那枚按钮上，
+         * 一刀切会让 Esc 在最常见的那条路上失灵。
+         */
+        const t = e.target as HTMLElement | null;
+        const 侧栏在管 =
+          !!t &&
+          !!t.closest("aside") &&
+          (t.matches("input, textarea, select") || !!t.closest(".tree-menu"));
+        if (侧栏在管) return;
+        e.preventDefault();
+        backToNote();
       }
     };
     window.addEventListener("keydown", on键);
@@ -1337,6 +1359,9 @@ export function App() {
   };
 
   const openAsk = async () => {
+    // 与其他面板同一条规矩：切走会卸载编辑器，自动保存那条 effect 在 `editing` 变假的
+    // 那一刻就撤了待发的定时器——不先 persist，最后那几笔字要等回到正文才重新排上队
+    if (editing && !(await persist())) return;
     setMode("ask");
     try {
       const [v, 录] = await Promise.all([api.aiView(), api.aiRuns(8)]);
@@ -1368,7 +1393,16 @@ export function App() {
     try {
       const r = await api.chatAsk(q, 号);
       set答(r);
-      setRuns(await api.aiRuns(8));
+      /*
+       * 审计刷新是**另一趟**：它失败不该把已经拿到的答案变成一句失败。原来这一句在
+       * try 里，ai_runs 读失败会掉进下面那个 catch，于是屏幕上同时出现"答案"与
+       * "这一问没有答成"——两句话说的是相反的结论。刷不回来就留着手上的旧列表。
+       */
+      try {
+        setRuns(await api.aiRuns(8));
+      } catch {
+        /* 见上：审计刷不回来，答案照给 */
+      }
       // 首字时间只有在这条路上才量得到：以前是"整段回来才显示"，屏幕上只有一个总时长
       console.info(
         `问答：首字 ${Math.round(首字.current - 起)}ms｜全文 ${Math.round(performance.now() - 起)}ms｜${r.inTokens}+${r.outTokens} tok`,
@@ -1397,6 +1431,10 @@ export function App() {
     if (editing && !(await persist())) return;
     setMode("settings");
     setBackupDraft(info?.backupDir ?? "");
+    // 上一次的探针结论与模型清单只对上一次那份配置成立：换过库、或在别处改过配置之后
+    // 它们就是过时的。设置页每次打开都从干净的空白开始，读回当前配置再说。
+    setAiReport(null);
+    setAi发现(null);
     try {
       填回(await api.aiView());
     } catch (e) {
@@ -1449,7 +1487,7 @@ export function App() {
       setAi测过(null);
       // 地址可能变了，上一份清单不再作数——留着它会让人照着过时的候选填
       setAi发现(null);
-      setFlash("配置已存进这个库的 .note/config.toml");
+      setFlash("配置已保存");
     } catch (e) {
       setError(describeError(e).message);
     } finally {
@@ -1465,7 +1503,7 @@ export function App() {
       setAiKey("");
       setAiReport(null);
       setAi测过(null);
-      setFlash(是存 ? "Key 已存进 Windows 凭据管理器" : "Key 已删掉");
+      setFlash(是存 ? "Key 已保存" : "Key 已删除");
     } catch (e) {
       setError(describeError(e).message);
     } finally {
@@ -1677,7 +1715,7 @@ export function App() {
               ) : null}
               {(searching ? rows : sidebarRows).length === 0 ? (
                 <div className="px-4 py-6 text-center text-sm text-fg-disabled">
-                  {searching ? "没有匹配的笔记" : notes ? "这个 Vault 还没有笔记" : "加载中"}
+                  {searching ? "没有匹配的笔记" : notes ? "这个库里还没有笔记" : "加载中"}
                 </div>
               ) : null}
               {searching
@@ -1856,7 +1894,7 @@ export function App() {
                     <span className="text-xs text-fg-2">{面板标题}</span>
                     <span className="text-xs text-fg-disabled">
                       {semErr
-                        ? "这一路失败"
+                        ? "检索失败"
                         : semBusy
                           ? "检索中…"
                           : sem
@@ -1880,8 +1918,8 @@ export function App() {
                           return (
                             <div className="px-3 py-1 text-xs text-fg-disabled">
                               {sem.hits.length
-                                ? "没有关键词之外的篇。"
-                                : "这一路没给出任何候选。"}
+                                ? "没有更多相关笔记。"
+                                : "没有找到相关笔记。"}
                             </div>
                           );
                         }
@@ -2115,10 +2153,10 @@ export function App() {
               <div className="measure-ui px-6 py-8">
                 {/* flash 原本只在正文那一支渲染：结果"立即备份"的反馈在它自己的面板里看不见 */}
                 {flash ? <p className="mb-4 text-sm text-fg-2">{flash}</p> : null}
-                <h2 className="text-xl text-fg">备份与快照</h2>
+                <h2 className="text-xl text-fg">备份与历史版本</h2>
                 <p className="mt-2 text-sm text-fg-2">
-                  每天第一次启动时，把库里<span className="text-fg">变化过的文件</span>增量快照到另一个目录，保留最近
-                  30 份。文件原样存着，不压缩：备份要能被资源管理器直接看懂。
+                  每天第一次启动时，把库里<span className="text-fg">变化过的文件</span>复制到另一个目录，保留最近
+                  30 份。文件原样保存，不压缩，在资源管理器里直接能打开。
                 </p>
                 <div className="mt-4 rounded-md border border-line bg-raised px-4 py-3 text-sm">
                   {备份格.档 === "开着" ? (
@@ -2127,7 +2165,7 @@ export function App() {
                       <span className="font-mono text-mono">{备份格.目录}</span>
                       {备份格.时刻
                         ? ` · 最近一次 ${new Date(备份格.时刻).toLocaleString()}`
-                        : " · 还没做过快照"}
+                        : " · 还没备份过"}
                     </span>
                   ) : (
                     <span className="text-danger">{备份格.文}</span>
@@ -2149,11 +2187,11 @@ export function App() {
                 </div>
 
                 <h3 className="mt-8 text-sm text-fg-2">
-                  {selected ? `这篇的快照 · ${selected.title}` : "选一篇笔记，就能看它的历史版本"}
+                  {selected ? `这篇的历史版本 · ${selected.title}` : "选一篇笔记，就能看它的历史版本"}
                 </h3>
                 <div className="mt-2 flex flex-col gap-1">
                   {selected && history.length === 0 ? (
-                    <div className="text-sm text-fg-disabled">快照里还没有这一篇。</div>
+                    <div className="text-sm text-fg-disabled">备份里还没有这一篇。</div>
                   ) : null}
                   {selected
                     ? history.map((r) => (
@@ -2177,10 +2215,10 @@ export function App() {
                     : null}
                 </div>
 
-                <h3 className="mt-8 text-sm text-fg-2">最近的快照</h3>
+                <h3 className="mt-8 text-sm text-fg-2">最近的版本</h3>
                 <div className="mt-2 flex flex-col gap-1">
                   {snapshots.length === 0 ? (
-                    <div className="text-sm text-fg-disabled">还没有快照。</div>
+                    <div className="text-sm text-fg-disabled">还没有版本。</div>
                   ) : null}
                   {snapshots.map((r) => (
                     <div
@@ -2189,7 +2227,7 @@ export function App() {
                     >
                       <span className="min-w-0 flex-1 truncate font-mono text-xs">{r.id}</span>
                       <span className="shrink-0 text-xs text-fg-2">
-                        {new Date(r.takenAt).toLocaleString()} · 增量 {r.copiedFiles} / 全库 {r.totalFiles}
+                        {new Date(r.takenAt).toLocaleString()} · 本次复制 {r.copiedFiles} / 全库 {r.totalFiles}
                       </span>
                     </div>
                   ))}
@@ -2227,10 +2265,9 @@ export function App() {
               <div className="measure-ui px-6 py-8">
                 <h2 className="text-xl text-fg">问 AI</h2>
                 <p className="mt-2 max-w-2xl text-sm text-fg-2">
-                  答案只从检索出来的片段里组装：<span className="text-fg">模型引用了没给过的编号，
-                  这一条就不采信</span>；库里找不到依据时一次模型都不打，直接说没有。
-                  送出去的是片段摘录，不是整篇笔记；隐私位与视图根本不进候选。
-                  要让 AI 改正文：回到文档里选中一段文字，气泡条上的「AI」只改这一段。
+                  答案只根据你的笔记生成，并标出来自哪一篇；找不到依据时会直接说没有。
+                  发给模型的只有检索到的片段，不是整篇笔记。
+                  要改正文：回到文档里选中一段文字，点工具栏上的 ✨ 就能改这一段。
                 </p>
                 <div className="mt-4 flex max-w-2xl gap-2">
                   <input
@@ -2239,24 +2276,26 @@ export function App() {
                     placeholder="比如：备份为什么要放到第二个目录？"
                     onChange={(e) => set问(e.target.value)}
                     onKeyDown={(e) => {
-                      if (是回车提交(e) && !问busy) void ai问();
+                      // 与"问"那一枚按钮同一条门：没配齐就不发一趟注定被拒的请求
+                      if (是回车提交(e) && !问busy && !!aiView && 可对话(aiView)) void ai问();
                     }}
                   />
                   <button
                     className={btnPrimary}
-                    disabled={问busy || !问.trim() || !(aiView?.chatModel ?? "").trim()}
+                    disabled={问busy || !问.trim() || !aiView || !可对话(aiView)}
                     onClick={() => void ai问()}
                   >
                     {问busy ? "生成中…" : "问"}
                   </button>
                 </div>
-                {!(aiView?.chatModel ?? "").trim() ? (
-                  <p className="mt-2 text-xs text-fg-disabled">
-                    没填对话模型名，问不了。
+                {!aiView || !可对话(aiView) ? (
+                  <p className="mt-2 text-xs text-fg-2">
+                    {aiView
+                      ? "模型还没配好，暂时不能提问；搜索不受影响。"
+                      : "模型配置还没读出来，暂时不能提问；搜索不受影响。"}
                     <button className="underline" onClick={() => void openSettings()}>
-                      去设置里的「模型与 Key」填上
+                      打开设置
                     </button>
-                    ——检索那一路不受它影响。
                   </p>
                 ) : null}
                 {/*
@@ -2264,16 +2303,23 @@ export function App() {
                   只在定稿时换掉里面的内容——如果两态长得不一样，用户就会看到"答案跳一下"，
                   而那是这一档最不想要的外观。光标用 animate-pulse，不写 keyframes。
                 */}
-                {问busy && 流字 ? (
+                {问busy && !答 && !问错 ? (
                   <div className="mt-5 max-w-2xl rounded-md border border-line bg-raised px-4 py-3">
+                    {/* 开合看 `问busy` 而不是 `流字`：思考型模型先吐的是 `reasoning_content`，
+                        答案一个字都还没有——从前这里判 `流字`，那几十秒屏幕上什么都没有，
+                        "它在想…" 那一句永远走不到。`!答 && !问错` 是为了定稿先到、审计
+                        刷新还没回来那一段：那时 `问busy` 还是 true，不挡就会出现两张卡。 */}
                     <div className="font-mono text-xs text-fg-2">
-                      {流字.length ? "生成中…" : "它在想…"}｜已到 {流字.length} 字
-                      {想字 ? `｜思考 ${想字} 字（不算答案）` : ""}
+                      {流字 ? "生成中…" : 想字 ? "正在思考…" : "正在等待回应…"}
+                      {流字 ? `｜已到 ${流字.length} 字` : ""}
+                      {想字 ? `｜已思考 ${想字} 字` : ""}
                     </div>
-                    <p className="mt-2 whitespace-pre-wrap text-sm text-fg">
-                      {流字}
-                      <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-fg-2 align-middle" />
-                    </p>
+                    {流字 ? (
+                      <p className="mt-2 whitespace-pre-wrap text-sm text-fg">
+                        {流字}
+                        <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-fg-2 align-middle" />
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
                 {问错 ? (
@@ -2294,16 +2340,15 @@ export function App() {
                     }
                   >
                     <div className="font-mono text-xs text-fg-2">
-                      {答.model}｜候选 {答.candidates}｜in {答.inTokens} / out {答.outTokens}
-                      {"｜"}
-                      {答.ms}ms
-                      {答.retried ? "｜引用违规后重生成过一次" : ""}
+                      {答.model} · {答.ms}ms · 检索 {答.candidates} 段 · 输入 {答.inTokens} /
+                      输出 {答.outTokens} tokens
+                      {答.retried ? " · 重新生成过一次" : ""}
                     </div>
                     <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{答.text}</p>
                     {答.citations.length ? (
                       <div className="mt-3 flex flex-col gap-1">
                         <span className="text-xs text-fg-2">
-                          采信的依据 {答.citations.length} 条
+                          引用来源 {答.citations.length} 条
                         </span>
                         {答.citations.map((c) => (
                           <button
@@ -2325,7 +2370,7 @@ export function App() {
                       </div>
                     ) : (
                       <p className="mt-2 text-xs text-fg-disabled">
-                        {答.insufficient ? "没有可采信的引用。" : "回答里没带片段编号。"}
+                        {答.insufficient ? "没有找到可引用的笔记。" : "这次回答没有标出来源。"}
                       </p>
                     )}
                   </div>
@@ -2344,7 +2389,7 @@ export function App() {
                       className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1 text-xs"
                     >
                       <span className={r.ok ? "text-fg" : "text-danger"}>
-                        {r.ok ? "采纳" : "未采纳"}
+                        {r.ok ? "已采用" : "未采用"}
                       </span>
                       <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
                         {r.model}｜引用 {r.cited.length}/{r.candidates}
@@ -2354,7 +2399,7 @@ export function App() {
                           : `｜${走了那句(r.semantic, r.graph, r.reranked)}`}
                       </span>
                       <span className="shrink-0 font-mono text-fg-2">
-                        {r.inTokens + r.outTokens} tok · {new Date(r.createdAt).toLocaleTimeString()}
+                        {r.inTokens + r.outTokens} tokens · {new Date(r.createdAt).toLocaleTimeString()}
                       </span>
                     </div>
                   ))}
@@ -2451,7 +2496,7 @@ export function App() {
                     {saveState === "conflict" ? (
                       <div className="mb-4 rounded-md border border-danger bg-danger-soft px-3 py-2 text-sm">
                         这篇在你编辑期间被别处改过（Obsidian、另一个窗口，或同步）。
-                        你写的还在框里，但还没落盘——选一个：
+                        你写的还在框里，还没保存——选一个：
                         <div className="mt-3 flex gap-2">
                           <button className={btn} onClick={() => void reloadDisk()}>
                             丢掉我的，用磁盘版本
@@ -2529,7 +2574,7 @@ export function App() {
                       ) : notes && notes.notes.length === 0 ? (
                         "还没有笔记。按 Alt+Shift+N 记一条，或者建一篇来写。"
                       ) : (
-                        "选一篇笔记，或者从左边搜一个词。"
+                        "选一篇笔记，或者直接搜一个词。"
                       )}
                     </div>
                     {/* [06] §3：空态是"文案 + 一个主操作"，不是插画满屏。空态是最容易被

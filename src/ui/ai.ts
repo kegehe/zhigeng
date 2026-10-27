@@ -74,7 +74,8 @@ export function 探针数(steps: { stage: string }[]): number {
 
 /** 报告标题那一句：通/不通由调用方判，这里只负责把"几个"说准 */
 export function 探针结论(ok: boolean, steps: { stage: string }[]): string {
-  if (!ok) return "有一步不通";
+  if (!ok) return "有一步没通过";
   const n = 探针数(steps);
-  return n === 0 ? "没有可测的探针" : `${n} 个探针都通了`;
+  if (n === 0) return "没有可测试的项目";
+  return n === 1 ? "1 项测试通过" : `${n} 项测试都通过`;
 }

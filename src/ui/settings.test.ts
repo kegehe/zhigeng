@@ -119,4 +119,14 @@ describe("判据真的接在界面上", () => {
     // 面板开着时那一键归面板（它自己关自己），不能顺手把设置页也关了
     expect(主窗).toMatch(/mode === "settings" && !palette/);
   });
+
+  it("问答页也有 Esc 出口", () => {
+    // 问答同样是主区的一页、也没有返回按钮，而提问框里的 Esc 没有自己的含义：
+    // 不给这条出口，键盘上就出不去（设置页那一键归输入框，这一页不归）
+    expect(主窗).toMatch(/e\.key === "Escape" && mode === "ask"/);
+    // 组词中的 Esc 归输入法（与"回车提交"同一条守卫）：那一键不能把整页送走
+    expect(主窗).toMatch(/e\.isComposing \|\| e\.keyCode === 229/);
+    // 侧栏那三处（新建 / 改名 / 目录菜单）自己处理 Esc，只关自己不动整页
+    expect(主窗).toContain('closest(".tree-menu")');
+  });
 });

@@ -36,3 +36,11 @@ Desktop.ini
 
 # 一次性脚本与草稿
 /.scratch/
+
+# 图标方案的渲染稿（HTML 源 + 截图，只为对比看，不是产物）
+/vibe_images/
+
+# 设计稿与工具本地状态
+/.qoder/
+/.workbuddy/
+/outputs/

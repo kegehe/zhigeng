@@ -385,7 +385,7 @@ mod tests {
         assert!(行[1].4.as_deref().unwrap_or("").contains("网络断了"));
     }
 
-    /// M2 ③ 的改写侧：**网络那头没反应要说成"生成侧暂时不可用"**，
+    /// M2 ③ 的改写侧：**网络那头没反应要说成"模型暂时不可用"**，
     /// 而且要紧的那句是"正文一个字都没动"——这一档不静默改写（docs/04 §0），
     /// 失败时用户最该知道的就是"没改成"。
     #[test]
@@ -406,7 +406,7 @@ mod tests {
         let 错 = 生成("原文在这里", "润色", &mut 断, &mut |_| {}).unwrap_err();
         assert!(matches!(错, Error::Unavailable(_)), "{错:?}");
         let 话 = 错.to_string();
-        assert!(话.contains("生成侧暂时不可用"), "{话}");
+        assert!(话.contains("模型暂时不可用"), "{话}");
         assert!(话.contains("正文一个字都没动"), "{话}");
     }
 }

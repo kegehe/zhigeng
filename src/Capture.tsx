@@ -65,7 +65,7 @@ export function Capture() {
       const { listen } = await import("@tauri-apps/api/event");
       if (!alive) return;
       const un = await listen<boolean>("note://indexed", (ev) => {
-        if (!ev.payload) setErr("已落盘，但索引没跟上——下次打开会自愈");
+        if (!ev.payload) setErr("已保存，但搜索还没更新；下次打开会自动补上。");
       });
       return un;
     })();
@@ -113,14 +113,14 @@ export function Capture() {
 
       <div className="flex h-9 shrink-0 items-center justify-between px-4 text-xs">
         <span className={phase === "error" ? "text-danger" : "text-fg-disabled"}>
-          {phase === "error" ? (err ?? "出错") : phase === "saved" ? `已存 ${saved?.rel ?? ""}` : "Alt+Shift+N 随时唤起"}
+          {phase === "error" ? (err ?? "保存失败") : phase === "saved" ? `已保存 ${saved?.rel ?? ""}` : "Alt+Shift+N 随时唤起"}
         </span>
         <button
           className="rounded-sm border border-line px-2 py-1 hover:bg-hover disabled:opacity-55"
           disabled={phase === "saving" || !text.trim()}
           onClick={() => void submit()}
         >
-          {phase === "saving" ? "存入中…" : "存入 (Enter)"}
+          {phase === "saving" ? "保存中…" : "保存 (Enter)"}
         </button>
       </div>
     </div>

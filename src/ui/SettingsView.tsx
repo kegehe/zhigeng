@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { btn, btnPrimary, 路径框 } from "./controls";
 import { 缺项, 步骤名, 探针结论 } from "./ai";
 import { 是回车提交 } from "./keys";
@@ -7,14 +7,67 @@ import type { Theme } from "./theme";
 import type { AppInfo, AiDiscovery, AiProbeReport, AiView } from "../ipc/types";
 
 /**
+ * 一行设置：标签在左、控件在右，行与行之间只有一条细线。
+ *
+ * 上一版是四张卡片，每张卡还带"标题 + 摘要 + 正文 + 脚注"四层——四格摊开就是一堆小字。
+ * 设置页要的是**能扫**：这一行改什么、现在是什么值。解释只在控件本身说不清时才留一截，
+ * 且贴在标签后面，不再另起一段。
+ */
+function 行(props: { 标签: string; 提示?: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3">
+      <span className="flex w-28 shrink-0 items-baseline gap-1 whitespace-nowrap text-xs text-fg-2">
+        <span>{props.标签}</span>
+        {props.提示 ? <span className="text-fg-disabled">{props.提示}</span> : null}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">{props.children}</div>
+    </div>
+  );
+}
+
+/**
+ * 一组设置。没有卡片底色、没有摘要：一条横线起头，组名 + 状态，下面就是行。
+ * `尾` 留给"点完才有"的东西（测试结果、模型清单），它们跟在行动作的正下方。
+ */
+function 节(props: { 标题: string; 角?: ReactNode; 尾?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="mt-8">
+      <div className="flex items-baseline gap-3">
+        <h3 className="text-sm font-medium text-fg">{props.标题}</h3>
+        {props.角 ? <div className="ml-auto">{props.角}</div> : null}
+      </div>
+      <div className="mt-2 divide-y divide-line border-y border-line">{props.children}</div>
+      {props.尾 ? <div className="mt-3 max-w-2xl">{props.尾}</div> : null}
+    </section>
+  );
+}
+
+/** 状态：一枚圆点 + 两个字。带框的胶囊在一页里出现四次，本身就是噪声 */
+function 状态(props: { 调: "ok" | "off" | "danger"; children: ReactNode }) {
+  // 文字一律用次要色或 danger：实测亮面 --success 对页面底只有 4.37:1、--warning 3.04:1，
+  // 12px 的正文过不了 AA 4.5。颜色留给**圆点**（图标线 3:1），它只是辅助，状态本身由字说清；
+  // 未配置也不是"禁用"，docs/06 §2 说 --text-disabled 只留给 placeholder 与提示语。
+  const 色 = props.调 === "danger" ? "text-danger" : "text-fg-2";
+  const 点 =
+    props.调 === "ok" ? "bg-success" : props.调 === "danger" ? "bg-danger" : "bg-fg-2";
+  return (
+    <span className={"flex items-center gap-1 text-xs " + 色}>
+      <span className={"h-1 w-1 shrink-0 rounded-full " + 点} aria-hidden="true" />
+      {props.children}
+    </span>
+  );
+}
+
+/**
  * 设置页：主区的一档，不是浮层。
  *
  * 为什么走主区——AI 那一格连模型清单带测试结果有一屏多，塞进模态要么挤要么得拆薄；
  * 而"切走之前先把正文落盘"这条纪律（`openSettings` 里的 `persist`）是备份面板已经跑通的。
  * 代价说清楚：打开设置会把正在编辑的那一篇存下并卸载，回来重新装载。
  *
- * 四格的排序按**改完会不会动这个库**：主题只改这台电脑，备份与模型改的是库里的配置，
- * 换库改的是打开哪个目录。这个顺序也是下面那段「哪些跟着库走」的事实顺序。
+ * 版面是一条一条的设置行，按**改完会不会动这个库**排：外观只改这台电脑，备份与模型改的是
+ * 库里的配置，最后是换库与"哪些跟着库走"。说明基本只在控件说不清的地方出现（"可留空"
+ * "已存 …7788"），产品口径交给 docs 与各面板自己的正文。
  */
 export function SettingsView(props: {
   info: AppInfo | null;
@@ -55,26 +108,45 @@ export function SettingsView(props: {
   /** 换库的输入框是这一格自己的事：它不该在 App 里占一个 state，也不该记住上一次填了什么 */
   const [库草稿, set库草稿] = useState("");
 
-  return (
-    <div className="measure-ui px-6 py-8">
-      {/* flash 必须在这一支也渲染：「保存配置」「Key 已存」都靠它回话，
-          以前它是只在正文那一支出现的，结果存完什么都没看见 */}
-      {props.flash ? <p className="mb-4 text-sm text-fg-2">{props.flash}</p> : null}
-      <div className="flex items-center gap-3">
-        <h2 className="text-xl text-fg">设置</h2>
-        <button className={btn} onClick={props.onBack}>
-          返回
-        </button>
-      </div>
+  // 状态与判据都看**盘上那份**（`view`），不看草稿：草稿填齐了但没保存，仍然不算配好。
+  // 这两个也决定"测试连通""列出可用模型"能不能按——它们读的都是已保存的配置。
+  const 模型已配 = 模型.view !== null && 缺项(模型.view).length === 0;
+  const 已存有地址 = !!模型.view?.baseUrl?.trim();
+  const 未保存 =
+    !!模型.view &&
+    (模型.form.baseUrl !== 模型.view.baseUrl ||
+      模型.form.chatModel !== 模型.view.chatModel ||
+      模型.form.embeddingModel !== 模型.view.embeddingModel ||
+      模型.form.rerank !== 模型.view.rerank);
+  const 随库 = 配置归属.filter((行) => 行.随库走);
+  const 本机 = 配置归属.filter((行) => !行.随库走);
 
-      <section className="mt-8 border-t border-line pt-6">
-        <h3 className="text-sm text-fg-2">外观</h3>
-        <label className="mt-3 flex flex-wrap items-center gap-2 text-sm">
-          <span className="text-fg-2">主题</span>
-          {/* 用原生 select：控件行为与键盘都得是原生的（[06] §4 判死了自造下拉，
-              代码块那枚语言牌同理）。档位从 `主题档位` 取，界面上不再各写一份 */}
+  return (
+    <div className="measure-ui px-6 pt-8 pb-16">
+      {/* 提示浮在右下角，不占版面：这一页存配置的位置在中段，页顶那行 flash 早滚出去了 */}
+      {props.flash ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed right-5 bottom-5 z-(--z-toast) max-w-sm rounded-md border border-line bg-raised px-3 py-2 text-xs text-fg-2 shadow-2"
+        >
+          {props.flash}
+        </div>
+      ) : null}
+
+      <header className="flex items-center gap-3">
+        <h2 className="text-xl text-fg">设置</h2>
+        <button className={btn + " ml-auto"} onClick={props.onBack}>
+          返回正文
+        </button>
+      </header>
+
+      <节 标题="外观">
+        <行 标签="主题">
+          {/* 用原生 select：控件行为与键盘都得是原生的（[06] §4 判死了自造下拉） */}
           <select
-            className="rounded-md border border-line bg-raised px-2 py-1 text-xs"
+            aria-label="主题"
+            className="w-32 rounded-md border border-line bg-page px-2 py-1 text-xs text-fg"
             value={外观.theme}
             onChange={(e) => 外观.setTheme(e.target.value as Theme)}
           >
@@ -84,34 +156,41 @@ export function SettingsView(props: {
               </option>
             ))}
           </select>
-        </label>
-        <p className="mt-2 text-xs text-fg-disabled">
-          换一档当场生效，速记窗（Alt+Shift+N）跟着一起变。它存在<span className="text-fg-2">这台电脑</span>上，
-          不写进这个库——把库拷给别人，别人看到的还是他自己的深浅色。
-        </p>
-      </section>
+        </行>
+      </节>
 
-      <section className="mt-8 border-t border-line pt-6">
-        <h3 className="text-sm text-fg-2">备份</h3>
-        <div className="mt-3 rounded-md border border-line bg-raised px-4 py-3 text-sm">
-          {备份格.档 === "开着" ? (
-            <span>
-              备份到 <span className="font-mono text-mono">{备份格.目录}</span>
-              {备份格.时刻
-                ? ` · 最近一次 ${new Date(备份格.时刻).toLocaleString()}`
-                : " · 还没做过快照"}
-            </span>
-          ) : (
-            <span className="text-danger">{备份格.文}</span>
-          )}
-        </div>
-        <div className="mt-4 flex flex-wrap items-center gap-2">
+      <节
+        标题="备份"
+        角={
+          <div className="flex items-center gap-3">
+            {备份格.档 === "开着" && 备份格.时刻 ? (
+              <span className="text-xs text-fg-2">
+                最近{" "}
+                {new Date(备份格.时刻).toLocaleString(undefined, {
+                  dateStyle: "short",
+                  timeStyle: "short",
+                })}
+              </span>
+            ) : null}
+            <状态 调={备份格.档 === "开着" ? "ok" : "danger"}>
+              {备份格.档 === "开着" ? "已开启" : 备份格.档 === "关着" ? "已关闭" : "未配置"}
+            </状态>
+          </div>
+        }
+      >
+        <行 标签="备份目录">
           <input
-            className={路径框}
+            aria-label="备份目录"
+            className={路径框 + " max-w-md"}
             value={备份.draft}
             spellCheck={false}
-            placeholder="E:\\笔记备份"
+            placeholder="另一块盘或 NAS 上的目录"
             onChange={(e) => 备份.setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (!是回车提交(e) || 备份.忙) return;
+              const 目标 = 备份.draft.trim();
+              if (目标) 备份.应用(目标);
+            }}
           />
           <button
             className={btnPrimary}
@@ -123,242 +202,224 @@ export function SettingsView(props: {
           <button className={btn} disabled={备份.忙} onClick={() => 备份.应用(null)}>
             不备份
           </button>
-        </div>
-        <p className="mt-2 text-xs text-fg-disabled">
-          每天第一次启动时把库里变化过的文件增量快照过去，保留最近 30 份。挑
-          <span className="text-fg-2">另一块盘或 NAS</span> 上的目录才有意义——同一块盘坏了就是一起坏。
-          快照列表、立即备份与恢复某一版在左下角「备份」那一格里。
-        </p>
-      </section>
+        </行>
+      </节>
 
-      <section className="mt-8 border-t border-line pt-6">
-        <h3 className="text-sm text-fg-2">模型与 Key</h3>
-        <p className="mt-3 text-sm text-fg-2">
-          填一个 <span className="font-mono text-mono">OpenAI 兼容</span>{" "}
-          端点就行：OpenAI、DeepSeek、Kimi、通义，或本机的 Ollama（
-          <span className="font-mono text-mono">http://localhost:11434/v1</span>
-          ）都走这一套。地址一般填到 <span className="font-mono text-mono">/v1</span> 为止。
-        </p>
-        <p className="mt-2 text-sm text-fg-2">
-          <span className="text-fg">Key 存在 Windows 凭据管理器里</span>
-          ：不落盘、不进这个库、也不回到界面脚本里，所以下面只显示末 4 位。换一台电脑要重输一次
-          Key，笔记本身跟着库走。
-        </p>
-        <div className="mt-5 flex max-w-2xl flex-col gap-3">
-          {(
-            [
-              ["接口地址 base_url", "baseUrl", "https://api.openai.com/v1"],
-              ["对话模型 chat_model", "chatModel", "gpt-4o-mini"],
-              ["嵌入模型 embedding_model（可留空）", "embeddingModel", "text-embedding-3-small"],
-            ] as const
-          ).map(([标签, 键, 占位]) => (
-            <label key={键} className="flex flex-col gap-1">
-              <span className="text-xs text-fg-2">{标签}</span>
-              <input
-                className="rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
-                value={模型.form[键]}
-                spellCheck={false}
-                placeholder={占位}
-                onChange={(e) => 模型.setForm({ ...模型.form, [键]: e.target.value })}
-              />
-            </label>
-          ))}
-          {/* 重排是合并之后的**一道工序**，不是"第四路"，所以它不进检索那一句的主体，
-              只在生效时加一段"· 已重排"。**默认关**：那是每次搜索多打一趟模型，
-              不能替用户决定花这个钱。回包读不出时后端会明说"这一趟用 RRF 名次"——
-              "配了"与"生效了"在界面上必须是两件事。 */}
-          <label className="mt-1 flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="mt-1 accent-(--accent)"
-              checked={模型.form.rerank}
-              onChange={(e) => 模型.setForm({ ...模型.form, rerank: e.target.checked })}
-            />
-            <span className="text-fg-2">
-              检索时让对话模型把候选排一遍（listwise 重排）
-              <span className="block text-xs text-fg-disabled">
-                每次搜索多打一趟模型，最多送前 30 条片段摘录（不含路径与块 ID）。
-                没填对话模型时这一格不起作用；排不出来会自动退回按名次合并的结果，并在这里说清。
-              </span>
-            </span>
-          </label>
-          <label className="mt-1 flex flex-col gap-1">
-            <span className="text-xs text-fg-2">
-              API Key
-              {模型.view?.keyHint ? (
-                <span className="ml-2 font-mono text-mono text-fg-2">
-                  现在：{模型.view.keyHint}
-                </span>
-              ) : (
-                <span className="ml-2 text-fg-disabled">
-                  没填（本地模型不需要；云端多半会回 401）
-                </span>
-              )}
-            </span>
-            <div className="flex gap-2">
-              <input
-                className={路径框}
-                value={模型.key}
-                type="password"
-                spellCheck={false}
-                placeholder={模型.view?.keySet ? "留空并按「存 Key」= 删掉这把" : "sk-…"}
-                onChange={(e) => 模型.setKey(e.target.value)}
-              />
-              <button
-                className={btn}
-                disabled={模型.忙 !== null || !模型.key.trim()}
-                onClick={模型.存Key}
-              >
-                存 Key
-              </button>
-            </div>
-          </label>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <button
-              className={btnPrimary}
-              disabled={模型.忙 !== null}
-              onClick={模型.保存}
-            >
-              {模型.忙 === "save" ? "保存中…" : "保存配置"}
-            </button>
-            <button
-              className={btn}
-              disabled={模型.忙 !== null || 缺项(模型.form).length > 0}
-              onClick={模型.测试}
-            >
-              {模型.忙 === "test" ? "测试中…" : "测试连通"}
-            </button>
-            <button
-              className={btn}
-              disabled={模型.忙 !== null || !模型.form.baseUrl.trim()}
-              title="问这个端点要一份模型清单，把能当嵌入模型用的那些列出来。它只发一个 GET 请求，你的笔记一个字节都不出去。"
-              onClick={模型.发现模型}
-            >
-              {模型.忙 === "models" ? "问端点中…" : "看看这家有哪些模型"}
-            </button>
-            {缺项(模型.form).length > 0 ? (
-              <span className="text-xs text-fg-disabled">
-                还差：{缺项(模型.form).join(" / ")}
-              </span>
-            ) : null}
-          </div>
-          <p className="text-xs text-fg-disabled">
-            嵌入模型那一格<strong className="text-fg-2">可以留空</strong>
-            ：DeepSeek、Anthropic 这类只有对话端点，Kimi 的嵌入要单独申请。留空不是
-            "没配好"，是语义那一路不开、检索只走关键词与链接——问答照旧能用（它靠的是
-            检索回来的片段）。这一格与"测试连通"读的都是
-            <strong className="text-fg-2">已经存进盘上的那份地址</strong>
-            ，改完先按「保存配置」。
-          </p>
-        </div>
-        {模型.发现 ? (
-          <div className="mt-5 max-w-2xl rounded-md border border-line bg-raised px-4 py-3">
-            <div className="font-mono text-xs text-fg-2">
-              端点给了 {模型.发现.all.length} 个模型｜{模型.发现.ms}ms｜其中含
-              <span className="mx-1">embed</span>的 {模型.发现.embedCandidates.length} 个
-            </div>
-            {模型.发现.embedCandidates.length > 0 ? (
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span className="text-xs text-fg-2">可以填进嵌入模型那一格：</span>
-                {模型.发现.embedCandidates.map((m) => (
-                  <button
-                    key={m}
-                    className={
-                      "rounded-md border px-3 py-1 font-mono text-xs transition-colors duration-(--dur-1) " +
-                      (模型.form.embeddingModel === m
-                        ? "border-accent text-fg"
-                        : "border-line text-fg-2 hover:bg-hover")
-                    }
-                    title="点一下就填进上面那一格（还要按「保存配置」才落盘）"
-                    onClick={() => 模型.setForm({ ...模型.form, embeddingModel: m })}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p className="mt-2 text-sm text-fg-2">
-                这一家<strong className="text-fg">没有</strong>名字里含
-                <span className="mx-1 font-mono">embed</span>
-                的模型，多半确实不提供嵌入接口。那就把上面那一格空着——
-                检索走关键词与链接，问答照旧。
-              </p>
-            )}
-            {模型.发现.all.length > 0 ? (
-              <details className="mt-2">
-                <summary className="cursor-pointer text-xs text-fg-2">
-                  它给的全部模型（{模型.发现.all.length}）
-                </summary>
-                <div className="mt-1 flex flex-wrap gap-2">
-                  {模型.发现.all.map((m) => (
-                    <span key={m} className="font-mono text-xs text-fg-2">
-                      {m}
-                    </span>
+      <节
+        标题="模型与 Key"
+        角={
+          <状态 调={模型已配 ? "ok" : "off"}>{模型已配 ? "已配置" : "未配置"}</状态>
+        }
+        尾={
+          <>
+            {/* 结果贴着行动作：点完就在下面，不再隔着几段说明 */}
+            {模型.报告 ? (
+              <div>
+                <div className="flex flex-wrap items-baseline gap-2 text-xs">
+                  <span className="text-fg">测试结果</span>
+                  {/* 结论用次要色（--success 4.37:1 不够 AA），失败那档才用红（5.15:1） */}
+                  <span className={模型.报告.ok ? "text-fg-2" : "text-danger"}>
+                    {探针结论(模型.报告.ok, 模型.报告.steps)}
+                  </span>
+                </div>
+                <div className="mt-2 divide-y divide-line overflow-hidden rounded-md border border-line">
+                  {模型.报告.steps.map((r, i) => (
+                    <div key={i} className={"px-3 py-2 text-sm " + (r.ok ? "" : "bg-danger-soft")}>
+                      <div className="flex flex-wrap items-baseline gap-2">
+                        <span className="text-fg">{步骤名(r.stage)}</span>
+                        <span className="font-mono text-xs text-fg-2">{r.ms}ms</span>
+                      </div>
+                      <div className="mt-1 break-words text-xs text-fg-2">{r.detail}</div>
+                    </div>
                   ))}
                 </div>
-              </details>
-            ) : null}
-          </div>
-        ) : null}
-        {模型.报告 ? (
-          <div className="mt-7 flex max-w-2xl flex-col gap-1">
-            <h4 className="text-sm text-fg-2">
-              测试结果
-              <span
-                className={"ml-2 text-xs " + (模型.报告.ok ? "text-success" : "text-danger")}
-              >
-                {探针结论(模型.报告.ok, 模型.报告.steps)}
-              </span>
-            </h4>
-            {模型.报告.steps.map((r, i) => (
-              <div
-                key={i}
-                className={
-                  "rounded-md border px-3 py-2 text-sm " +
-                  (r.ok ? "border-line" : "border-danger bg-danger-soft")
-                }
-              >
-                <span className="text-fg">{步骤名(r.stage)}</span>
-                <span className="ml-2 font-mono text-xs text-fg-2">{r.ms}ms</span>
-                <div className="mt-1 break-words text-xs text-fg-2">{r.detail}</div>
               </div>
-            ))}
-            <p className="mt-1 text-xs text-fg-disabled">
-              每个启用的探针只发一个最小请求，内容是一段固定文本{" "}
-              <span className="font-mono text-mono">ping</span>
-              ，不会把任何笔记内容发出去。
-            </p>
-          </div>
-        ) : null}
-        <p className="mt-5 max-w-2xl text-sm text-fg-2">
-          配好之后左下角「问答」那一格就能问了（<span className="font-mono text-mono">Ctrl+K</span>{" "}
-          里也有）。要在文档里直接改字：选中一段文字，气泡条上的「AI」会把你写的
-          要求交给它——<span className="text-fg">回稿先给你看，点「替换选中」才落盘</span>，
-          送出去的只有选中的那段。整理建议、自动打标还没做——那是 M3 的活。
-        </p>
-      </section>
+            ) : null}
 
-      <section className="mt-8 border-t border-line pt-6">
-        <h3 className="text-sm text-fg-2">库与关于</h3>
-        <div className="mt-3 rounded-md border border-line bg-raised px-4 py-3 text-sm">
-          {info?.vaultPath ? (
-            <span>
-              当前库 <span className="font-mono text-mono">{info.vaultPath}</span> · 索引里{" "}
-              {info.indexNotes} 篇
-            </span>
-          ) : (
-            <span className="text-danger">还没打开任何目录。</span>
-          )}
-        </div>
-        <div className="mt-4 flex flex-wrap items-center gap-2">
+            {模型.发现 ? (
+              <div className="mt-3 rounded-md border border-line px-3 py-2">
+                <div className="font-mono text-xs text-fg-2">
+                  {模型.发现.all.length} 个模型 · {模型.发现.ms}ms · 含 embed 的{" "}
+                  {模型.发现.embedCandidates.length} 个
+                </div>
+                {模型.发现.embedCandidates.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-fg-2">填进嵌入模型：</span>
+                    {模型.发现.embedCandidates.map((m) => (
+                      <button
+                        key={m}
+                        className={
+                          "rounded-md border px-3 py-1 font-mono text-xs transition-colors duration-(--dur-1) " +
+                          (模型.form.embeddingModel === m
+                            ? "border-accent text-fg"
+                            : "border-line text-fg-2 hover:bg-hover")
+                        }
+                        title="点一下填入「嵌入模型」，再按「保存配置」"
+                        onClick={() => 模型.setForm({ ...模型.form, embeddingModel: m })}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs text-fg-2">这家没有嵌入模型。</p>
+                )}
+                {模型.发现.all.length > 0 ? (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-fg-2">
+                      全部模型（{模型.发现.all.length}）
+                    </summary>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {模型.发现.all.map((m) => (
+                        <span key={m} className="font-mono text-xs text-fg-2">
+                          {m}
+                        </span>
+                      ))}
+                    </div>
+                  </details>
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        }
+      >
+        <行 标签="接口地址">
           <input
-            className={路径框}
+            aria-label="接口地址"
+            className={路径框 + " max-w-md"}
+            value={模型.form.baseUrl}
+            spellCheck={false}
+            placeholder="https://api.openai.com/v1"
+            onChange={(e) => 模型.setForm({ ...模型.form, baseUrl: e.target.value })}
+          />
+        </行>
+        <行 标签="对话模型">
+          <input
+            aria-label="对话模型"
+            className={路径框 + " max-w-md"}
+            value={模型.form.chatModel}
+            spellCheck={false}
+            placeholder="gpt-4o-mini"
+            onChange={(e) => 模型.setForm({ ...模型.form, chatModel: e.target.value })}
+          />
+        </行>
+        <行 标签="嵌入模型" 提示="可留空">
+          <input
+            aria-label="嵌入模型"
+            className={路径框 + " max-w-md"}
+            value={模型.form.embeddingModel}
+            spellCheck={false}
+            placeholder="text-embedding-3-small"
+            onChange={(e) => 模型.setForm({ ...模型.form, embeddingModel: e.target.value })}
+          />
+        </行>
+        <行 标签="API Key">
+          <input
+            aria-label="API Key"
+            className={路径框 + " max-w-md"}
+            value={模型.key}
+            type="password"
+            spellCheck={false}
+            placeholder="sk-…"
+            onChange={(e) => 模型.setKey(e.target.value)}
+          />
+          {/* 存与删是**两枚**按钮：以前共用一枚，存成功后它当场翻成"删除 Key"——
+              用户双击保存的第二下正好落在删除上，刚存进去的那把就没了 */}
+          <button
+            className={btn}
+            disabled={模型.忙 !== null || !模型.key.trim()}
+            onClick={模型.存Key}
+          >
+            {模型.忙 === "key" ? "处理中…" : "存 Key"}
+          </button>
+          {模型.view?.keyHint ? (
+            <span className="text-xs text-fg-2">已存 {模型.view.keyHint}</span>
+          ) : null}
+          {模型.view?.keySet ? (
+            <button
+              className={btn}
+              disabled={模型.忙 !== null || !!模型.key.trim()}
+              title={模型.key.trim() ? "先清空输入框，再删这把 Key" : "删掉已存的 Key"}
+              onClick={模型.存Key}
+            >
+              删除 Key
+            </button>
+          ) : null}
+        </行>
+        <行 标签="检索重排">
+          {/* 行标签已经说了这一格是什么，勾选框不再重复一遍；代价（每次多打一趟模型）在 title 里 */}
+          <input
+            type="checkbox"
+            aria-label="检索重排"
+            title="开启后每次搜索会多调用一次模型；失败时自动改用普通排序。"
+            className="accent-(--accent)"
+            checked={模型.form.rerank}
+            onChange={(e) => 模型.setForm({ ...模型.form, rerank: e.target.checked })}
+          />
+        </行>
+        <行 标签="">
+          {/* 读不到盘上那份（view 为 null）时不许保存：这时格子里是空的，一按就把原配置写成空。
+              读失败的原因由 App 顶部那条错误横幅说，不在这里再占一行字。 */}
+          <button
+            className={btnPrimary}
+            disabled={模型.忙 !== null || 模型.view === null}
+            onClick={模型.保存}
+          >
+            {模型.忙 === "save" ? "保存中…" : "保存配置"}
+          </button>
+          <button
+            className={btn}
+            disabled={模型.忙 !== null || !模型已配}
+            title="用已保存的配置做一次连通测试，不会发送笔记内容。"
+            onClick={模型.测试}
+          >
+            {模型.忙 === "test" ? "测试中…" : "测试连通"}
+          </button>
+          <button
+            className={btn}
+            disabled={模型.忙 !== null || !已存有地址}
+            title="查看这个服务提供哪些模型。只读取列表，不会发送笔记内容。"
+            onClick={模型.发现模型}
+          >
+            {模型.忙 === "models" ? "读取中…" : "列出可用模型"}
+          </button>
+          {/* 动作读的是**盘上**那份，草稿没保存时这里必须说清楚，否则测的是旧地址还以为是新的 */}
+          {未保存 ? (
+            <span className="text-xs text-fg-2">
+              {模型已配 ? "有改动没保存 · 测试用的是已保存的配置" : "有改动没保存 · 先保存再测试"}
+            </span>
+          ) : null}
+        </行>
+      </节>
+
+      <节
+        标题="库与关于"
+        角={
+          info ? (
+            <span className="text-xs text-fg-2">索引 {info.indexNotes} 篇</span>
+          ) : undefined
+        }
+      >
+        <行 标签="当前库">
+          {info?.vaultPath ? (
+            <span className="break-all font-mono text-mono text-fg-2">{info.vaultPath}</span>
+          ) : (
+            <span className="text-sm text-danger">还没打开任何目录</span>
+          )}
+        </行>
+        <行 标签="换到">
+          <input
+            aria-label="要打开的新库目录"
+            className={路径框 + " max-w-md"}
             value={库草稿}
             spellCheck={false}
-            placeholder={info?.vaultPath ?? "D:\\Notes"}
+            placeholder="另一个目录的完整路径"
             onChange={(e) => set库草稿(e.target.value)}
             onKeyDown={(e) => {
-              if (是回车提交(e) && 库草稿.trim()) 库.打开(库草稿.trim());
+              if (!是回车提交(e) || 库.忙) return;
+              const 目标 = 库草稿.trim();
+              // 与「打开这个目录」同一道门：同一个路径、空串都不重开
+              if (目标 && 目标 !== info?.vaultPath) 库.打开(目标);
             }}
           />
           <button
@@ -368,35 +429,25 @@ export function SettingsView(props: {
           >
             {库.忙 ? "打开中…" : "打开这个目录"}
           </button>
-        </div>
-        <p className="mt-2 text-xs text-fg-disabled">
-          切过去之前会先把正在编辑的那一篇存下。目录不存在时会新建，不会动里面已有的文件；
-          索引与配置在里面的 <span className="font-mono text-mono">.note/</span>，删掉它能重建。
-        </p>
-
-        <h4 className="mt-7 text-sm text-fg-2">哪些跟着库走，哪些跟着这台电脑走</h4>
-        <div className="mt-2 flex flex-col gap-1">
-          {配置归属.map((行) => (
-            <div
-              key={行.项}
-              className="flex flex-wrap items-baseline gap-2 rounded-md border border-line px-3 py-2 text-xs"
-            >
-              <span className="min-w-0 flex-1 text-fg-2">{行.项}</span>
-              <span className="font-mono text-mono">{行.落在哪}</span>
-              <span className={行.随库走 ? "text-success" : "text-danger"}>
-                {行.随库走 ? "拷库带走" : "换机重来"}
-              </span>
-            </div>
+        </行>
+        <行 标签="跟着库走">
+          <span className="text-xs text-fg-2">{随库.map((x) => x.项).join("、")}</span>
+          <span className="font-mono text-xs text-fg-2">{随库[0]?.落在哪}</span>
+        </行>
+        <行 标签="跟着本机">
+          {本机.map((x, i) => (
+            <span key={x.项} className="text-xs text-fg-2">
+              {i > 0 ? "、" : ""}
+              {x.项}
+              <span className="text-fg-2">（{x.落在哪}）</span>
+            </span>
           ))}
-        </div>
-        <p className="mt-2 text-xs text-fg-disabled">
-          把库拷到另一台电脑，笔记、备份目录与端点地址都在；深浅色要重新选一次，
-          Key 要重新输一次——这是刻意的安全取舍，不改成明文落盘。
-        </p>
-        <p className="mt-6 text-xs text-fg-disabled">
-          知更 {info?.version ?? ""} · 落盘格式 schema v{info?.schemaVersion ?? "?"}
-        </p>
-      </section>
+        </行>
+      </节>
+
+      <p className="mt-6 text-xs text-fg-2">
+        知更 {info?.version ?? ""} · schema v{info?.schemaVersion ?? "?"}
+      </p>
     </div>
   );
 }

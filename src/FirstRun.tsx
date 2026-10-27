@@ -68,12 +68,12 @@ export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
         <div className="w-full max-w-144 rounded-lg border border-line bg-raised p-8 shadow-2">
           <h1 className="text-2xl text-fg">再给备份挑一个目录</h1>
           <p className="mt-3 text-fg-2">
-            你的笔记只存在 <span className="font-mono text-mono">{vault.vaultPath}</span>{" "}
-            这一块盘上。盘坏了就是全坏——所以这一步不是可选项。
+            笔记现在只存在 <span className="font-mono text-mono">{vault.vaultPath}</span>{" "}
+            这一块盘上，盘坏了就全没了。
           </p>
           <p className="mt-2 text-fg-2">
-            挑<span className="text-fg">另一个盘</span>（或 NAS 挂载点）上的空目录，每天第一次启动时
-            做一次增量快照，保留最近 30 份。
+            挑<span className="text-fg">另一块盘</span>（或 NAS）上的空目录，每天首次启动自动备份，
+            保留最近 30 份。
           </p>
           <label className="mt-6 block text-sm text-fg-2" htmlFor="backup-path">
             备份目录
@@ -105,7 +105,7 @@ export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
             {err ? (
               <span className="text-danger">{err}</span>
             ) : (
-              "备份目录不能选在库里面。这一步以后也能在标题栏那枚齿轮（设置 → 备份）里改。"
+              "备份目录不能放在笔记库里面。以后可以在「设置 → 备份」里修改。"
             )}
           </p>
         </div>
