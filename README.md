@@ -109,17 +109,28 @@ cargo build -p note-cli
 ### 图形界面
 
 ```bash
-start.bat           # 推荐：清端口 → pnpm tauri dev，Ctrl+C 或 stop.bat 退出时自动收尾
-stop.bat            # 杀掉残留的 dev 进程并释放 dev 端口
+start.bat           # 推荐：清端口 → pnpm tauri dev；收尾见下面那条 Ctrl+C 的注意
+stop.bat            # 杀掉残留的 dev 进程并释放 dev 端口（没停干净会以非零退出）
 
 pnpm tauri dev      # 首次编译较久。默认热键 Alt+Shift+N 唤起速记窗
 pnpm dev            # 只起前端（http://127.0.0.1:1425/），此时没有 Tauri 运行时，界面会明确提示
 ```
 
 `start.bat` 只是 `scripts\dev.ps1` 的壳：启动前先清掉占着 dev 端口的进程（vite 是 `strictPort`，
-被占用会直接失败而不是换端口；端口默认读 `vite.config.ts` 里的 `PORT`），退出时再扫一遍端口和
-`target\debug` 下的壳进程。
-直接跑 `scripts\dev.ps1 -FrontendOnly` 等价于 `pnpm dev`。
+被占用会直接失败而不是换端口；端口默认读 `vite.config.ts` 里的 `PORT`，**并要求它与
+`src-tauri/tauri.conf.json` 的 `devUrl` 一致**，不一致直接报错而不是给你一个白屏的壳），退出时再
+扫一遍端口和 `target\debug` 下的壳进程。
+
+清端口**只动认得出的 dev 进程**（node / pnpm / cargo / zhigeng）：端口被别的东西占着（别人的 dev
+server、Docker 映射、隧道）时它是报错让你自己看，而不是替你杀掉。双开时也会认所有权——先退出的那
+一份不会去拆后起的那一份。
+
+> **Ctrl+C 有一个前提**：在 `start.bat` 起的窗口里按 Ctrl+C，cmd 会先问
+> `Terminate batch job (Y/N)?`。**选 N**，`dev.ps1` 才能自己收尾（杀进程树 + 释放端口）；
+> 选 Y 会把 powershell 一起收走，收尾不会跑，残留由下一次 `start.bat` 的清场兜住。
+> 想完全避开这一问，就直接跑 `scripts\dev.ps1`（PowerShell 里 `& scripts\dev.ps1`）。
+
+直接跑 `scripts\dev.ps1 -FrontendOnly` 等价于 `pnpm dev`；`scripts\dev.ps1 -Stop` 只做清理。
 
 第一次启动会让你**确认笔记目录**（默认 `D:\Notes`，没有 D 盘则回落 `%USERPROFILE%\Notes`），
 不会静默建库。确认后速记内容落 `<Vault>/inbox/`，改目录只要重开一个 Vault。

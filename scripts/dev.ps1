@@ -44,6 +44,13 @@ function Clear-Port {
   foreach ($ownedPid in (Get-PortOwners -Port $Port)) {
     $proc = Get-Process -Id $ownedPid -ErrorAction SilentlyContinue
     $name = if ($proc) { $proc.ProcessName } else { '?' }
+    # **只认本项目的 dev 进程**：只按端口一刀切，会杀掉别人的 dev server / Docker 端口映射 /
+    # ssh 隧道。vite 配 strictPort 的本意就是"被占用时报错，而不是替用户决定杀谁"
+    if (@('node', 'pnpm', 'cargo', 'zhigeng') -notcontains $name) {
+      $msg = "端口 $Port 被 $name (PID $ownedPid) 占用，看名字不像本项目的 dev 进程"
+      if ($BestEffort) { Write-Warning "$msg；没动它，请自己确认"; continue }
+      throw "$msg。请先确认那个进程是什么，再决定要不要停它"
+    }
     Write-Host "  端口 $Port 被 $name (PID $ownedPid) 占用，结束它"
     Stop-ProcessTree -ProcessId $ownedPid
   }
@@ -61,7 +68,9 @@ function Clear-Port {
 # 只认 target\debug 下的壳进程：target\release 里那份可能是用户正在跑的发布件，不能碰
 function Clear-DevShell {
   # 用 foreach 而不是 ForEach-Object：取 .Path 可能抛 Access denied，return 会连剩下的一起跳过
-  foreach ($shell in @(Get-Process -Name zhigeng -ErrorAction SilentlyContinue)) {
+  # **只认壳**：zhigeng 是现在的名字，note-app 是改名前的壳；note.exe 是 CLI，不许碰
+  $壳名 = @('zhigeng', 'note-app')
+  foreach ($shell in @(foreach ($n in $壳名) { Get-Process -Name $n -ErrorAction SilentlyContinue })) {
     $path = $null
     try { $path = $shell.Path } catch { $path = $null }
     if ($path -and $path.StartsWith("$Root\target\debug\", [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -87,30 +96,37 @@ function Save-DevCliPid {
 # -OnlyPid 用于「自己的收尾」：文件已被新实例接管时（双开 start.bat）不能去杀新实例
 function Clear-DevCli {
   param([int]$OnlyPid = 0)
-  if (-not (Test-Path $PidFile)) { return }
+  if (-not (Test-Path $PidFile)) { return $true }
   $raw = Get-Content $PidFile -ErrorAction SilentlyContinue
-  if (-not $raw) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue; return }
+  if (-not $raw) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue; return $true }
   $parts = ([string]$raw).Split('|')
   $cliPid = 0
   [int64]$ticks = 0
   if ($parts.Count -lt 2 -or -not [int]::TryParse($parts[0], [ref]$cliPid) -or
       -not [int64]::TryParse($parts[1], [ref]$ticks)) {
     Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-    return
+    return $true
   }
-  if ($OnlyPid -and $cliPid -ne $OnlyPid) { return }  # 属于更新的实例，交给它自己收尾
+  if ($OnlyPid -and $cliPid -ne $OnlyPid) { return $false }  # 属于更新的实例，交给它自己收尾
   Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
   $proc = Get-Process -Id $cliPid -ErrorAction SilentlyContinue
-  if (-not $proc) { return }
-  try { if ($proc.StartTime.Ticks -ne $ticks) { return } } catch { return }
+  if (-not $proc) { return $true }
+  try { if ($proc.StartTime.Ticks -ne $ticks) { return $true } } catch { return $true }
   Write-Host "  结束 dev 命令行进程树 (PID $cliPid)"
   Stop-ProcessTree -ProcessId $cliPid
+  return $true
 }
 
 # 退出前的统一收尾：命令行进程树 -> 壳进程 -> 端口
 function Invoke-Cleanup {
   param([int]$Port, [switch]$BestEffort, [int]$OwnerPid = 0)
-  Clear-DevCli -OnlyPid $OwnerPid
+  # **所有权只判一次**：pid 文件已经被更新的实例接管时，连壳与端口都不许碰——否则先退出的
+  # 那一份会把新实例的 vite 与壳一起杀掉（双开时表现为"新窗口白屏，而它自己毫无察觉"）
+  $mine = Clear-DevCli -OnlyPid $OwnerPid
+  if ($OwnerPid -and -not $mine) {
+    Write-Host "==> 这个 dev 会话已被新实例接管：不动它的壳与端口" -ForegroundColor Yellow
+    return
+  }
   Clear-DevShell
   Clear-Port -Port $Port -BestEffort:$BestEffort
   if ((Get-PortOwners -Port $Port).Count -eq 0) {
@@ -127,7 +143,24 @@ if (-not $PSBoundParameters.ContainsKey('Port')) {
   if (Test-Path $viteConfig) {
     $detected = (Select-String -Path $viteConfig -Pattern 'const\s+PORT\s*=\s*(\d+)' -ErrorAction SilentlyContinue |
         Select-Object -First 1)
-    if ($detected) { $Port = [int]$detected.Matches[0].Groups[1].Value }
+    if ($detected) {
+      $Port = [int]$detected.Matches[0].Groups[1].Value
+    } else {
+      Write-Warning "没能从 vite.config.ts 解析出 PORT，按 $Port 处理；真端口不同的话这一趟会清错端口"
+    }
+  }
+}
+
+# 端口还写在 tauri.conf.json 的 devUrl 里：两处不一致时壳会连不上前端（白屏），早报错好过白屏
+$tauriConf = Join-Path $Root 'src-tauri\tauri.conf.json'
+if (Test-Path $tauriConf) {
+  # 注意 json 里键名本身带引号：`"devUrl"`——漏掉那对引号，这条检查会静默不命中（写完先跑一次）
+  $devUrl = Select-String -Path $tauriConf -Pattern '"devUrl"\s*:\s*"[^"]*:(\d+)' | Select-Object -First 1
+  if ($devUrl) {
+    $confPort = [int]$devUrl.Matches[0].Groups[1].Value
+    if ($confPort -ne $Port) {
+      throw "vite 端口 $Port 与 tauri.conf.json 的 devUrl 端口 $confPort 不一致——壳会连不上前端"
+    }
   }
 }
 
@@ -137,6 +170,8 @@ Write-Host "==> 清理端口 $Port" -ForegroundColor Cyan
 # -Stop 只做清理，不需要 pnpm
 if ($Stop) {
   Invoke-Cleanup -Port $Port -BestEffort
+  # 退出码要能当判据用：端口没释放就说没成功，别让调用方（编辑器任务 / 脚本）以为停干净了
+  if ((Get-PortOwners -Port $Port).Count -ne 0) { exit 1 }
   return
 }
 
