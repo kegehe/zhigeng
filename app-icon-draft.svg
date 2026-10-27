@@ -1,0 +1,32 @@
+<!--
+  知更的图标草稿（矢量源，不是运行期资源）。
+  放在库根而不是 public/：public/ 会被原样拷进 dist/，而没有任何地方引用它。
+  「图标终稿」那一档用它生成 src-tauri/icons/（tauri icon），再决定要不要顶掉 app-icon.png。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="sq"><rect width="512" height="512" rx="112" ry="112"/></clipPath>
+    <!-- 轮廓：头 + 身 + 长尾。颜色全灌进这里，边缘必然齐 -->
+    <clipPath id="鸟">
+      <circle cx="302" cy="172" r="84"/>
+      <ellipse cx="252" cy="302" rx="122" ry="132" transform="rotate(8 252 302)"/>
+      <path d="M176 370 C 138 400 100 430 72 456 C 96 466 132 452 166 426 C 192 406 212 386 224 368 Z"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect width="512" height="512" fill="#1B2733"/>
+    <g clip-path="url(#鸟)">
+      <!-- 底：整只灰 -->
+      <rect width="512" height="512" fill="#5B7083"/>
+      <!-- 橙：额 → 喉 → 胸 → 腹，一整块压在右侧 -->
+      <ellipse cx="330" cy="252" rx="120" ry="152" transform="rotate(-6 330 252)" fill="#C8562F"/>
+      <!-- 灰背与翅：再压回一道，橙就成了绕过去的月牙 -->
+      <ellipse cx="204" cy="268" rx="92" ry="126" transform="rotate(12 204 268)" fill="#5B7083"/>
+      <ellipse cx="196" cy="286" rx="70" ry="96" transform="rotate(14 196 286)" fill="#4C6072"/>
+    </g>
+    <!-- 喙 -->
+    <path d="M378 158 L 430 176 L 376 196 Z" fill="#2E3E4D"/>
+    <!-- 眼：落在灰额与橙面的交界上 -->
+    <circle cx="326" cy="150" r="12" fill="#16202A"/>
+  </g>
+</svg>
