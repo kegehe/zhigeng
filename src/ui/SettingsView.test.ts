@@ -2,7 +2,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AppInfo, AiView } from "../ipc/types";
-import type { AI表单 } from "./settings";
+import type { AI表单, AI忙 } from "./settings";
 import { SettingsView } from "./SettingsView";
 
 /**
@@ -52,6 +52,10 @@ function 挂(over: {
   key?: string;
   flash?: string | null;
   存Key?: () => void;
+  忙?: AI忙;
+  info?: AppInfo;
+  setForm?: (f: AI表单) => void;
+  setKey?: (k: string) => void;
 }) {
   const view = over.view === undefined ? 视图() : over.view;
   const form =
@@ -67,7 +71,7 @@ function 挂(over: {
   act(() => {
     树.render(
       createElement(SettingsView, {
-        info: 信息,
+        info: over.info ?? 信息,
         flash: over.flash ?? null,
         onBack: () => {},
         外观: { theme: "system", setTheme: () => {} },
@@ -75,10 +79,10 @@ function 挂(over: {
         模型: {
           view,
           form,
-          setForm: () => {},
+          setForm: over.setForm ?? (() => {}),
           key: over.key ?? "",
-          setKey: () => {},
-          忙: null,
+          setKey: over.setKey ?? (() => {}),
+          忙: over.忙 ?? null,
           报告: null,
           发现: null,
           保存: () => {},
@@ -185,4 +189,53 @@ it("盘上没配齐时，「测试连通」与「列出可用模型」按不动�
   expect(按文字(根, "列出可用模型")!.disabled).toBe(true);
   expect(根.textContent).toContain("未配置");
   拆();
+});
+
+it("删除 Key 的忙态落在删除那枚上，不让「存 Key」冒充", () => {
+  // 两枚按钮共用一个 `忙`，键里有没有字才分得出跑的是哪一件——从前按删除时
+  // 亮起来的是「存 Key → 处理中…」，正好指反
+  const { 根, 拆 } = 挂({ view: 视图({ keySet: true }), key: "", 忙: "key" });
+  expect(按文字(根, "删除中…")).not.toBeNull();
+  expect(按文字(根, "存 Key")).not.toBeNull();
+  拆();
+});
+
+it("输入框里的 Esc 把这一格退回盘上那份，不是死键", () => {
+  const setForm = vi.fn();
+  const view = 视图({ baseUrl: "https://old.example/v1", chatModel: "old-model" });
+  const { 根, 拆 } = 挂({
+    view,
+    form: {
+      baseUrl: "https://new.example/v1",
+      chatModel: "new-model",
+      embeddingModel: "",
+      rerank: false,
+    },
+    setForm,
+  });
+  const 按Esc = (el: Element) =>
+    act(() => {
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
+    });
+  按Esc(根.querySelector('input[aria-label="接口地址"]')!);
+  expect(setForm).toHaveBeenLastCalledWith(
+    expect.objectContaining({ baseUrl: "https://old.example/v1" }),
+  );
+  按Esc(根.querySelector('input[aria-label="对话模型"]')!);
+  expect(setForm).toHaveBeenLastCalledWith(
+    expect.objectContaining({ chatModel: "old-model" }),
+  );
+  拆();
+});
+
+it("备份行的「现在」说的是盘上生效那份，不是输入框里的草稿", () => {
+  // 按完「不备份」之后输入框还留着旧路径：屏幕上唯一那条路径恰好是不再生效的那条
+  const 有 = 挂({ info: { ...信息, backupDir: "D:\bak", backupUnconfigured: false } });
+  expect(有.根.textContent).toContain("现在：D:\bak");
+  有.拆();
+  const 关 = 挂({ info: { ...信息, backupDisabled: true, backupDir: "D:\bak" } });
+  expect(关.根.textContent).toContain("现在：不备份");
+  关.拆();
 });

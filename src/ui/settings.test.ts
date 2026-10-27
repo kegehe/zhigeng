@@ -113,9 +113,12 @@ describe("判据真的接在界面上", () => {
   });
 
   it("Esc 在设置页里回正文，但输入框里不抢这一键", () => {
-    // 输入框里 Esc 该管的是它自己那点内容（Key、路径），不是整页跳走
+    // 输入框里 Esc 归输入框自己（退回盘上那份 / 清掉草稿），不是整页跳走。
+    // **光有这条守卫是不够的**：从前设置页的输入框里没有任何 Escape 行为，于是
+    // "不抢"变成了"死键"——所以还要钉住那一页真的接住了这一键。
     expect(主窗).toMatch(/e\.key === "Escape" && mode === "settings"/);
     expect(主窗).toContain('t.tagName === "INPUT"');
+    expect(设置).toMatch(/退格\(e, /);
     // 面板开着时那一键归面板（它自己关自己），不能顺手把设置页也关了
     expect(主窗).toMatch(/mode === "settings" && !palette/);
   });
@@ -130,3 +133,36 @@ describe("判据真的接在界面上", () => {
     expect(主窗).toContain('closest(".tree-menu")');
   });
 });
+
+describe("设置页的状态只有一个来源", () => {
+  const 主窗 = fs.readFileSync("src/App.tsx", "utf8");
+  const 设置 = fs.readFileSync("src/ui/SettingsView.tsx", "utf8");
+
+  it("角标读盘上那份（aiView），不读草稿", () => {
+    // 读草稿的话：在设置页打几个字还没保存，角标就说"已配置"，与同一屏的
+    // 「模型与 Key」状态自相矛盾，而且退出设置后它一直挂着那句假话
+    expect(主窗).toMatch(/徽标\(aiView, ai测过\)/);
+    expect(主窗).not.toMatch(/徽标\(aiForm/);
+  });
+
+  it("存 / 删 Key 只换 view，不碰没保存的表单", () => {
+    // ai_save_key 返回的是盘上那份配置；整份 填回 会把用户刚打的地址 / 模型名
+    // 清回旧值（首次配置时是两个空框，接着按保存就把空配置写盘）
+    expect(主窗).toMatch(/setAiView\(await api\.aiSaveKey/);
+    expect(主窗).not.toMatch(/填回\(await api\.aiSaveKey/);
+  });
+
+  it("换库把上一次的测试结论与表单一起作废", () => {
+    // 配置跟着库走（.note/config.toml），A 库测过"能检索"不能贴到 B 库身上
+    const 换库 = 主窗.slice(主窗.indexOf("const 打开库"), 主窗.indexOf("const ai保存"));
+    expect(换库).toContain("setAi测过(null)");
+    expect(换库).toMatch(/填回\(await api\.aiView\(\)\)/);
+  });
+
+  it("齿轮在设置页里不再重进一次", () => {
+    // 重进会 setBackupDraft / setAiReport(null) / setAi发现(null) / 填回——三份草稿与
+    // 两份结果全没，而齿轮就在光标旁边，长得像开关
+    expect(主窗).toMatch(/if \(mode !== "settings"\) void openSettings\(\)/);
+  });
+});
+

@@ -1463,6 +1463,19 @@ export function App() {
       setSaveState("clean");
       setMode("view");
       await apply(新);
+      /*
+       * AI 的配置跟着**库**走（`.note/config.toml`），所以换库等于换了一份配置：上一次
+       * 那个「测过」结论、测试报告与模型清单都属于旧库，一律作废；表单也得读新库那份，
+       * 否则角标会拿着 A 库的配置去说 B 库的状态。
+       */
+      setAi测过(null);
+      setAiReport(null);
+      setAi发现(null);
+      try {
+        填回(await api.aiView());
+      } catch {
+        /* 新库读不到配置时角标会退回"没配"；读失败的原因由 apply 那条错误横幅说 */
+      }
       setFlash(`已切到 ${新.vaultPath ?? 路径}`);
     } catch (e) {
       setError(describeError(e).message);
@@ -1499,7 +1512,13 @@ export function App() {
     setAiBusy("key");
     try {
       const 是存 = aiKey.trim().length > 0;
-      填回(await api.aiSaveKey(aiKey));
+      /*
+       * **只换 Key 相关的那两格，不碰整份表单**：`ai_save_key` 返回的是**盘上那份**配置，
+       * 而用户可能正把新地址 / 新模型名填在框里还没保存——整份 `填回` 会把他刚打的字
+       * 当场清回旧值（首次配置时是两个空框，接着按「保存配置」就把空配置写进盘）。
+       * 角标读的是 `aiView`（盘上那份），所以不刷新表单也不会说错话。
+       */
+      setAiView(await api.aiSaveKey(aiKey));
       setAiKey("");
       setAiReport(null);
       setAi测过(null);
@@ -1593,15 +1612,21 @@ export function App() {
             "配齐没有 + 这次测过没有"仍然不用点开才看得见 */}
         <button
           className="win-btn flex w-auto gap-1 px-2"
-          onClick={() => void openSettings()}
+          onClick={() => {
+            // 齿轮是**入口**，不是开关：已经在设置页里就什么都不做。重进一次会把
+            // 刚填的备份目录、模型字段与测试结果一起清掉（那三样都挂在 App 的 state 上）。
+            if (mode !== "settings") void openSettings();
+          }}
           title="设置：主题、备份、模型与 Key、库"
         >
           <Settings aria-hidden="true" />
           {/* 四档都说话：没配 / 已配置 / 不通 / 能检索（或只对话）。**配齐没测过也要有字**——
-              从前这一档返回 null，整段被条件渲染掉，保存完配置那枚入口反而变成空白。 */}
+              从前这一档返回 null，整段被条件渲染掉，保存完配置那枚入口反而变成空白。
+              **判据读 `aiView`（盘上那份），不读 `aiForm`（草稿）**：读草稿的话，在设置页
+              打几个字还没保存，角标就先说"已配置"，与同一屏的「模型与 Key」状态自相矛盾。 */}
           {aiView ? (
             <span className={"text-xs " + (徽标红(ai测过) ? "text-danger" : "text-fg-2")}>
-              AI·{徽标(aiForm, ai测过)}
+              AI·{徽标(aiView, ai测过)}
             </span>
           ) : null}
         </button>

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type KeyboardEvent, type ReactNode } from "react";
 import { btn, btnPrimary, 路径框 } from "./controls";
 import { 缺项, 步骤名, 探针结论 } from "./ai";
 import { 是回车提交 } from "./keys";
@@ -75,9 +75,10 @@ export function SettingsView(props: {
   /**
    * 回正文的那一条路。
    *
-   * 齿轮是**入口**不是开关：开着设置时再按齿轮不会关掉它（它会重新 persist 一遍正文）。
-   * 侧栏底栏那几格（回收站/导入/备份/问答）是开关，齿轮不在那一排里——
-   * 于是设置页必须自己带一条出去的路，否则它就是个进得去出不来的地方。
+   * 齿轮是**入口**不是开关：开着设置时再按它，App 那边直接什么都不做（从前会重进一次，
+   * 把刚填的备份目录、模型字段、测试结果一起清掉）。侧栏底栏那几格（回收站/导入/备份/
+   * 问答）才是开关，齿轮不在那一排里——于是设置页必须自己带一条出去的路，否则它就是个
+   * 进得去出不来的地方。**这一页也不接住齿轮那一下**：那是标题栏的事，不归视图。
    */
   onBack: () => void;
   外观: { theme: Theme; setTheme: (t: Theme) => void };
@@ -120,6 +121,25 @@ export function SettingsView(props: {
       模型.form.rerank !== 模型.view.rerank);
   const 随库 = 配置归属.filter((行) => 行.随库走);
   const 本机 = 配置归属.filter((行) => !行.随库走);
+
+  /**
+   * 设置页输入框里的 Esc：**把这一格退回现在生效的那个值**（或清空草稿）。
+   *
+   * 这一键以前在输入框里是死的：全局那条 Esc 在 INPUT/TEXTAREA/SELECT 上一律 return，
+   * 而这一页的输入框自己没有任何 Escape 行为——于是"刚打完字想退出"按下去什么都不发生，
+   * 要离开只能 Tab 到「返回正文」。给它一个真含义，比让键沉默好：
+   * 备份目录退回盘上那份、模型三格退回 `view`、Key 与「换到」清空草稿。
+   * 组词中的 Esc 不算（中文输入法用它取消候选）。
+   */
+  const 退格 = (e: KeyboardEvent<HTMLInputElement>, 回: () => void): boolean => {
+    if (e.key !== "Escape" || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+      return false;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    回();
+    return true;
+  };
 
   return (
     <div className="measure-ui px-6 pt-8 pb-16">
@@ -187,11 +207,23 @@ export function SettingsView(props: {
             placeholder="另一块盘或 NAS 上的目录"
             onChange={(e) => 备份.setDraft(e.target.value)}
             onKeyDown={(e) => {
+              // Esc 退回盘上那份（没有第二层含义，但也不许沉默——见 `退格`）
+              if (退格(e, () => 备份.setDraft(info?.backupDir ?? ""))) return;
               if (!是回车提交(e) || 备份.忙) return;
               const 目标 = 备份.draft.trim();
               if (目标) 备份.应用(目标);
             }}
           />
+          {/* 「现在」这一句是这个行**唯一**说明"盘上正在生效的是哪儿"的地方：
+              输入框装的是草稿（取消备份之后它也还留着上次那个路径），不写这一句，
+              屏幕上唯一那条路径恰好是已经不在生效的那条。 */}
+          <span className="text-xs text-fg-2">
+            {备份格.档 === "开着"
+              ? `现在：${备份格.目录}`
+              : 备份格.档 === "关着"
+                ? "现在：不备份"
+                : "还没设过备份目录"}
+          </span>
           <button
             className={btnPrimary}
             disabled={备份.忙 || !备份.draft.trim()}
@@ -291,6 +323,9 @@ export function SettingsView(props: {
             spellCheck={false}
             placeholder="https://api.openai.com/v1"
             onChange={(e) => 模型.setForm({ ...模型.form, baseUrl: e.target.value })}
+            onKeyDown={(e) =>
+              退格(e, () => 模型.setForm({ ...模型.form, baseUrl: 模型.view?.baseUrl ?? "" }))
+            }
           />
         </行>
         <行 标签="对话模型">
@@ -301,6 +336,11 @@ export function SettingsView(props: {
             spellCheck={false}
             placeholder="gpt-4o-mini"
             onChange={(e) => 模型.setForm({ ...模型.form, chatModel: e.target.value })}
+            onKeyDown={(e) =>
+              退格(e, () =>
+                模型.setForm({ ...模型.form, chatModel: 模型.view?.chatModel ?? "" }),
+              )
+            }
           />
         </行>
         <行 标签="嵌入模型" 提示="可留空">
@@ -311,6 +351,11 @@ export function SettingsView(props: {
             spellCheck={false}
             placeholder="text-embedding-3-small"
             onChange={(e) => 模型.setForm({ ...模型.form, embeddingModel: e.target.value })}
+            onKeyDown={(e) =>
+              退格(e, () =>
+                模型.setForm({ ...模型.form, embeddingModel: 模型.view?.embeddingModel ?? "" }),
+              )
+            }
           />
         </行>
         <行 标签="API Key">
@@ -322,6 +367,8 @@ export function SettingsView(props: {
             spellCheck={false}
             placeholder="sk-…"
             onChange={(e) => 模型.setKey(e.target.value)}
+            // Esc 清掉这一格草稿：已经存进去的那把在凭据管理器里，这里只是输入框
+            onKeyDown={(e) => 退格(e, () => 模型.setKey(""))}
           />
           {/* 存与删是**两枚**按钮：以前共用一枚，存成功后它当场翻成"删除 Key"——
               用户双击保存的第二下正好落在删除上，刚存进去的那把就没了 */}
@@ -330,7 +377,9 @@ export function SettingsView(props: {
             disabled={模型.忙 !== null || !模型.key.trim()}
             onClick={模型.存Key}
           >
-            {模型.忙 === "key" ? "处理中…" : "存 Key"}
+            {/* 忙态要落在**按下那一枚**上：两枚按钮共用一个 `忙`，键里有没有字才分得出
+                这一次跑的是"存"还是"删"——否则按删除时亮的是"存 Key → 处理中…"，正好指反 */}
+            {模型.忙 === "key" && !!模型.key.trim() ? "保存中…" : "存 Key"}
           </button>
           {模型.view?.keyHint ? (
             <span className="text-xs text-fg-2">已存 {模型.view.keyHint}</span>
@@ -342,7 +391,7 @@ export function SettingsView(props: {
               title={模型.key.trim() ? "先清空输入框，再删这把 Key" : "删掉已存的 Key"}
               onClick={模型.存Key}
             >
-              删除 Key
+              {模型.忙 === "key" && !模型.key.trim() ? "删除中…" : "删除 Key"}
             </button>
           ) : null}
         </行>
@@ -416,6 +465,7 @@ export function SettingsView(props: {
             placeholder="另一个目录的完整路径"
             onChange={(e) => set库草稿(e.target.value)}
             onKeyDown={(e) => {
+              if (退格(e, () => set库草稿(""))) return;
               if (!是回车提交(e) || 库.忙) return;
               const 目标 = 库草稿.trim();
               // 与「打开这个目录」同一道门：同一个路径、空串都不重开
