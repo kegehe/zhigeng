@@ -80,10 +80,22 @@ function pushText(out: Node[], d: Document, src: string): void {
   for (const n of parseInline(src)) {
     let node: Node = d.createTextNode(n.text);
     for (const mark of n.marks) {
-      const tag = { bold: "strong", italic: "em", code: "code", strike: "s", link: "a" }[mark];
+      // 颜色与高亮是**显示层唯一自己拼样式的地方**：色值来自文件本身（内联 style），
+      // 不经过 token——文件里就是 `#e5534b`，这里再翻译一次就会与正文对不上。
+      if (mark.name === "textColor" || mark.name === "bgColor") {
+        const wrap = el(d, "span");
+        const prop = mark.name === "textColor" ? "color" : "background-color";
+        wrap.setAttribute("style", `${prop}:${mark.color ?? ""}`);
+        wrap.append(node);
+        node = wrap;
+        continue;
+      }
+      const tag = { bold: "strong", italic: "em", code: "code", strike: "s", link: "a", highlight: "mark" }[
+        mark.name
+      ];
       if (!tag) continue;
       const wrap = el(d, tag as "strong");
-      if (tag === "a" && n.href) wrap.setAttribute("href", n.href);
+      if (tag === "a" && mark.href) wrap.setAttribute("href", mark.href);
       wrap.append(node);
       node = wrap;
     }

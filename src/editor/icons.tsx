@@ -3,13 +3,18 @@ import {
   AlignLeft,
   AlignRight,
   Ban,
+  Baseline,
   Bold,
+  ChevronDown,
+  ChevronUp,
   Code,
+  Highlighter,
   Italic,
   Link2,
   Minus,
   MoveDown,
   MoveUp,
+  Pin,
   Quote,
   Redo2,
   RemoveFormatting,
@@ -34,6 +39,8 @@ export type 图标名 =
   | "strike"
   | "code"
   | "link"
+  | "baseline"
+  | "highlighter"
   | "ai"
   | "clear"
   | "divider"
@@ -52,7 +59,10 @@ export type 图标名 =
   | "up"
   | "down"
   | "undo"
-  | "redo";
+  | "redo"
+  | "chevronUp"
+  | "chevronDown"
+  | "pin";
 
 /**
  * "动整行 / 整列"这四枚自己画：Lucide 1.48 没有 row-insert / column-insert 这类名字，
@@ -138,6 +148,10 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   strike: Strikethrough,
   code: Code,
   link: Link2,
+  // 文字色与底色是两枚：Baseline（A 加一道底色条）与 Highlighter（马克笔）——
+  // Google Docs / Word 那一套。用户不用先认"这枚按钮是调色板还是字体色"
+  baseline: Baseline,
+  highlighter: Highlighter,
   ai: Sparkles,
   clear: RemoveFormatting,
   divider: Minus,
@@ -159,4 +173,8 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   down: MoveDown,
   undo: Undo2,
   redo: Redo2,
+  // 底部对话框：展开时朝下（点了收起来）、收起时朝上（点了展开）；钉子就是"别自动收"
+  chevronUp: ChevronUp,
+  chevronDown: ChevronDown,
+  pin: Pin,
 };

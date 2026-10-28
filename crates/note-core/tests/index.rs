@@ -983,3 +983,46 @@ fn 反链取不完要老实说截断() {
     assert_eq!(入.len(), 3);
     assert!(!入截, "全取回来了就不该报截断");
 }
+
+#[test]
+fn 颜色与高亮不进检索正文与面包屑() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let body = "---\nid: n-color0001\ntitle: 排版试验\n---\n\n## <span style=\"color:#e5534b\">红标题</span>\n\n<span style=\"background-color:#4a9eff33\">整行蓝底</span> 与 ==高亮==。\n";
+    v.write_atomic("notes/排版试验.md", body.as_bytes())
+        .unwrap();
+    let (v, idx) = open(dir.path());
+    idx.rebuild_all(&v).unwrap();
+
+    // 切片正文（要拿去嵌入、也要拼给模型）与面包屑都不能带标签 / 记号
+    let text: String = idx
+        .conn()
+        .query_row("SELECT text FROM chunks ORDER BY rowid LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(!text.contains("<span"), "切片正文带了标签: {text}");
+    assert!(!text.contains("=="), "切片正文带了高亮记号: {text}");
+    assert!(text.contains("红标题"), "{text}");
+    assert!(text.contains("高亮"), "{text}");
+
+    // 块级纯文本同一口径
+    let dirty: i64 = idx
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM blocks WHERE text LIKE '%<span%' OR text LIKE '%==%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dirty, 0, "有块的 text 里还带着颜色语法");
+
+    // 行首的 span 不许把整块判成 html（那样再打开就不能当正文编辑）
+    let html: i64 = idx
+        .conn()
+        .query_row("SELECT count(*) FROM blocks WHERE type='html'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(html, 0);
+}

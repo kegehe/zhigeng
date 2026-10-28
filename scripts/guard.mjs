@@ -90,7 +90,13 @@ function walk(dir, acc = []) {
   return acc;
 }
 // 允许出现字面量的地方：token 定义本身、一次性原型
-const ALLOW = new Set(["src/ui/tokens.css", "probes/spike-c/index.html"]);
+const ALLOW = new Set([
+  "src/ui/tokens.css",
+  // 调色板：色值要**原样写进 .md**（`<span style="color:#e5534b">`），因此不能是 token。
+  // 这是唯一一处"字面量出现在组件里"的合理例外，理由写在文件头
+  "src/editor/colors.ts",
+  "probes/spike-c/index.html",
+]);
 const rules = [
   [/#([0-9a-f]{3,8})\b/i, "字面量 hex 颜色"],
   [/\brgba?\(/, "字面量 rgb() 颜色"],

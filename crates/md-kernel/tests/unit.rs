@@ -54,6 +54,51 @@ fn 加粗与行内码被剥离但内容保留() {
 }
 
 #[test]
+fn 行首的颜色span仍是段落而不是HTML块() {
+    // "把一整行上色"存出来就是行首一个 span。按 CommonMark，HTML 块要求整行只有一个
+    // 标签，而这种行标签后跟着正文，是段落——不这么判，"上色一行"再打开就变成源码块。
+    let doc = parse(
+        "<span style=\"color:#e5534b\">整行</span>\n\n<span style=\"background-color:#4a9eff33\">蓝底</span>\n",
+    );
+    assert_eq!(doc.blocks.len(), 2, "{:?}", doc.blocks.len());
+    for b in &doc.blocks {
+        assert!(
+            matches!(b.kind, Kind::Paragraph),
+            "行首的颜色 span 被读成了 {:?}",
+            b.kind.as_str()
+        );
+    }
+    assert_eq!(plain_inline(&doc.blocks[0].content), "整行");
+    // 别的 HTML 块照旧不接管：宁可少识别，也不替用户猜
+    let html = parse("<div>块</div>\n");
+    assert!(matches!(html.blocks[0].kind, Kind::Html));
+}
+
+#[test]
+fn 颜色与高亮的语法不进检索文本() {
+    // 颜色落成 `<span style="…">`（docs/02 D35）。标签必须剥掉：留着的话搜 "span"
+    // 能搜出一堆笔记，AI 的上下文里也全是 CSS；而字一个都不能少。
+    assert_eq!(
+        plain_inline("前<span style=\"color:#e5534b\">红字</span>后"),
+        "前红字后"
+    );
+    assert_eq!(
+        plain_inline("<span style=\"background-color:#4a9eff33\">蓝底</span>"),
+        "蓝底"
+    );
+    // 两层（色 + 底）也得配对剥干净
+    assert_eq!(
+        plain_inline(
+            "<span style=\"background-color:#d2992233\"><span style=\"color:#a371f7\">紫</span></span>"
+        ),
+        "紫"
+    );
+    assert_eq!(plain_inline("这段 ==要跳出来== 了"), "这段 要跳出来 了");
+    // 数学写法里的 == 不动：`a == b` 只剩一个 ==，没有收口
+    assert_eq!(plain_inline("当 a == b 成立时"), "当 a == b 成立时");
+}
+
+#[test]
 fn 非规范形必须回显原文而不是重建() {
     // 有序列表下用三空格嵌套（等于 "1. " 的宽度），我们的规范形是两空格。
     // 这种源文本不能被动过——宁可回显。

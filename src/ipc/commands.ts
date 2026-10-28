@@ -145,8 +145,22 @@ export const api = {
    * 流式回稿走 `ai://rewrite-token` / `ai://rewrite-think`（带 `runId`），Promise 回来的
    * 才是洗过、可直接替换的定稿。落盘由界面在用户点「替换选中」时发一笔编辑器事务完成。
    */
-  aiRewrite: (text: string, instruction: string, preset: string, runId: number) =>
-    invoke<RewriteResult>("ai_rewrite", { text, instruction, preset, runId }),
+  aiRewrite: (
+    text: string,
+    instruction: string,
+    preset: string,
+    runId: number,
+    doc?: string,
+    rel?: string,
+  ) =>
+    invoke<RewriteResult>("ai_rewrite", {
+      text,
+      instruction,
+      preset,
+      runId,
+      doc: doc ?? null,
+      rel: rel ?? null,
+    }),
   /** 审计：最近的生成记录，含未采纳的那几次 */
   aiRuns: (limit = 20) => invoke<AiRun[]>("ai_runs", { limit }),
   /**

@@ -21,19 +21,18 @@ import { 归一 } from "./tableSelect";
 import { 改选区, 定锚点, 矩形of, 选区of } from "./tableSelectPlugin";
 import { mdExtensions } from "./schema";
 import { 就绪后标出 } from "./citeFocus";
-import { RewritePanel } from "./RewritePanel";
-import { 准备改写, 浮层位置, 气泡高, type 浮层放 } from "./rewrite";
 import { 工具图标, type 图标名 } from "./icons";
 import { LinkEditor, Toolbar } from "./Toolbar";
 
-/** 浮层位置：相对外层容器算，滚动时重算，不让它跟着漂 */
+/** 气泡位置：相对外层容器算，滚动时重算，不让它跟着漂 */
 type Float = {
   top: number;
   left: number;
-  bottom: number;
-  选区顶: number;
   pos?: number;
 };
+
+/** 气泡顶在选区顶上方这么多。只在这一处用：气泡是唯一一个"挂在选区上沿"的浮层 */
+const 气泡高 = 34;
 
 /** 选区气泡上的行内标记。图标与常驻工具栏**同一张表**（`icons.tsx`），两处不同就是两副面孔 */
 const MARKS: { name: string; 标签: string; 图: 图标名 }[] = [
@@ -64,7 +63,6 @@ export function BlockEditor({
   onNotice,
   editApi,
   focusBlock,
-  aiReady = false,
   onEditorChange,
 }: {
   doc: EditDoc;
@@ -77,8 +75,6 @@ export function BlockEditor({
   editApi: RefObject<(() => string) | null>;
   /** 引用落点：顶层块序号 + 每次点击递增的 nonce（同一块再点一次也要重新滚） */
   focusBlock?: { ordinal: number; nonce: number } | null;
-  /** 对话模型配好了没有（地址 + 对话模型）。没配时 AI 按钮点了只说下一步，不发请求 */
-  aiReady?: boolean;
   /**
    * 编辑器实例的出口（布局三的大纲栏在 App 主区里，需要这份实例）。
    * 传 setter 就行——挂载时给新实例，卸载/换篇重建时给 null，App 那侧不用自己管清理。
@@ -121,16 +117,6 @@ export function BlockEditor({
   const [drop, setDrop] = useState<{ top: number; index: number } | null>(null);
   const dropRef = useRef<{ top: number; index: number } | null>(null);
   const [linking, setLinking] = useState(false);
-  /**
-   * 选区改写浮层。位置在打开那一刻固定——输入框一拿焦点，正文选区就不在 DOM 里了。
-   * `键` 是这次的目标选区（`from:to`）：**换一个选区再点 AI 必须换一个浮层**。
-   * 不换的话新位置只是把旧浮层挪过去，里面的原文、回稿与 `锚` 还是上一段的，
-   * 点「替换选中」会落到**上一段**头上。
-   */
-  const [ai面板, setAi面板] = useState<{ 放: 浮层放; 键: string } | null>(null);
-  /** 入口被拦下的原因（模型没配 / 选区不成立）。挂在工具栏下沿，见 `说提示` */
-  const [ai提示, setAi提示] = useState<string | null>(null);
-  const 提示钟 = useRef<number | null>(null);
 
   const editor = useEditor({
     extensions: mdExtensions,
@@ -354,10 +340,6 @@ export function BlockEditor({
       setSel({
         top: rect.top - host.top - 气泡高,
         left: rect.left - host.left + rect.width / 2,
-        // 改写浮层挂在选区**下沿**而不是气泡底下：挂着气泡会把它正改的那段字整段盖住
-        bottom: rect.bottom - host.top,
-        // 选区顶单独留一份：浮层要翻到气泡上方时按它算，不去反推气泡那个偏移
-        选区顶: rect.top - host.top,
         pos: from,
       });
     };
@@ -422,91 +404,7 @@ export function BlockEditor({
     };
   }, [editor, doc, editApi]);
 
-  // 提示的自散定时器归自己收：切走一篇 / 关掉正文时不该留一个还在跑的计时器
-  useEffect(
-    () => () => {
-      if (提示钟.current !== null) window.clearTimeout(提示钟.current);
-    },
-    [],
-  );
-
   if (!editor) return null;
-
-  /**
-   * 入口被拦下时的原因。**不走全局 flash**：flash 渲染在正文顶部，而工具栏是 sticky 的——
-   * 深文档里滚到中间点一下，那句话正好在屏幕外，看起来就是"按钮没反应"（G7 要求任何动作
-   * 100ms 内有反馈）。改成贴在工具栏下沿的一枚提示，跟着粘顶的工具栏留在眼前，4 秒自散。
-   */
-  const 清提示 = () => {
-    setAi提示(null);
-    if (提示钟.current !== null) {
-      window.clearTimeout(提示钟.current);
-      提示钟.current = null;
-    }
-  };
-  const 说提示 = (文: string) => {
-    清提示();
-    setAi提示(文);
-    提示钟.current = window.setTimeout(() => {
-      setAi提示(null);
-      提示钟.current = null;
-    }, 4000);
-  };
-
-  /**
-   * 打开改写浮层。气泡与常驻工具栏**共用这一份**：模型配没配、选段改不改得，两条判据
-   * 都走 `准备改写`，落点也只算一次。常驻入口是从工具栏点的，那时气泡可能不在（浏览态、
-   * 或选区不是"一段文字"），所以没有气泡坐标时按 ProseMirror 的选区几何自己量一份。
-   *
-   * 打开成功要**把上一次的拦截提示清掉**：不清的话它还会在工具栏上挂满 4 秒，正好压在
-   * 刚打开的浮层上方。
-   */
-  const 开改写 = () => {
-    const r = 准备改写(aiReady, editor.state);
-    if (!r.ok) {
-      说提示(r.why);
-      return;
-    }
-    // 浏览态点了就先进编辑：否则回稿替换要走 `onUpdate`，而那条路以 `editable` 为闸，
-    // 改了却不标脏——界面显示已保存，盘上没变。判据放在拿到锚点之后：选区不成立时
-    // 只该说原因，不该顺手把一篇只读的笔记翻进编辑态。
-    if (!editor.isEditable) startRef.current();
-    const 宿主 = wrap.current;
-    if (!宿主) return;
-    const 框 = 宿主.getBoundingClientRect();
-    const 箱 = 宿主.closest("main")?.getBoundingClientRect();
-    /** 吸顶工具栏的底边：可视区的**上沿**是它，不是 main 的顶边 */
-    const 栏 = 宿主.querySelector(".toolbar")?.getBoundingClientRect();
-    const 锚 = sel
-      ? { left: sel.left, top: sel.选区顶, bottom: sel.bottom }
-      : (() => {
-          const 起 = editor.view.coordsAtPos(r.锚.from);
-          const 末 = editor.view.coordsAtPos(r.锚.to);
-          return {
-            left: (起.left + 末.right) / 2 - 框.left,
-            top: 起.top - 框.top,
-            bottom: 末.bottom - 框.top,
-          };
-        })();
-    setLinking(false);
-    清提示();
-    // 判据只有一份（`浮层位置`）：挂选区下沿 / 放不下翻到气泡上方 / 两边都夹不住
-    // 就取空间大的那一侧并把高度夹进去。坐标换算在这里做，判据只认数字。
-    setAi面板({
-      放: 浮层位置(锚, {
-        宽: 宿主.clientWidth,
-        高: 宿主.clientHeight,
-        // 视口上下沿换成 wrap 坐标。**上沿取工具栏的底边**：工具栏是吸顶的，main 的顶边
-        // 在它后面——按 main 算，浮层翻到上方时头会埋进工具栏底下（矮窗 + 选区靠下正好中）。
-        // **下沿不夹到 wrap 高度**：短文档下面那块空白也是可见区，夹了会让"文末选中一段"
-        // 被迫翻到上面去
-        视口上: Math.max(0, (栏?.bottom ?? 箱?.top ?? 框.top) - 框.top),
-        视口下: (箱?.bottom ?? window.innerHeight) - 框.top,
-      }),
-      // 换一段文字再点 AI：键一变浮层就重挂，旧原文 / 回稿 / 锚点不会跟到新选段上
-      键: `${r.锚.from}:${r.锚.to}`,
-    });
-  };
 
   /** 屏幕坐标 → 那个顶层块的信息。手柄跟谁、拖到哪，都问 ProseMirror 的几何，不自己算布局 */
   const blockAt = (x: number, y: number) => {
@@ -645,7 +543,7 @@ export function BlockEditor({
 
   return (
     <div className="editor-wrap" ref={wrap}>
-      <Toolbar editor={editor} onAi={开改写} aiReady={aiReady} 提示={ai提示} />
+      <Toolbar editor={editor} />
       <EditorContent editor={editor} />
       {sel ? (
         <div
@@ -694,32 +592,7 @@ export function BlockEditor({
             // 另一处没改，链接就会吃掉或漏掉半个词
             <LinkEditor editor={editor} onDone={() => setLinking(false)} />
           ) : null}
-          {/*
-            文档内的 AI 入口。**只对"一段里的文字"开口**：跨块 / 整块 / 含换行的选区
-            会先把原因说出来，不把按钮灰掉让人猜。没配模型时也不装死——那句下一步
-            比一个点了没反应的图标有用。
-          */}
-          <button
-            type="button"
-            className="ai ml-1"
-            title="AI 改写选中文字"
-            aria-label="AI 改写选中文字"
-            onClick={开改写}
-          >
-            <工具图标.ai />
-          </button>
         </div>
-      ) : null}
-      {ai面板 ? (
-        <RewritePanel
-          // 换目标选区就换一个浮层（见 `ai面板.键`）：旧回稿不能跟到新选段上
-          key={ai面板.键}
-          editor={editor}
-          放={ai面板.放}
-          onClose={() => setAi面板(null)}
-          // 也走工具栏那枚提示：替换完浮层就关了，全局 flash 在正文顶部，可能已经在屏幕外
-          onNotice={说提示}
-        />
       ) : null}
       {hover && !drop ? (
         <div

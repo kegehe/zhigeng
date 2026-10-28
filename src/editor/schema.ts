@@ -1130,6 +1130,45 @@ export const MdItalic = makeMark("italic", "em", "Mod-i");
 export const MdCode = makeMark("code", "code", "");
 export const MdStrike = makeMark("strike", "s", "");
 
+/**
+ * 高亮。`==文字==` 落盘（Obsidian 兼容），底色由 `--md-mark` 一个 token 决定——
+ * 高亮表达的是"这一段要跳出来"，不是"用户挑了一个颜色"，所以它不参与调色板。
+ */
+export const MdHighlight = makeMark("highlight", "mark", "Mod-Shift-h");
+
+/**
+ * 文字色 / 底色。**落盘是真色值**（`<span style="color:#e5534b">`）而不是 token 名：
+ * `.md` 会被 Obsidian / VS Code / git diff 直接打开，写 `var(--x)` 到了别人手里就是一串
+ * 谁也不认识的字符。两份调色板（界面与文件）因此必须同源，见 `colors.ts`。
+ *
+ * `parseHTML` 只认带 `data-md-color` 的 span：粘进来的网页富文本带一堆 `style`，
+ * 照单全收等于让别人的样式表决定我们的文件长什么样。
+ */
+function makeColorMark(name: string, prop: "color" | "background-color") {
+  return Mark.create({
+    name,
+    addAttributes() {
+      return {
+        color: {
+          default: "",
+          parseHTML: (el) => el.getAttribute("data-md-color") ?? "",
+          renderHTML: () => ({}),
+        },
+      };
+    },
+    parseHTML() {
+      return [{ tag: "span[data-md-color]" }];
+    },
+    renderHTML({ mark }) {
+      const color = String(mark.attrs.color ?? "");
+      return ["span", { "data-md-color": color, style: `${prop}:${color}` }, 0];
+    },
+  });
+}
+
+export const MdTextColor = makeColorMark("textColor", "color");
+export const MdBgColor = makeColorMark("bgColor", "background-color");
+
 export const MdLink = Mark.create({
   name: "link",
   addAttributes() {
@@ -1939,6 +1978,9 @@ export const mdExtensions = [
   MdItalic,
   MdCode,
   MdStrike,
+  MdHighlight,
+  MdTextColor,
+  MdBgColor,
   MdLink,
   BlockIdGuard,
   BlockTools,

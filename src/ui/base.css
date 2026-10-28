@@ -866,74 +866,250 @@
     background: var(--bg-active);
     color: var(--text-primary);
   }
-  /* 只有「AI」说的是"把这段交给模型"：用主色把入口从格式按钮里分出来，不填底色——
-     它不是警告，也不是当前开着的那一项。选区气泡与常驻工具栏同一副面孔。 */
-  .block-editor .bubble button.ai,
-  .block-editor .toolbar button.ai {
-    color: var(--accent);
-  }
-  .block-editor .bubble button.ai:hover,
-  .block-editor .toolbar button.ai:hover {
-    color: var(--accent-hover);
-  }
-  /* 工具栏下沿那枚提示：入口被拦下时（没配模型 / 没选中文字）贴在 AI 按钮下方。
-     工具栏是 sticky 的，正文滚到哪儿它都在眼前——全局 flash 在正文顶部，滚下去就看不见，
-     正好落进"点了没反应"那一类。绝对定位 + 不吃事件：不挤占一行，也不把正文推下去
-     （与表格那句「已选 N 格」同一条理由）。 */
-  .block-editor .toolbar .ai-hint {
+  /* 底部 AI 对话框：挂在正文列里、**滚动容器之外**（App.tsx 的 .editor-pane），
+     所以正文怎么滚它都不动。收起时只露一条把手，鼠标靠近就展开——这是用户
+     2026-10-28 定的交互。pointer-events 分两层：外壳不吃事件（不挡下面的字），
+     里面的把手与面板才吃。 */
+  .ai-dock {
     position: absolute;
-    top: calc(100% + var(--space-2));
-    right: var(--space-2);
-    z-index: var(--z-popover);
-    max-width: calc(100% - var(--space-4));
-    padding: var(--space-2) var(--space-3);
+    inset-inline: 0;
+    bottom: var(--space-3);
+    z-index: var(--z-sticky);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-1);
+    padding-inline: var(--space-6);
+    pointer-events: none;
+  }
+  .ai-dock > * {
+    pointer-events: auto;
+  }
+  /* 收起条：一枚**只有图标的**药丸（标题与目标状态都是噪音，2026-10-28 撤掉） */
+  .ai-dock-bar {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    max-width: min(var(--measure-ui), 100%);
+    padding: 6px 10px;
     border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
+    border-radius: 999px;
     background: var(--bg-raised);
     box-shadow: var(--shadow-2);
     color: var(--text-secondary);
-    font-size: var(--text-sm);
-    line-height: var(--leading-ui);
-    pointer-events: none;
+    cursor: pointer;
+    /* 悬浮时轻轻抬起 1px：它是一枚"压"在正文上的东西，不是一条边 */
+    transition:
+      transform var(--dur-1) ease-out,
+      background-color var(--dur-1),
+      color var(--dur-1);
   }
-  /* 选区改写浮层。材质与气泡同一套（raised + 1px 边 + shadow-2）；位置由界面在打开
-     那一刻算好并固定——输入框一拿焦点，浏览器选区就不在正文里了，跟着矩形重算会甩走。
-     宽度与 `src/editor/rewrite.ts` 的 `浮层宽` 同数（384px，4px 栅格）：那边夹左右
-     边界要按这个宽度算，写成 rem 的话根字号一变两边就对不上了。 */
-  .block-editor .rewrite {
-    position: absolute;
-    z-index: var(--z-popover);
+  .ai-dock-bar:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    transform: translateY(-1px);
+  }
+  .ai-dock-bar svg {
+    width: 0.875rem;
+    height: 0.875rem;
+  }
+  /* 中间那枚星火是入口的脸：与正文里的 AI 动作同一枚，缩小后也不会被看成一个普通图标 */
+  .ai-dock-bar svg:first-child {
+    color: var(--accent);
+  }
+  /* 面板：与气泡 / 工具栏同一材质，宽度跟 UI 测度（56rem）走、居中。**只动 opacity /
+     transform**（[06] 的动效规则），120ms 从下方 4px 浮上来——不做高度动画，那是布局动画 */
+  @keyframes ai-dock-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  .ai-dock-panel {
+    animation: ai-dock-in var(--dur-1) ease-out;
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
-    width: min(384px, calc(100% - var(--space-4)));
-    /* 高度上限由 `src/editor/rewrite.ts` 的 `浮层位置` 算好后内联给：那一侧空间不够时
-       在浮层内部滚，不撑出可见区。 */
-    overflow-y: auto;
-    /* 一个轴不是 visible，另一个 visible 就会按规范算成 auto：不给换行规则的话，
-       回稿里一条长 URL 会在浮层底下多出一条横向滚动条。 */
-    overflow-wrap: anywhere;
-    /* 底边留给动作行：它 sticky 到滚动口底部时，靠自己的 padding 与面板留白对齐 */
-    padding: var(--space-3) var(--space-3) 0;
+    /* 对话面板不必跟正文一样宽：56rem 已经够放一条长句，再宽读起来就是扫视 */
+    width: min(var(--measure-ui), 100%);
+    max-height: min(46vh, 26rem);
+    overflow: hidden;
     border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     background: var(--bg-raised);
     box-shadow: var(--shadow-2);
   }
-  /* 列向 flex 的默认 flex-shrink 是 1：到了限高那一刻，孩子会被压扁而不是滚动。
-     写成独立的选择器而不是嵌套——这份 CSS 是原生级联，不赌解析器认不认嵌套。 */
-  .block-editor .rewrite > * {
+  /* 钉住 / 收起两枚图标挂在面板右上角（收起只在这里——展开时下面不再挂一颗把手） */
+  .ai-dock-tools {
+    display: flex;
     flex: none;
+    justify-content: flex-end;
+    gap: 2px;
+    padding: var(--space-1) var(--space-2) 0;
   }
-  /* 动作行贴在浮层底部：回稿把面板撑到 maxHeight 之后，「替换选中」不必滚到底才够得着。
-     横向出血到内边距外，内容从两侧滚过去时不会露出来。 */
-  .block-editor .rewrite-actions {
-    position: sticky;
-    bottom: 0;
-    margin-inline: calc(-1 * var(--space-3));
+  .ai-dock-ic {
+    display: grid;
+    place-items: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-secondary);
+    opacity: 0.7;
+    cursor: pointer;
+    transition:
+      background-color var(--dur-1),
+      color var(--dur-1),
+      opacity var(--dur-1);
+  }
+  .ai-dock-ic:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    opacity: 1;
+  }
+  .ai-dock-ic.on {
+    background: var(--bg-active);
+    color: var(--accent);
+    opacity: 1;
+  }
+  .ai-dock-ic svg {
+    width: 0.8125rem;
+    height: 0.8125rem;
+  }
+
+  .ai-dock-log {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    /* min-height: 0 与 overflow 同用：自动最小尺寸归零，日志才在面板里滚而不是撑高 */
+    min-height: 0;
+    overflow-y: auto;
+    /* 滚动条一出现不挤内容：否则每来一轮都会横向抖一下 */
+    scrollbar-gutter: stable;
+    /* 上面有钉住那一行，顶部留 8px 就够；两侧与底部 12px */
     padding: var(--space-2) var(--space-3) var(--space-3);
-    background: var(--bg-raised);
+  }
+  /* 一条消息都没有时不留一块空白：空的对话区只是把面板撑高 */
+  .ai-dock-log:empty {
+    display: none;
+  }
+  .ai-turn {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  /* 用户那一句靠右、沉底：一眼能分出"我说的"与"它回的" */
+  .ai-turn-q {
+    align-self: flex-end;
+    max-width: 85%;
+    padding: var(--space-1) var(--space-2);
+    /* 右下角收小一点：一眼能认出"这是我说的"，不必靠对齐去猜 */
+    border-radius: var(--radius-md) var(--radius-md) var(--radius-sm) var(--radius-md);
+    background: var(--bg-sunken);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    line-height: var(--leading-ui);
+  }
+  .ai-turn-tag {
+    margin-inline-end: var(--space-2);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+  }
+  .ai-turn-a p {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    line-height: var(--leading-ui);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .ai-turn-meta {
+    margin: var(--space-1) 0 0;
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+  }
+  /* 只有用量那一行是机器读数（模型 / token / 背景字数），用等宽；"已写进正文"是给人看的 */
+  .ai-turn-usage {
+    font-family: var(--font-mono);
+  }
+  .ai-turn-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+  }
+  .ai-turn-err {
+    margin: 0;
+    color: var(--danger);
+    font-size: var(--text-xs);
+    line-height: var(--leading-ui);
+  }
+  /* 流式里那根竖线：与旧浮层同一条记号，用户不用重新学"它还在写" */
+  .ai-caret {
+    display: inline-block;
+    width: 1px;
+    height: 1em;
+    margin-inline-start: 2px;
+    background: var(--text-secondary);
+    vertical-align: text-bottom;
+    animation: ai-caret 1s steps(2, start) infinite;
+  }
+  @keyframes ai-caret {
+    to {
+      visibility: hidden;
+    }
+  }
+  /* 脚不参与压缩：列向 flex 的默认 flex-shrink 是 1，内容一高就会把"发送"那一行压扁 */
+  .ai-dock-foot {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    padding: var(--space-2);
+  }
+  /* 有记录时才补分隔线：只有输入框时它贴着面板上沿，再画一条就是双线 */
+  .ai-dock-panel.has-log .ai-dock-foot {
     border-top: 1px solid var(--border-subtle);
+  }
+  .ai-dock-row {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--space-2);
+  }
+  /* 输入框 5rem 起、随内容长到 9rem，再长就在内部滚。**textarea 而不是 input**：
+     一句话写两行时不该在单行框里推着看，也不该把整块正文顶掉 */
+  .ai-dock-input {
+    min-width: 0;
+    flex: 1;
+    min-height: 5rem;
+    max-height: 9rem;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--text-sm);
+    line-height: var(--leading-ui);
+    resize: none;
+  }
+  /* 鼠标点进来也要有指示：`:focus-visible` 对文本域只认键盘。**不去掉描边**：
+     键盘聚焦仍由全局那条焦点环负责，这里只把边框换成主色 */
+  .ai-dock-input:focus {
+    border-color: var(--accent);
+  }
+  .ai-dock-send {
+    flex: none;
+    /* 与文本域底边对齐，留一点呼吸：按钮的行高比正文行短 */
+    margin-bottom: var(--space-1);
+  }
+  /* 总错那条不属于任何一轮，直接挂在面板上：两侧要留白，不然贴着圆角 */
+  .ai-dock-panel > .ai-turn-err {
+    padding: var(--space-2) var(--space-3) 0;
   }
   /* 常驻工具栏（布局三·悬浮胶囊）：不用先选中文本也知道有什么可用。sticky 跟着正文
      这一列走，真机验过滚动之后仍在屏内（不验就不知道滚动容器是不是它的祖先）。
@@ -996,6 +1172,90 @@
     color: var(--text-secondary);
     font-size: var(--text-sm);
     pointer-events: none;
+  }
+
+  /* 正文里的高亮。浏览器默认的 mark 是一块荧光黄，在素笺/夜墨两套底色上都很扎眼；
+     底色走 token，字色继承（高亮不改字色，那是文字色那一路的事） */
+  .block-editor .ProseMirror mark,
+  .block-editor .md-view mark {
+    border-radius: var(--radius-sm);
+    padding: 0 1px;
+    background: var(--md-mark);
+    color: inherit;
+  }
+  /* 文字颜色 / 底色：**两枚按钮各自一个面板**（Word / Google Docs 那一路），
+     按钮下沿那道色条画的是光标处当前的颜色——不打开面板也知道现在套着什么。
+     色条是绝对定位的，不占高度：工具栏高度是契约（换档时正文不许下移 25px），
+     给按钮加 padding 就等于把那条契约拆了。 */
+  .block-editor .color-cell {
+    position: relative;
+    display: inline-flex;
+  }
+  .block-editor .color-cell .ink-bar {
+    position: absolute;
+    right: 25%;
+    bottom: 2px;
+    left: 25%;
+    height: 2px;
+    border-radius: 1px;
+    pointer-events: none;
+  }
+  /* 面板：与气泡 / 斜杠菜单同一材质，挂在自己那枚按钮的下沿，不贴工具栏右边 */
+  .block-editor .color-pop {
+    position: absolute;
+    top: calc(100% + var(--space-2));
+    left: 0;
+    z-index: var(--z-popover);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow-2);
+  }
+  .block-editor .color-pop .grp {
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+  }
+  .block-editor .color-pop .swatches {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  /* 色块本身是一个按钮：padding 压回 0，否则它会撑成工具栏那种长条 */
+  .block-editor .color-pop .swatch {
+    display: grid;
+    place-items: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    padding: 0;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-secondary);
+  }
+  /* 选中那一格用一圈 accent 而不是打个勾：色块只有 20px，勾会把颜色本身盖掉，
+     而这一排要回答的就是"这是哪种颜色"；圈在外沿，不动色块 */
+  .block-editor .color-pop .swatch.on {
+    box-shadow:
+      0 0 0 2px var(--bg-raised),
+      0 0 0 3px var(--accent);
+  }
+  /* 高亮那一格没有 inline 色值：它跟主题走（--md-mark），不是用户挑的颜色。
+     hover 也不许被工具栏那条 bg-hover 换掉，否则鼠标一过就"高亮变灰" */
+  .block-editor .color-pop .swatch.mark,
+  .block-editor .color-pop .swatch.mark:hover {
+    background: var(--md-mark);
+  }
+  /* "去掉"那一枚没有色块，边框改虚线：它是"没有颜色"，不是另一种颜色 */
+  .block-editor .color-pop .swatch.none {
+    border-style: dashed;
+  }
+  .block-editor .color-pop .swatch svg {
+    width: 0.875rem;
+    height: 0.875rem;
   }
   /* 大纲栏（布局三）：与侧栏同一副面孔（raised 底 + 左缘一条分隔线），
      独立滚动列，长度不限——长文的标题列就在这一栏里滚，不拖累正文。

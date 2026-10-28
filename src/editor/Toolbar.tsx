@@ -1,7 +1,7 @@
 import { undo, redo, undoDepth, redoDepth } from "@tiptap/pm/history";
 import { NodeSelection } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { 是回车提交 } from "../ui/keys";
 import {
   addColumn,
@@ -26,34 +26,27 @@ import {
 import { 批量, 矩形of } from "./tableSelectPlugin";
 import type { Align } from "./table";
 import { 工具图标, type 图标名 } from "./icons";
+import { 调色板, 底色of } from "./colors";
 
 /**
  * 常驻顶部工具栏。
  *
  * **只放序列化器真能产出的操作**——这条限制不是偷懒，是产品的命根子：Markdown 是唯一
- * 真相（G1），编辑器与文件必须字节级往返（G5）。所以这里没有字号、居中、颜色、缩进、
- * 引用、代码块：前三个在 Markdown 里没有语法，后三个要动 md-kernel 的容器/围栏模型，
- * 不是加个按钮的量级。给了按钮就是给用户一个"点了会丢"的陷阱。
+ * 真相（G1），编辑器与文件必须字节级往返（G5）。所以这里没有字号、居中、缩进：Markdown
+ * 里没有语法，给了按钮就是给用户一个"点了会丢"的陷阱。
+ *
+ * 颜色与高亮是 2026-10-28 才放进来的一档，**不是因为"Markdown 有了语法"，是因为我们先
+ * 定了一种能原样往返的写法**：高亮 `==文字==`，颜色 `<span style="color:#e5534b">文字</span>`
+ * （见 docs/02 D35）。先有字节、再有按钮，顺序不能反。
  *
  * 单独一个组件、自己订阅编辑器事件：放在 `BlockEditor` 里 `setState` 的话，每次选区变化
  * 都会连带重渲染 `EditorContent`，等于在打字路径上凭空加一次整棵子树的协调。
  */
-export function Toolbar({
-  editor,
-  onAi,
-  aiReady,
-  提示,
-}: {
-  editor: Editor;
-  /** 打开改写浮层。判据（模型配没配、选段改不改得）在 `准备改写` 里，这里只管传话 */
-  onAi: () => void;
-  /** 对话模型配好了没有。没配时按钮照样在，点了说下一步，不画成灰的让人猜 */
-  aiReady: boolean;
-  /** 入口被拦下的原因（没配模型 / 没选中文字）。贴在工具栏下沿，4 秒自散 */
-  提示?: string | null;
-}) {
+export function Toolbar({ editor }: { editor: Editor }) {
   const [, bump] = useState(0);
   const [linking, setLinking] = useState(false);
+  /** 哪一档颜色的面板开着（两枚按钮各一个，同时只开一个） */
+  const [面板, set面板] = useState<"textColor" | "bgColor" | null>(null);
 
   useEffect(() => {
     const on = () => bump((n) => n + 1);
@@ -213,13 +206,48 @@ export function Toolbar({
       {btn("code", "行内代码", "code", () => editor.chain().focus().toggleMark("code").run(), editor.isActive("code"))}
       {btn("link", "链接", "link", () => setLinking((v) => !v), editor.isActive("link"))}
       {linking ? <LinkEditor editor={editor} onDone={() => setLinking(false)} /> : null}
+      {/*
+        **文字颜色与底色是两枚按钮**（Word / Google Docs 那一路），不是一枚"调色板"里两行：
+        换字色与换底是两件不同的事，合成一枚时用户每次都要先认出"我现在是在选哪一行"。
+        按钮下沿那道色条画的是**光标处当前的颜色**——不打开面板也知道现在套着什么。
+        高亮（`==…==`）收进底色面板的第一格：它本来就是"我们默认的那一档底色"，
+        单独占一枚按钮等于把同一件事摆两个入口。
+      */}
+      {(["textColor", "bgColor"] as const).map((mark) => {
+        const 当前 = String(editor.getAttributes(mark).color ?? "");
+        const 高亮 = mark === "bgColor" && editor.isActive("highlight");
+        const 开着 = 面板 === mark;
+        return (
+          <span className="color-cell" key={mark}>
+            <button
+              type="button"
+              className={开着 || 当前 || 高亮 ? "color-btn on" : "color-btn"}
+              title={mark === "textColor" ? "文字颜色" : "底色（高亮也在这档）"}
+              aria-label={mark === "textColor" ? "文字颜色" : "底色"}
+              aria-expanded={开着}
+              onClick={() => set面板(开着 ? null : mark)}
+            >
+              {mark === "textColor" ? <工具图标.baseline /> : <工具图标.highlighter />}
+              <span
+                className="ink-bar"
+                aria-hidden="true"
+                style={{ background: 高亮 ? "var(--md-mark)" : 当前 || "var(--border-strong)" }}
+              />
+            </button>
+            {开着 ? (
+              <颜色面板 editor={editor} mark={mark} onDone={() => set面板(null)} />
+            ) : null}
+          </span>
+        );
+      })}
       {btn(
         "clear",
-        "清除格式（回到正文，去掉加粗 / 斜体 / 删除线 / 行内码；链接保留）",
+        "清除格式（回到正文，去掉加粗 / 斜体 / 删除线 / 行内码 / 高亮 / 颜色；链接保留）",
         "clear",
         () => {
           // 只去行内样式，**留着链接**：`unsetAllMarks` 会把 link 一起抹掉，而"清除格式"
-          // 在 Notion / 语雀 里都不该顺手删掉用户挂上去的链接
+          // 在 Notion / 语雀 里都不该顺手删掉用户挂上去的链接。
+          // 颜色与高亮也算"行内样式"——它们写在文件里就是几个 span / 等号，不是用户的内容。
           editor
             .chain()
             .focus()
@@ -227,6 +255,9 @@ export function Toolbar({
             .unsetMark("italic")
             .unsetMark("strike")
             .unsetMark("code")
+            .unsetMark("highlight")
+            .unsetMark("textColor")
+            .unsetMark("bgColor")
             .run();
           setType("paragraph");
         },
@@ -333,32 +364,6 @@ export function Toolbar({
       {btn("undo", "撤销", "undo", () => undo(editor.state, (tr) => editor.view.dispatch(tr)), false, undoDepth(editor.state) <= 0)}
       {btn("redo", "重做", "redo", () => redo(editor.state, (tr) => editor.view.dispatch(tr)), false, redoDepth(editor.state) <= 0)}
       <span className="sep" aria-hidden="true" />
-      {/*
-        文档内 AI 的**常驻**入口。只在选区气泡上留一枚的话，用户不选中文字就完全看不见
-        这个能力（气泡本身就不出现），于是"没有入口"——这一枚补的就是这一步。点了以后
-        "先选一段文字" / "先去设置配模型" 都由 `准备改写` 说清楚，按钮不做灰态。
-      */}
-      <button
-        type="button"
-        className="ai"
-        title={
-          aiReady ? "AI 改写（先选中一段文字）" : "AI 改写（先在设置里配好模型）"
-        }
-        aria-label="AI 改写选中文字"
-        onClick={onAi}
-      >
-        <工具图标.ai />
-      </button>
-      {/*
-        入口被拦下时的原因贴在工具栏下沿：**工具栏是 sticky 的**，正文滚到哪儿它都在眼前；
-        全局 flash 在正文顶部，滚下去就看不见——"点了没反应"就是这么来的。绝对定位，
-        不占行（与 `.hint` 同一条理由），`pointer-events: none` 不挡下面的字。
-      */}
-      {提示 ? (
-        <span className="ai-hint" role="status" aria-live="polite">
-          {提示}
-        </span>
-      ) : null}
     </div>
   );
 }
@@ -392,5 +397,106 @@ export function LinkEditor({ editor, onDone }: { editor: Editor; onDone: () => v
         好
       </button>
     </span>
+  );
+}
+
+/**
+ * 一档颜色的面板（文字色一个、底色一个，同一份实现）。
+ *
+ * **色块与文件里的色值同源**（`colors.ts`）：看到红色、存下去是另一个红这种事，
+ * 只有打开 .md 才会发现。选中态用一圈 accent 描边而不是打个勾——色块只有 20px，
+ * 勾会把颜色本身盖掉，而这一排要回答的就是"这是哪种颜色"。
+ *
+ * 底色这一档的第一格是**高亮**（`==…==`）：它就是"我们默认的那一档底色"，
+ * 与后面六档互斥——两套底同时套在一段字上，文件里会出现
+ * `<span style="background-color:…">==字==</span>` 这种谁看都莫名其妙的形状。
+ */
+function 颜色面板({
+  editor,
+  mark,
+  onDone,
+}: {
+  editor: Editor;
+  mark: "textColor" | "bgColor";
+  onDone: () => void;
+}) {
+  const 框 = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const 点外 = (ev: MouseEvent) => {
+      // 工具栏自身不关：再点一次那枚按钮就是"收起"，交给按钮的 toggle 去判
+      const t = ev.target as Element | null;
+      if (t?.closest?.(".toolbar")) return;
+      onDone();
+    };
+    document.addEventListener("mousedown", 点外);
+    return () => document.removeEventListener("mousedown", 点外);
+  }, [onDone]);
+
+  const 是底 = mark === "bgColor";
+  const 值of = (hex: string) => (是底 ? 底色of(hex) : hex);
+
+  const 设定 = (color?: string) => {
+    const 链 = editor.chain().focus();
+    if (!color) {
+      // "去掉"对底色那一档要把高亮一起摘：两套底只能有一个
+      链.unsetMark(mark);
+      if (是底) 链.unsetMark("highlight");
+      链.run();
+    } else if (是底) {
+      // 换了底色就不该再留着高亮（见上面那条注释）
+      链.unsetMark("highlight").setMark(mark, { color }).run();
+    } else {
+      链.setMark(mark, { color }).run();
+    }
+    onDone();
+  };
+
+  const 高亮 = 是底 ? editor.isActive("highlight") : false;
+
+  return (
+    <div className="color-pop" ref={框} role="group" aria-label={是底 ? "底色" : "文字颜色"}>
+      <span className="grp">{是底 ? "底色" : "文字颜色"}</span>
+      <div className="swatches">
+        {/* 高亮只有底色这一档有。它是"我们认的那一种底"，所以排在第一格、用 token 画 */}
+        {是底 ? (
+          <button
+            type="button"
+            className={高亮 ? "swatch mark on" : "swatch mark"}
+            title="高亮（Ctrl+Shift+H）"
+            aria-label="高亮"
+            aria-pressed={高亮 || undefined}
+            onClick={() => {
+              editor.chain().focus().unsetMark("bgColor").setMark("highlight").run();
+              onDone();
+            }}
+          />
+        ) : null}
+        {调色板.map((c) => {
+          const 色值 = 值of(c.hex);
+          const 选着 = editor.isActive(mark, { color: 色值 });
+          return (
+            <button
+              key={c.id}
+              type="button"
+              className={选着 ? "swatch on" : "swatch"}
+              style={{ background: 色值 }}
+              title={c.名 + (是底 ? "色底" : "色文字")}
+              aria-label={c.名 + (是底 ? "色底" : "色文字")}
+              aria-pressed={选着 || undefined}
+              onClick={() => 设定(色值)}
+            />
+          );
+        })}
+        <button
+          type="button"
+          className="swatch none"
+          title={是底 ? "去掉底色" : "去掉文字颜色"}
+          aria-label={是底 ? "去掉底色" : "去掉文字颜色"}
+          onClick={() => 设定()}
+        >
+          <工具图标.alignNone />
+        </button>
+      </div>
+    </div>
   );
 }

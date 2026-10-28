@@ -399,6 +399,8 @@ pub fn plain_inline(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let b = text.as_bytes();
     let mut i = 0;
+    // 只对**我们自己写出**的 span 记账：正文里随手写的 `</span>` 该原样留着
+    let mut span_depth = 0usize;
     while i < b.len() {
         match b[i] {
             b'`' => {
@@ -484,6 +486,53 @@ pub fn plain_inline(text: &str) -> String {
                     }
                 }
             }
+            b'<' => {
+                // 颜色用 `<span style="…">` 落盘（docs/02 D35）。标签不该进检索与嵌入——
+                // 否则搜 "span" 能搜出一堆笔记，AI 的上下文里也全是 CSS。字本身要留下。
+                let rest = &text[i..];
+                if rest.starts_with("<span style=\"color:")
+                    || rest.starts_with("<span style=\"background-color:")
+                {
+                    match rest.find("\">") {
+                        Some(e) => {
+                            span_depth += 1;
+                            i += e + 2;
+                        }
+                        None => {
+                            out.push('<');
+                            i += 1;
+                        }
+                    }
+                } else if rest.starts_with("</span>") && span_depth > 0 {
+                    span_depth -= 1;
+                    i += 7;
+                } else {
+                    out.push('<');
+                    i += 1;
+                }
+            }
+            // `==高亮==`。判据与前端同一份：两侧紧凑、体内不换行；不满足就当普通的等号，
+            // `a == b` 这种数学写法不能被吃掉一个字符
+            b'=' if text[i..].starts_with("==") => match text[i + 2..].find("==") {
+                Some(k) => {
+                    let body = &text[i + 2..i + 2 + k];
+                    if !body.is_empty()
+                        && !body.starts_with(char::is_whitespace)
+                        && !body.ends_with(char::is_whitespace)
+                        && !body.contains('\n')
+                    {
+                        out.push_str(body);
+                        i += 2 + k + 2;
+                    } else {
+                        out.push('=');
+                        i += 1;
+                    }
+                }
+                None => {
+                    out.push('=');
+                    i += 1;
+                }
+            },
             b'*' | b'_' | b'~' | b'|' => {
                 i += run_len(b, i);
             }
@@ -853,7 +902,17 @@ fn classify(c: &Cursor) -> Start {
             }
         }
         if t.starts_with('<') && t[1..].starts_with(is_html_tag_char) {
-            return Start::Html;
+            // 行首的**行内颜色 span** 不是 HTML 块（2026-10-28 实测）：
+            // "把一整行上色"存出来就是 `<span style="color:#…">整行</span>`，按这里原来的
+            // 判据会被读成 `html` 不透明块——再打开时那一块变成源码、不能当正文编辑。
+            // CommonMark 的 HTML 块（类型 7）要求**整行只有一个标签**，而这一行标签后面
+            // 跟着正文，本来就是段落。只排除我们自己产出的这两种写法，别的 `<div>` 照旧
+            // 当不透明块（宁可少识别，也不吃用户的语法）。
+            if !(t.starts_with("<span style=\"color:")
+                || t.starts_with("<span style=\"background-color:"))
+            {
+                return Start::Html;
+            }
         }
     }
     Start::Paragraph

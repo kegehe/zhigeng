@@ -23,11 +23,13 @@ import {
   X,
 } from "lucide-react";
 import { FirstRun } from "./FirstRun";
+import { AiDock } from "./editor/AiDock";
 import { BlockEditor } from "./editor/BlockEditor";
+import { docToMarkdown } from "./editor/blocks";
 import { OutlinePanel } from "./editor/OutlinePanel";
 import type { Editor } from "@tiptap/core";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
-import { 可对话, 可检索 } from "./ui/ai";
+import { 可对话 } from "./ui/ai";
 import { btn, btnOn, btnPrimary } from "./ui/controls";
 import { SettingsView } from "./ui/SettingsView";
 import { 判备份, type AI忙, type AI表单 } from "./ui/settings";
@@ -300,12 +302,11 @@ export function App() {
   /**
    * 语义那一路的结果。它**永远比关键词晚到**（含一次网络往返），所以单独一块，
    * 不混进那张按 BM25 排的命中表——混进去会让人以为两批东西是同一把尺子量出来的。
-   * `ai就绪` 只判地址 + 嵌入模型：对话模型是问答那一档的前提，不该挡检索。
+   * 这一路**不再被任何"就绪"挡着**（2026-10-18）：图扩展是纯本地的，不配 Key 也有东西可给。
    */
   const [sem, setSem] = useState<HybridResult | null>(null);
   const [semErr, setSemErr] = useState<string | null>(null);
   const [semBusy, setSemBusy] = useState(false);
-  const [ai就绪, setAi就绪] = useState(false);
   /** 问答面板：一次一问，答案连同"这次采信了哪几块"一起摆在原地 */
   const [问, set问] = useState("");
   const [答, set答] = useState<Answer | null>(null);
@@ -352,12 +353,11 @@ export function App() {
       setNotes(null);
       return;
     }
-    // AI 那一路的开关只问一次：读的是本地配置与凭据管理器，不在打字路径上。
-    // 没配就别让搜索框每次敲字都去打一趟注定失败的请求
+    // AI 配置只读一次：读的是本地配置与凭据管理器，不在打字路径上。
+    // 读不到就当没配（aiView 留 null），设置页会显示"没配"。
     api
       .aiView()
       .then((v) => {
-        setAi就绪(可检索(v));
         setAiView(v);
         setAiForm({
           baseUrl: v.baseUrl,
@@ -366,7 +366,7 @@ export function App() {
           rerank: v.rerank,
         });
       })
-      .catch(() => setAi就绪(false));
+      .catch(() => {});
     try {
       setNotes(await api.listNotes(300));
       setError(null);
@@ -631,6 +631,17 @@ export function App() {
    * 不需要再按 mode 判第二遍。
    */
   const [liveEditor, setLiveEditor] = useState<Editor | null>(null);
+  /**
+   * 底部对话框的回调必须**稳定**：App 每敲一个字就因 `inlineRev` 重渲染，这里每次给新函数，
+   * AiDock 的 `memo` 就白写了——深文档里每敲一个字都要重画一遍对话记录。
+   */
+  const ai全文 = useCallback(() => {
+    if (!liveEditor || !editDoc) return "";
+    return docToMarkdown(liveEditor.state.doc, editDoc).slice(editDoc.frontMatter.length);
+  }, [liveEditor, editDoc]);
+  const aiNeedEdit = useCallback(() => setMode("inline"), []);
+  const aiApplied = useCallback(() => setInlineRev((n) => n + 1), []);
+  const aiNotice = useCallback((文: string) => setFlash(文), []);
   /** 面包屑：把当前篇的 rel 拆成 目录/…/文件名（反斜杠统一成正斜杠，与 tree.ts 同一口径） */
   const 路径段 = selected ? selected.rel.replace(/\\/g, "/").split("/") : [];
   const toggleDir = (path: string) =>
@@ -2189,7 +2200,9 @@ export function App() {
               sticky 侧条），滚动行为与侧栏同款——main 滚正文的，大纲滚自己的，
               互不拖累。liveEditor 为 null（其它面板 / 源码态 / 装载中）时这一列整个不渲染 */}
           <div className="flex min-w-0 flex-1">
-            <main className="min-w-0 flex-1 overflow-y-auto">
+            {/* 正文列自己夹一层：底部 AI 对话框要挂在**滚动容器之外**，否则它跟着正文一起滚走 */}
+            <div className="editor-pane relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
               {mode === "import" ? (
                 <div className="measure-ui px-6 py-8">
                   <h2 className="text-xl text-fg">导入外部笔记</h2>
@@ -2675,7 +2688,6 @@ export function App() {
                             onNotice={(文) => setFlash(文)}
                             editApi={editApi}
                             focusBlock={blockFocus}
-                            aiReady={!!aiView && 可对话(aiView)}
                             onEditorChange={setLiveEditor}
                           />
                         </div>
@@ -2711,12 +2723,14 @@ export function App() {
                         冲突不走这里：那是要用户做决定的，用上面那条横幅。 */}
                       {saveState === "saving" || saveState === "saved" ? (
                         <div
-                          className="pointer-events-none fixed right-5 bottom-5 z-(--z-toast) rounded-full border border-line bg-raised px-3 py-1 text-xs text-fg-2 shadow-2"
+                          className="pointer-events-none fixed right-5 bottom-16 z-(--z-toast) rounded-full border border-line bg-raised px-3 py-1 text-xs text-fg-2 shadow-2"
                           aria-live="polite"
                         >
                           {saveState === "saving" ? "保存中…" : "已自动保存"}
                         </div>
                       ) : null}
+                      {/* 底部 AI 把手浮在正文上：尾部留出它的高度，最后一行才不会永远被压住 */}
+                      <div className="h-12" aria-hidden="true" />
                     </>
                   ) : (
                     <div className="flex flex-col items-start gap-4 text-fg-2">
@@ -2749,6 +2763,24 @@ export function App() {
                 </div>
               )}
             </main>
+            {/* 底部 AI 对话框：悬浮在正文列下沿，**不随滚动移动**（它在 main 外面）。
+                只在"真的有一篇在编辑/浏览"时出现——源码态与别的页面没有正文可改。 */}
+            {liveEditor && selected && mode !== "source" ? (
+              <AiDock
+                // 换一篇就重挂：上一轮的问答、钉住状态与草稿都不该跟到下一篇
+                key={selected.rel}
+                editor={liveEditor}
+                rel={selected.rel}
+                aiReady={!!aiView && 可对话(aiView)}
+                // 整篇正文（去掉 front-matter）：背景只送到这里，路径、标题、属性都不发
+                全文={ai全文}
+                onNeedEdit={aiNeedEdit}
+                // 对话框在 BlockEditor 外面，收不到它的 onUpdate：这一笔要自己记脏
+                onApplied={aiApplied}
+                onNotice={aiNotice}
+              />
+            ) : null}
+            </div>
             {liveEditor ? <OutlinePanel editor={liveEditor} /> : null}
           </div>
         </div>

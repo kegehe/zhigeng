@@ -883,11 +883,15 @@ async fn chat_ask(
     })?
 }
 
-/// 文档内选区改写：只把选中的那一段与一条要求发出去，回稿先预览、用户点替换才落盘。
+/// 文档内改写：把**目标那一段**、一条要求，以及可选的**整篇正文作背景**发出去；
+/// 回稿先预览、用户点替换才落盘。私密篇的整篇背景在这里就挡掉（只发目标段）。
 ///
 /// 与问答同一条纪律：**可能一次网络往返，所以在锁外、用分叉连接干活**；`ai_runs`
 /// 由 note-core 落（失败那趟也落）。`ai://rewrite-token` / `ai://rewrite-think`
 /// 带 `runId` 回来，界面靠它丢掉上一次剩下的字。
+// 参数就是前端 invoke 的形状。**不拆结构体**：Tauri 按参数名取键，拆了前端要多包一层，
+// 8 个标量也读不出"这一组是什么"。真正该收的边界在 note-core 的改写流里。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn ai_rewrite(
     app: AppHandle,
@@ -895,6 +899,10 @@ async fn ai_rewrite(
     text: String,
     instruction: String,
     preset: String,
+    // 整篇正文作背景（可选）。**它在锁外原样传下去**：上限与截断在 note-core 里一条判据
+    doc: Option<String>,
+    // 这一篇的 rel：只用来查隐私位。标了 ai.private / ai.no_ai 的那篇，整篇背景一律不发
+    rel: Option<String>,
     run_id: u64,
 ) -> Result<note_core::rewrite::改写, WriteErr> {
     let (vault, 派生) = {
@@ -913,16 +921,28 @@ async fn ai_rewrite(
             })?;
             写锁.fork().map_err(werr)?
         };
-        note_core::rewrite::改写流(&vault, 专.conn(), &text, &instruction, &preset, &mut |e| {
-            match e {
+        // 隐私硬门：私密篇的**整篇背景**不发（用户点名的目标段照发——那是他自己选的）。
+        // 查询放在这里而不是前端：隐私位是索引库里的权威值，前端只能从 front-matter 猜。
+        let 背景 = match (&doc, &rel) {
+            (Some(_), Some(rel)) if note_core::rewrite::是私密篇(专.conn(), rel) => None,
+            _ => doc.clone(),
+        };
+        note_core::rewrite::改写流(
+            &vault,
+            专.conn(),
+            &text,
+            &instruction,
+            &preset,
+            背景.as_deref(),
+            &mut |e| match e {
                 note_core::rewrite::事件::文本(字) => {
                     let _ = app.emit("ai://rewrite-token", 播块 { run_id, text: 字 });
                 }
                 note_core::rewrite::事件::思考(字) => {
                     let _ = app.emit("ai://rewrite-think", 播块 { run_id, text: 字 });
                 }
-            }
-        })
+            },
+        )
         .map_err(werr)
     })
     .await

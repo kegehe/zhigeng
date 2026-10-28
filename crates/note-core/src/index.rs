@@ -1289,7 +1289,10 @@ fn build_chunks(plan: &[Planned]) -> Vec<Chunk> {
                     break;
                 }
             }
-            trail.push((*level, b.content.clone()));
+            // 面包屑进的是 chunks.text（要拿去嵌入、也要拼给模型），所以必须走纯文本：
+            // 直接把 `content` 放进去，彩色标题会带一串 `<span style="color:…">`——
+            // 与 blocks.text 的口径也分叉了（那里一直是 plain_text）
+            trail.push((*level, md_kernel::plain_inline(&b.content)));
         }
         let piece = {
             let t = b.plain_text();

@@ -265,6 +265,8 @@ export type RewriteResult = {
   outTokens: number;
   ms: number;
   model: string;
+  /** 这一趟实际带进去的整篇背景字数（0 = 没带）。只说"参考了多少"，不回传背景内容 */
+  ctxChars: number;
 };
 
 /** 审计页的一行（含未采纳的那几次） */

@@ -4,18 +4,7 @@ import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import { describe, expect, it } from "vitest";
 import type { EditBlock, EditDoc } from "./blocks";
 import { createTestEditor } from "./testEditor";
-import {
-  准备改写,
-  取选段,
-  能替换,
-  替换选区,
-  随事务,
-  预设,
-  浮层位置,
-  浮层宽,
-  浮层自然高,
-  选段上限,
-} from "./rewrite";
+import { 准备目标, 取选段, 能替换, 替换选区, 随事务, 选段上限 } from "./rewrite";
 
 function 块(content: string, gapBefore: string): EditBlock {
   return {
@@ -196,103 +185,49 @@ describe("替换是一笔编辑", () => {
   });
 });
 
-describe("改写浮层的落点", () => {
-  // 判据只看锚点与视口的四个边，**不测浮层高度**：回稿一到它会从 ~320 长到 ~520，
-  // 按打开时的高度做"放不放得下"的决定，等字回来就失效了。
-  const 锚 = (top: number, bottom: number) => ({ left: 200, top, bottom });
-  const 宿主 = (视口下: number) => ({ 宽: 1000, 高: 2000, 视口上: 0, 视口下 });
-
-  it("下方放得下就挂在选区下沿，不压住选中的字", () => {
-    const 放 = 浮层位置(锚(300, 320), 宿主(900));
-    expect(放.top).toBe(328);
-    expect(放.bottom).toBeUndefined();
-    expect(放.maxHeight).toBe(浮层自然高);
-  });
-
-  it("下方不够就翻到气泡上方，并让开气泡", () => {
-    const 放 = 浮层位置(锚(700, 720), 宿主(900));
-    expect(放.top).toBeUndefined();
-    // 上沿 = 选区顶 700 - 气泡 34 - 边距 8 = 658
-    expect(放.bottom).toBe(2000 - 658);
-    expect(放.maxHeight).toBe(浮层自然高);
-  });
-
-  it("两边都不够时取空间大的一侧，高度夹进那一侧", () => {
-    const 放 = 浮层位置(锚(380, 400), 宿主(800));
-    // 下方 800-8-408 = 384；上方 380-34-8-8 = 330
-    expect(放.top).toBe(408);
-    expect(放.maxHeight).toBe(384);
-  });
-
-  it("上方空间更大时翻上去，高度夹到上方", () => {
-    const 放 = 浮层位置(锚(500, 520), 宿主(800));
-    // 下方 264；上方 500-34-8-8 = 450
-    expect(放.bottom).toBe(2000 - 458);
-    expect(放.maxHeight).toBe(450);
-  });
-
-  it("连最小高都放不下时仍给一块能用的面板：往下伸，不翻上去", () => {
-    const 放 = 浮层位置(锚(100, 200), { 宽: 1000, 高: 2000, 视口上: 0, 视口下: 300 });
-    // 下方 300-8-208 = 84；上方 100-34-8-8 = 50——翻上去的溢出是负向的，浏览器不给滚
-    expect(放.top).toBe(208);
-    expect(放.maxHeight).toBe(160);
-  });
-
-  it("窄宿主里贴左边，不把浮层推到外面", () => {
-    const 放 = 浮层位置(
-      { left: 300, top: 100, bottom: 200 },
-      { 宽: 320, 高: 900, 视口上: 0, 视口下: 800 },
-    );
-    expect(放.left).toBe(8);
-  });
-
-  it("靠右时留 8px 边距", () => {
-    const 放 = 浮层位置({ left: 990, top: 100, bottom: 200 }, 宿主(800));
-    expect(放.left).toBe(1000 - 浮层宽 - 8);
-  });
-});
-
-
-describe("两个入口的第一道闸", () => {
+describe("底部对话框的第一道闸", () => {
   it("模型没配时先让人去配，不说选区的事", () => {
     const editor = createTestEditor(一篇("第一段文字"));
     const from = 位置(editor, "第一段");
     选中(editor, from, from + 3);
-    const r = 准备改写(false, editor.state);
+    const r = 准备目标(false, editor.state);
     expect(r.ok).toBe(false);
     // 圈选得再对也没用：配置是前提，先说前提
     if (!r.ok) expect(r.why).toContain("设置");
     editor.destroy();
   });
 
-  it("配好了但没选中文字，说下一步是选中一段", () => {
+  it("配好了、没有选区，就改光标所在的那一段", () => {
     const editor = createTestEditor(一篇("第一段文字"));
     选中(editor, 2, 2);
-    const r = 准备改写(true, editor.state);
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.why).toBe("先选中一段文字");
+    const r = 准备目标(true, editor.state);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.范围).toBe("本段");
+      expect(r.锚.text).toBe("第一段文字");
+    }
     editor.destroy();
   });
 
-  it("配好了且选了一段连续文字，直接给出锚点", () => {
+  it("配好了且选了一段连续文字，选区优先于本段", () => {
     const editor = createTestEditor(一篇("第一段文字", "第二段文字"));
     const from = 位置(editor, "第二段");
     选中(editor, from, from + 3);
-    const r = 准备改写(true, editor.state);
+    const r = 准备目标(true, editor.state);
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.锚.text).toBe("第二段");
+    if (r.ok) {
+      expect(r.范围).toBe("选区");
+      expect(r.锚.text).toBe("第二段");
+    }
     editor.destroy();
   });
-});
 
-describe("预设", () => {
-  it("每一条都有 id、标签与指令，id 不重", () => {
-    const ids = 预设.map((p) => p.id);
-    expect(new Set(ids).size).toBe(ids.length);
-    for (const p of 预设) {
-      expect(p.id.trim()).not.toBe("");
-      expect(p.标签.trim()).not.toBe("");
-      expect(p.指令.trim()).not.toBe("");
-    }
+  it("光标所在的那一段是空的：说清楚没有可改的字", () => {
+    const editor = createTestEditor(一篇(""));
+    选中(editor, 1, 1);
+    const r = 准备目标(true, editor.state);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.why).toContain("空");
+    editor.destroy();
   });
 });

@@ -1,8 +1,9 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import type { Editor } from "@tiptap/core";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import type { EditBlock, EditDoc } from "./blocks";
+import { 调色板 } from "./colors";
 import { createTestEditor } from "./testEditor";
 import { Toolbar } from "./Toolbar";
 
@@ -43,12 +44,12 @@ afterEach(() => {
   活的.length = 0;
 });
 
-async function 挂(editor: Editor, onAi: () => void, aiReady: boolean, 提示?: string) {
+async function 挂(editor: Editor) {
   const 根 = document.createElement("div");
   document.body.appendChild(根);
   const 树 = createRoot(根);
   await act(async () => {
-    树.render(createElement(Toolbar, { editor, onAi, aiReady, 提示: 提示 ?? null }));
+    树.render(createElement(Toolbar, { editor }));
   });
   const 记 = { 拆过: false, 拆: () => {} } as { 拆: () => void; 拆过: boolean };
   记.拆 = () => {
@@ -60,41 +61,67 @@ async function 挂(editor: Editor, onAi: () => void, aiReady: boolean, 提示?: 
   return { 根, 拆: 记.拆 };
 }
 
-it("不选中文字也在：工具栏上有一枚 AI 入口，且点得动", async () => {
+it("文字颜色与底色是两枚按钮，各自只开自己的色板", async () => {
   const editor = createTestEditor(篇("第一段文字"));
-  const onAi = vi.fn();
-  const { 根, 拆 } = await 挂(editor, onAi, true);
-  const 钮 = 根.querySelector('button[aria-label="AI 改写选中文字"]');
-  expect(钮).not.toBeNull();
-  // 没有拦截原因时不该多一块提示
-  expect(根.querySelector(".ai-hint")).toBeNull();
+  editor.commands.setTextSelection({ from: 1, to: 6 });
+  const { 根, 拆 } = await 挂(editor);
+  // 入口常驻：不选中文字也看得见（与 AI 入口同一条教训）
+  const 字色 = 根.querySelector('button[aria-label="文字颜色"]');
+  const 底色 = 根.querySelector('button[aria-label="底色"]');
+  expect(字色).not.toBeNull();
+  expect(底色).not.toBeNull();
+  // 按钮里那道色条：没上色时是中性色，上了色才换成用户挑的那档
+  expect(字色!.querySelector(".ink-bar")).not.toBeNull();
+
   await act(async () => {
-    钮!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    字色!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
-  // 空选区也照点："先选一段" 由 `准备改写` 说，入口不做灰态
-  expect(onAi).toHaveBeenCalledTimes(1);
+  const 板 = 根.querySelector(".color-pop")!;
+  expect(板).not.toBeNull();
+  expect(板.getAttribute("aria-label")).toBe("文字颜色");
+  // 文字色板：6 档 + 一枚"去掉"，**没有高亮那一格**（高亮是底色）
+  expect(板.querySelectorAll(".swatch").length).toBe(7);
+  expect(板.querySelector(".swatch.mark")).toBeNull();
+
+  const 第一档 = 板.querySelector(".swatch")!;
+  await act(async () => {
+    第一档.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  // 选完自己收起，否则面板会压在刚改好的那段字上
+  expect(根.querySelector(".color-pop")).toBeNull();
+  const 段 = editor.getJSON().content![0]!;
+  expect(段.content![0]).toEqual(
+    expect.objectContaining({
+      type: "text",
+      marks: [{ type: "textColor", attrs: { color: 调色板[0]!.hex } }],
+    }),
+  );
   拆();
   editor.destroy();
 });
 
-it("被拦下的原因贴在工具栏上，不靠正文顶部那行 flash", async () => {
+it("底色面板第一格是高亮，套的是 ==…== 那一档", async () => {
   const editor = createTestEditor(篇("第一段文字"));
-  const { 根, 拆 } = await 挂(editor, () => {}, false, "先选中一段文字");
-  const 提示 = 根.querySelector(".ai-hint");
-  expect(提示).not.toBeNull();
-  expect(提示!.textContent).toContain("先选中一段文字");
-  expect(提示!.getAttribute("role")).toBe("status");
-  拆();
-  editor.destroy();
-});
-
-it("没配模型时按钮照样在，title 说明下一步", async () => {
-  const editor = createTestEditor(篇("第一段文字"));
-  const { 根, 拆 } = await 挂(editor, () => {}, false);
-  const 钮 = 根.querySelector('button[aria-label="AI 改写选中文字"]');
-  expect(钮).not.toBeNull();
-  expect(钮!.getAttribute("title")).toContain("配好模型");
-  expect((钮 as HTMLButtonElement).disabled).toBe(false);
+  editor.commands.setTextSelection({ from: 1, to: 6 });
+  const { 根, 拆 } = await 挂(editor);
+  await act(async () => {
+    根.querySelector('button[aria-label="底色"]')!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true }),
+    );
+  });
+  const 板 = 根.querySelector(".color-pop")!;
+  expect(板.getAttribute("aria-label")).toBe("底色");
+  // 底色板：高亮 1 + 6 档 + "去掉"
+  expect(板.querySelectorAll(".swatch").length).toBe(8);
+  const 格 = 板.querySelector(".swatch.mark")!;
+  expect(格).not.toBeNull();
+  await act(async () => {
+    格.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const 段 = editor.getJSON().content![0]!;
+  expect(段.content![0]).toEqual(
+    expect.objectContaining({ type: "text", marks: [{ type: "highlight" }] }),
+  );
   拆();
   editor.destroy();
 });
