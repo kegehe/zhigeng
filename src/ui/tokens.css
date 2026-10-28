@@ -11,33 +11,36 @@
 :root {
   color-scheme: light;
 
-  /* ---- 面 ---- */
-  --bg-base: oklch(98.5% 0.002 260);
-  --bg-raised: oklch(99.6% 0.001 260);
-  /* 沉底色要一眼是"凹下去的一块"：96.2% 时它与页面底只差 1.07:1，
-     行内码与代码块等于没底色（骨架屏那档同一条，见 base.css .skeleton） */
-  --bg-sunken: oklch(92.5% 0.005 260);
-  /* 交互反馈底：hover 1.07:1、active 1.16:1 时"鼠标在这行""这格开着"都看不出来，
-     压到 1.14 / 1.35（亮）与 1.18 / 1.45（暗）。这两档是列表唯一的选中语言 */
-  --bg-hover: oklch(95% 0.004 260);
-  --bg-active: oklch(89.5% 0.007 260);
-  --bg-backdrop: oklch(20% 0.01 260 / 0.32);
+  /* ---- 面（素笺墨字体系，2026-10-27；与铜版画图标同一世界观：暖纸 + 墨字。
+     色值都换算过 WCAG：primary 12.5:1、secondary 5.2:1、accent 11:1（均 raised 上）---- */
+  --bg-base: #f4f2ec; /* 暖纸。正文页、输入框底 */
+  --bg-raised: #faf9f5; /* 卡片/侧栏/浮层。不用纯白（硬规定 1） */
+  /* 沉底色要一眼是"凹下去的一块"：与页面底约 1.16:1。行内码与代码块的骨架屏那档同一条 */
+  --bg-sunken: #edeae0;
+  /* 交互反馈底：raised 上约 1.22:1——侧栏行、工具栏按钮、窗口键 */
+  --bg-hover: #eae7dc;
+  --bg-active: #e1ddd0; /* raised 上约 1.38:1 */
+  --bg-backdrop: rgb(42 40 34 / 0.35);
+  /* 纸上光晕：静态两层径向渐变（不动画、不滚动），由 base.css 的 .app-bg 取用。
+     素笺体系里没有极光蓝——一层极淡的墨晕 + 一层纸光，亮面都压得很低 */
+  --aurora-cool: rgb(72 70 62 / 0.04);
+  --aurora-warm: rgb(186 164 108 / 0.05);
 
   /* ---- 文 ---- */
-  --text-primary: oklch(24% 0.012 260);
-  --text-secondary: oklch(48% 0.014 260);
-  --text-disabled: oklch(64% 0.012 260);
-  --text-on-accent: oklch(99% 0.004 265);
+  --text-primary: #262a36; /* 墨。raised 上 12.5:1 */
+  --text-secondary: #6d7180; /* raised 上 5.2:1、sunken 上 4.6:1 */
+  --text-disabled: #a3a6b0; /* 豁免位，不得用在真内容上 */
+  --text-on-accent: #faf9f5; /* accent 上 11.6:1 */
 
-  /* ---- 强调与状态 ---- */
-  --accent: oklch(55% 0.17 265);
-  --accent-hover: oklch(61% 0.17 265);
-  /* 选中态（当前行 / 框住的格子 / ::selection）只有这一层颜色，10% 时与底差 1.14:1 */
-  --accent-soft: oklch(55% 0.17 265 / 0.18);
-  /* 整块选中那一层要**比 soft 淡一档**：代码卡本来就带 sunken 底，再压 18% 的蓝就把整块
-     染成"高亮块"了。实测亮面这一层从 22% 降到 12% 时，选中底对未选底本来就只有 1.12→1.05
-     ——也就是说亮面的选中信号从来不是底色，是那条 accent 边（4.03:1）。淡底只服务暗面。 */
-  --accent-faint: oklch(55% 0.17 265 / 0.12);
+  /* ---- 强调与状态（素笺墨字：accent 就是墨本身，零彩色）---- */
+  --accent: #2b2f3d; /* 墨。raised 上 11.4:1（图标 3:1 线 ✓） */
+  --accent-hover: #454b5c;
+  /* 选中态（当前行 / 框住的格子 / ::selection）只有这一层颜色，raised 上 1.24:1 */
+  --accent-soft: rgb(43 47 61 / 0.14);
+  /* 整块选中的底要比 soft 淡一档：代码卡本来就有底色，
+     压重了就从"这块被选了"变成"这块在发光"。亮面的选中主信号是那条 accent 边，
+     淡底只服务暗面——口径与 [06] §硬规定 6 一致 */
+  --accent-faint: rgb(43 47 61 / 0.10);
   --success: oklch(55% 0.13 155);
   --warning: oklch(66% 0.14 78);
   --danger: oklch(55% 0.2 25);
@@ -57,10 +60,14 @@
   --code-var: oklch(46% 0.09 320);
 
   /* ---- 线与环 ---- */
-  /* 亮面下卡片与页面底只差 1.03:1，边界几乎全靠这条线承担：90% 时它自己也只有 1.29:1 */
-  --border-subtle: oklch(87% 0.006 260);
-  --border-strong: oklch(76% 0.009 260);
-  --focus-ring: oklch(55% 0.17 265 / 0.55);
+  /* 亮面下卡片与页面底只差 1.03:1，边界几乎全靠这条线承担 */
+  --border-subtle: #dedacd; /* raised 上约 1.25:1 */
+  --border-strong: #cbc5b4;
+  --focus-ring: rgb(43 47 61 / 0.5);
+
+  /* ---- 品牌徽标（铜版画知更，public/zhigeng.png；尺寸字面量按 docs/06 §4 只在此登记）---- */
+  --icon-brand-bar: 20px; /* 标题栏徽标 */
+  --icon-brand-side: 36px; /* 侧栏品牌头 */
 
   /* ---- 字阶（行高不对称，正文 1.75 是排版底线）---- */
   --text-xs: 12px;
@@ -106,10 +113,10 @@
   --radius-lg: 14px;
   --radius-full: 999px;
 
-  /* ---- 阴影：暗色下几乎不可见，必须与边框同用 ---- */
-  --shadow-1: 0 1px 2px oklch(20% 0.02 260 / 0.08);
-  --shadow-2: 0 6px 20px -6px oklch(20% 0.02 260 / 0.22);
-  --shadow-3: 0 24px 60px -12px oklch(20% 0.02 260 / 0.34);
+  /* ---- 阴影：影色跟着暖纸家族走；暗色下几乎不可见，必须与边框同用 ---- */
+  --shadow-1: 0 1px 2px oklch(20% 0.015 80 / 0.08);
+  --shadow-2: 0 6px 20px -6px oklch(20% 0.015 80 / 0.22);
+  --shadow-3: 0 24px 60px -12px oklch(20% 0.015 80 / 0.34);
 
   /* ---- 层级：禁止组件里写裸数字（CSS 里也一样，护栏同步盯着）---- */
   --z-base: 0;
@@ -132,25 +139,29 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --bg-base: oklch(17% 0.006 260);
-  --bg-raised: oklch(21% 0.007 260);
-  /* 暗面往下沉能拿到的对比很有限（WCAG 那个 +0.05 在近黑处吃掉了一切），14%→11.5% 只从
-     1.04 走到 1.07：所以"看得见的标记"在暗面一律往上提（骨架屏用 --bg-active），不往下挖 */
-  --bg-sunken: oklch(11.5% 0.006 260);
-  --bg-hover: oklch(27% 0.009 260);
-  --bg-active: oklch(33% 0.011 260);
-  --bg-backdrop: oklch(8% 0.01 260 / 0.5);
+  --bg-base: #24231e; /* 夜墨：暖炭纸底。不是纯黑（硬规定 1），带一点灯下的暖 */
+  --bg-raised: #2c2a24; /* 玻璃卡的实体化：白 5% 叠在 base 上的不透明等价值 */
+  /* 暗面往下沉能拿到的对比很有限（近黑处 WCAG 的 +0.05 吃掉了一切）：
+     沉底比 base 更暗一档——"看得见的标记"在暗面一律往上提，
+     沉底块的边界一律靠边框（硬规定 5），不靠底色 */
+  --bg-sunken: #1e1d19;
+  --bg-hover: #37352c; /* raised 上约 1.18:1、base 上约 1.36:1 */
+  --bg-active: #403d33; /* raised 上约 1.36:1 */
+  --bg-backdrop: rgb(8 8 6 / 0.5);
+  /* 夜里的光晕：右上一点烛光暖晕 + 左下更淡的一层，仍是静态的 */
+  --aurora-cool: rgb(201 162 94 / 0.06);
+  --aurora-warm: rgb(160 130 80 / 0.05);
 
-  --text-primary: oklch(93% 0.004 260);
-  --text-secondary: oklch(68% 0.012 260);
-  --text-disabled: oklch(52% 0.01 260);
-  --text-on-accent: oklch(18% 0.02 265);
+  --text-primary: #e6e2d6; /* 纸字。raised 上约 11.5:1 */
+  --text-secondary: #a09c8e; /* raised 上约 5.6:1、sunken 上约 7:1 */
+  --text-disabled: #6f6c60;
+  --text-on-accent: #24231e; /* accent 上约 9:1 */
 
-  --accent: oklch(70% 0.14 265);
-  --accent-hover: oklch(76% 0.14 265);
-  --accent-soft: oklch(70% 0.14 265 / 0.22);
-  /* 暗面这一层还留着 1.34:1 的底色差（16%），够；再淡就只剩边了 */
-  --accent-faint: oklch(70% 0.14 265 / 0.16);
+  --accent: #d9d4c5; /* 纸色即强调。raised 上约 9.4:1 */
+  --accent-hover: #e8e4d8;
+  --accent-soft: rgb(217 212 197 / 0.16); /* raised 上约 1.47:1 */
+  /* 暗面这一层与 sunken 差约 1.4:1，够；再淡就只剩边了 */
+  --accent-faint: rgb(217 212 197 / 0.12);
   --success: oklch(72% 0.12 155);
   --warning: oklch(78% 0.12 78);
   --danger: oklch(68% 0.16 25);
@@ -168,11 +179,11 @@
   --code-tag: oklch(76% 0.15 22);
   --code-var: oklch(82% 0.08 320);
 
-  --border-subtle: oklch(26% 0.008 260);
-  --border-strong: oklch(34% 0.01 260);
-  --focus-ring: oklch(70% 0.14 265 / 0.6);
+  --border-subtle: #3a382f; /* raised 上约 1.2:1 */
+  --border-strong: #4c4839;
+  --focus-ring: rgb(217 212 197 / 0.55);
 
-  /* 暗面下阴影要更狠才看得见，但仍靠边框承担主要分隔 */
+  /* 暗面下阴影要更狠才看得见，但仍靠边框承担主要分隔。影色跟着夜墨家族走 */
   --shadow-1: 0 1px 2px oklch(0% 0 0 / 0.4);
   --shadow-2: 0 6px 22px -6px oklch(0% 0 0 / 0.55);
   --shadow-3: 0 24px 60px -12px oklch(0% 0 0 / 0.7);

@@ -1,4 +1,5 @@
 import { EditorContent, useEditor } from "@tiptap/react";
+import type { Editor } from "@tiptap/core";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
@@ -26,7 +27,13 @@ import { 工具图标, type 图标名 } from "./icons";
 import { LinkEditor, Toolbar } from "./Toolbar";
 
 /** 浮层位置：相对外层容器算，滚动时重算，不让它跟着漂 */
-type Float = { top: number; left: number; bottom: number; 选区顶: number; pos?: number };
+type Float = {
+  top: number;
+  left: number;
+  bottom: number;
+  选区顶: number;
+  pos?: number;
+};
 
 /** 选区气泡上的行内标记。图标与常驻工具栏**同一张表**（`icons.tsx`），两处不同就是两副面孔 */
 const MARKS: { name: string; 标签: string; 图: 图标名 }[] = [
@@ -58,6 +65,7 @@ export function BlockEditor({
   editApi,
   focusBlock,
   aiReady = false,
+  onEditorChange,
 }: {
   doc: EditDoc;
   editable: boolean;
@@ -71,6 +79,11 @@ export function BlockEditor({
   focusBlock?: { ordinal: number; nonce: number } | null;
   /** 对话模型配好了没有（地址 + 对话模型）。没配时 AI 按钮点了只说下一步，不发请求 */
   aiReady?: boolean;
+  /**
+   * 编辑器实例的出口（布局三的大纲栏在 App 主区里，需要这份实例）。
+   * 传 setter 就行——挂载时给新实例，卸载/换篇重建时给 null，App 那侧不用自己管清理。
+   */
+  onEditorChange?: (editor: Editor | null) => void;
 }) {
   // **必须 memo 住**：这是整篇的行内解析，写成 `content: docToJson(doc)` 的话每次渲染都
   // 重新算一遍——CPU profile 实测 3000 块下每次击键 38ms 全花在 parseInline 上。
@@ -91,9 +104,19 @@ export function BlockEditor({
   const wrap = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<Float | null>(null);
   /** 块菜单：`/` 与行首手柄共用同一个浮层。`dropSlash` 是选中后要删掉的那个 `/` 的位置 */
-  const [menu, setMenu] = useState<{ top: number; left: number; start: number; dropSlash?: number } | null>(null);
+  const [menu, setMenu] = useState<{
+    top: number;
+    left: number;
+    start: number;
+    dropSlash?: number;
+  } | null>(null);
   /** 鼠标停在哪个顶层块上（手柄跟着它走） */
-  const [hover, setHover] = useState<{ top: number; height: number; start: number; index: number } | null>(null);
+  const [hover, setHover] = useState<{
+    top: number;
+    height: number;
+    start: number;
+    index: number;
+  } | null>(null);
   /** 拖拽时的落位指示线 */
   const [drop, setDrop] = useState<{ top: number; index: number } | null>(null);
   const dropRef = useRef<{ top: number; index: number } | null>(null);
@@ -127,6 +150,16 @@ export function BlockEditor({
     editableRef.current = editable;
     if (editor && editor.isEditable !== editable) editor.setEditable(editable);
   }, [editor, editable]);
+
+  // 实例出口。走 ref 而不直接用闭包：回调是 App 传来的 setState，本来就近乎稳定，
+  // 但卸载那笔清理发生在最后一次渲染之后，读 ref 才不会把旧闭包里的旧 setter 放出来
+  const outRef = useRef(onEditorChange);
+  outRef.current = onEditorChange;
+  useEffect(() => {
+    if (!editor) return;
+    outRef.current?.(editor);
+    return () => outRef.current?.(null);
+  }, [editor]);
 
   useEffect(() => {
     if (!editor || !focusBlock) return;
@@ -196,8 +229,7 @@ export function BlockEditor({
       const at = view.posAtCoords({ left: x, top: y });
       if (!at) return null;
       return (
-        格坐标At(view.state, at.pos) ??
-        (at.inside > 0 ? 格坐标At(view.state, at.inside) : null)
+        格坐标At(view.state, at.pos) ?? (at.inside > 0 ? 格坐标At(view.state, at.inside) : null)
       );
     };
     /**
@@ -222,9 +254,7 @@ export function BlockEditor({
         const 矩 = 归一(锚, 起);
         // 与拖动那条路同一条规矩：**单格不算矩形**，只留锚点。否则跨表 Shift 点
         // （锚被换成点击格自己）会让那一格凭空多一圈框，而它只是有光标
-        view.dispatch(
-          改选区(view.state, 起.表, 矩.r0 === 矩.r1 && 矩.c0 === 矩.c1 ? null : 矩)
-        );
+        view.dispatch(改选区(view.state, 起.表, 矩.r0 === 矩.r1 && 矩.c0 === 矩.c1 ? null : 矩));
         ev.preventDefault();
         return;
       }
@@ -286,7 +316,6 @@ export function BlockEditor({
       dom.removeEventListener("pointerdown", onDown);
       dom.removeEventListener("dragstart", onDragStart);
     };
-
   }, [editor]);
 
   /**
@@ -313,7 +342,10 @@ export function BlockEditor({
        * （真机截图照出来过：气泡压在代码卡上方那一段的中缝里）。
        */
       const 不是字 =
-        empty || !editor.isEditable || 矩形of(editor.state) || editor.state.selection instanceof NodeSelection;
+        empty ||
+        !editor.isEditable ||
+        矩形of(editor.state) ||
+        editor.state.selection instanceof NodeSelection;
       const rect = 不是字 ? null : anchorRect();
       if (!host || !rect) {
         setSel(null);
@@ -575,7 +607,12 @@ export function BlockEditor({
       if (!moved && Math.abs(ev.clientY - originY) < 5) return;
       moved = true;
       const b = blockAt(ev.clientX, ev.clientY);
-      const next = b ? { top: b.top + (b.上半 ? 0 : b.height), index: b.上半 ? b.index : b.index + 1 } : null;
+      const next = b
+        ? {
+            top: b.top + (b.上半 ? 0 : b.height),
+            index: b.上半 ? b.index : b.index + 1,
+          }
+        : null;
       dropRef.current = next;
       setDrop(next);
     };
@@ -605,8 +642,6 @@ export function BlockEditor({
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
-
-
 
   return (
     <div className="editor-wrap" ref={wrap}>

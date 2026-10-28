@@ -7,8 +7,8 @@ import { SettingsView } from "./SettingsView";
 
 /**
  * 设置页是纯视图，钉的是**用户看得见**的几件事：
- * - 已存 Key 时「删除 Key」是独立一枚，输入框留空才按得动——存与删不再共用一枚按钮，
- *   免得存成功后标签当场翻成"删除"、双击的第二下把刚存的 Key 删掉；
+ * - 存 Key 并进「保存配置」（2026-10-27）：那一行只剩「删除 Key」一枚，输入框留空才按得动，
+ *   免得"存新的"与"删旧的"混在一按里；框里有字时行内说明"保存时一起写入"；
  * - 存完配置的回话落在右下角的 `role="status"` 上，不再钉在页顶（长页里会滚出屏幕）；
  * - 草稿与盘上不一致时说明测试读的是哪一份；盘上没配齐时说的是"先保存再测试"。
  */
@@ -51,7 +51,7 @@ function 挂(over: {
   form?: AI表单;
   key?: string;
   flash?: string | null;
-  存Key?: () => void;
+  删Key?: () => void;
   忙?: AI忙;
   info?: AppInfo;
   setForm?: (f: AI表单) => void;
@@ -86,7 +86,7 @@ function 挂(over: {
           报告: null,
           发现: null,
           保存: () => {},
-          存Key: over.存Key ?? (() => {}),
+          删Key: over.删Key ?? (() => {}),
           测试: () => {},
           发现模型: () => {},
         },
@@ -112,30 +112,30 @@ function 按文字(根: HTMLElement, 文: string): HTMLButtonElement | null {
   );
 }
 
-it("已存 Key 且输入框留空时，「删除 Key」是独立一枚并按得动", async () => {
-  const 存 = vi.fn();
-  const { 根, 拆 } = 挂({ view: 视图({ keySet: true, keyHint: "…ab12（32 位）" }), key: "", 存Key: 存 });
-  // 存的那一枚空着就按不动，删的那一枚按得动：两件事各占一枚按钮
-  expect(按文字(根, "存 Key")!.disabled).toBe(true);
+it("已存 Key 且输入框留空时，「删除 Key」按得动", async () => {
+  const 删 = vi.fn();
+  const { 根, 拆 } = 挂({ view: 视图({ keySet: true, keyHint: "…ab12（32 位）" }), key: "", 删Key: 删 });
+  // 存 Key 没有独立的一枚：它跟「保存配置」一起走（2026-10-27）
+  expect(按文字(根, "存 Key")).toBeNull();
   const 钮 = 按文字(根, "删除 Key");
   expect(钮).not.toBeNull();
   expect(钮!.disabled).toBe(false);
   await act(async () => {
     钮!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
-  expect(存).toHaveBeenCalledTimes(1);
+  expect(删).toHaveBeenCalledTimes(1);
   拆();
 });
 
 it("输入框里有新 Key 时，删的那一枚是灰的；没存过就没这一枚", () => {
   const { 根, 拆 } = 挂({ view: 视图({ keySet: true }), key: "sk-new" });
-  expect(按文字(根, "存 Key")!.disabled).toBe(false);
   // 输入框里已经有字，这一按到底是"存新的"还是"删旧的"说不清，所以先灰着
   expect(按文字(根, "删除 Key")!.disabled).toBe(true);
-  // 一把也没有、也没输入：删除那一枚不出现，存的那一枚按不动
+  // 新 Key 的去处写在旁边：它跟「保存配置」一起写进去
+  expect(根.textContent).toContain("按「保存配置」时一起写入");
+  // 一把也没有、也没输入：删除那一枚不出现
   const 空 = 挂({ view: 视图({ keySet: false }), key: "" });
   expect(按文字(空.根, "删除 Key")).toBeNull();
-  expect(按文字(空.根, "存 Key")!.disabled).toBe(true);
   空.拆();
   拆();
 });
@@ -191,12 +191,11 @@ it("盘上没配齐时，「测试连通」与「列出可用模型」按不动�
   拆();
 });
 
-it("删除 Key 的忙态落在删除那枚上，不让「存 Key」冒充", () => {
-  // 两枚按钮共用一个 `忙`，键里有没有字才分得出跑的是哪一件——从前按删除时
-  // 亮起来的是「存 Key → 处理中…」，正好指反
+it("删除 Key 的忙态落在删除那枚上", () => {
+  // 从前两枚按钮共用一个 `忙`，按删除时亮起来的是「存 Key → 处理中…」，正好指反
   const { 根, 拆 } = 挂({ view: 视图({ keySet: true }), key: "", 忙: "key" });
   expect(按文字(根, "删除中…")).not.toBeNull();
-  expect(按文字(根, "存 Key")).not.toBeNull();
+  expect(按文字(根, "存 Key")).toBeNull();
   拆();
 });
 
@@ -238,4 +237,14 @@ it("备份行的「现在」说的是盘上生效那份，不是输入框里的�
   const 关 = 挂({ info: { ...信息, backupDisabled: true, backupDir: "D:\bak" } });
   expect(关.根.textContent).toContain("现在：不备份");
   关.拆();
+});
+
+it("配置读不出来时，Key 那格不说「按保存就能写」——那一按本来就是灰的", () => {
+  // view 为 null 时「保存配置」disabled；合并之后 Key 也走这一按，
+  // 所以这时行内必须说实话，不能还写"按「保存配置」时一起写入"
+  const { 根, 拆 } = 挂({ view: null, key: "sk-new" });
+  expect(根.textContent).toContain("配置没读出来，这把 Key 现在存不了");
+  expect(根.textContent).not.toContain("按「保存配置」时一起写入");
+  expect(按文字(根, "保存配置")!.disabled).toBe(true);
+  拆();
 });

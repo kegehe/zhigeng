@@ -25,7 +25,7 @@ export type AI忙 = "save" | "key" | "test" | "models" | null;
 type 备份事实 = Pick<AppInfo, "backupDir" | "backupDisabled" | "backupLastAt">;
 
 /**
- * 备份面板与侧栏角标共用的那一格。三态**必须可区分**（docs/03 §备份）：
+ * 备份面板与设置页共用的那一格。三态**必须可区分**（docs/03 §备份）：
  * 显式选了"我不备份"与"还没答过"是两件事——前者不再骚扰，后者每次启动都该提醒。
  */
 export type 备份状态 =
@@ -34,7 +34,7 @@ export type 备份状态 =
   | { 档: "开着"; 目录: string; 时刻: string | null };
 
 /**
- * 判备份。**判据只有一份**：侧栏角标、备份面板、设置页三处都从这里取，
+ * 判备份。**判据只有一份**：备份面板与设置页两处都从这里取，
  * 谁都不许自己再拼一次 `backupUnconfigured || backupDisabled`。
  *
  * 最后那条分支看着多余（目录空着时 `app_info` 本就该报"没配置"），但界面说的是
@@ -48,11 +48,6 @@ export function 判备份(info: 备份事实 | null): 备份状态 {
   const 目录 = info.backupDir?.trim();
   if (!目录) return { 档: "没配", 文: "还没配置备份目录：你的笔记只存在一块盘上。" };
   return { 档: "开着", 目录, 时刻: info.backupLastAt };
-}
-
-/** 侧栏与标题栏那句角标：只在"没在备份"时说话，开着的时候不占地方 */
-export function 备份角标(s: 备份状态): string | null {
-  return s.档 === "开着" ? null : "没开";
 }
 
 /**

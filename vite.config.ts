@@ -16,7 +16,8 @@ export default defineConfig(({ mode }) => ({
     host: "127.0.0.1",
     port: PORT,
     strictPort: true,
-    watch: { ignored: ["**/src-tauri/**", "**/.scratch/**", "**/target/**"] },
+    // outputs/ 是设计产物目录（图标方案、mockup HTML）：写它不该触发应用整页 reload
+    watch: { ignored: ["**/src-tauri/**", "**/.scratch/**", "**/target/**", "**/outputs/**"] },
   },
   envPrefix: ["VITE_", "TAURI_ENV_"],
   build: {

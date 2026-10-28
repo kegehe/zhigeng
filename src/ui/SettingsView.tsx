@@ -98,7 +98,7 @@ export function SettingsView(props: {
     报告: AiProbeReport | null;
     发现: AiDiscovery | null;
     保存: () => void;
-    存Key: () => void;
+    删Key: () => void;
     测试: () => void;
     发现模型: () => void;
   };
@@ -115,7 +115,8 @@ export function SettingsView(props: {
   const 已存有地址 = !!模型.view?.baseUrl?.trim();
   const 未保存 =
     !!模型.view &&
-    (模型.form.baseUrl !== 模型.view.baseUrl ||
+    (!!模型.key.trim() || // 框里那把也算没保存：它跟配置同一个按钮一起写进去
+      模型.form.baseUrl !== 模型.view.baseUrl ||
       模型.form.chatModel !== 模型.view.chatModel ||
       模型.form.embeddingModel !== 模型.view.embeddingModel ||
       模型.form.rerank !== 模型.view.rerank);
@@ -370,17 +371,17 @@ export function SettingsView(props: {
             // Esc 清掉这一格草稿：已经存进去的那把在凭据管理器里，这里只是输入框
             onKeyDown={(e) => 退格(e, () => 模型.setKey(""))}
           />
-          {/* 存与删是**两枚**按钮：以前共用一枚，存成功后它当场翻成"删除 Key"——
-              用户双击保存的第二下正好落在删除上，刚存进去的那把就没了 */}
-          <button
-            className={btn}
-            disabled={模型.忙 !== null || !模型.key.trim()}
-            onClick={模型.存Key}
-          >
-            {/* 忙态要落在**按下那一枚**上：两枚按钮共用一个 `忙`，键里有没有字才分得出
-                这一次跑的是"存"还是"删"——否则按删除时亮的是"存 Key → 处理中…"，正好指反 */}
-            {模型.忙 === "key" && !!模型.key.trim() ? "保存中…" : "存 Key"}
-          </button>
+          {/* **没有单独一枚"存 Key"**（2026-10-27 用户拍板）：Key 落凭据管理器、配置落
+              `.note/config.toml`，存储分开是后端的实现，不该让用户按两下——「保存配置」
+              把这一页的改动一次写进去，Key 也是其中之一。只剩「删除 Key」一枚：它是**另一件
+              事**（清掉盘上那把），而且不该藏在"保存"里。 */}
+          {模型.key.trim() ? (
+            /* 配置读不出来时（view 为 null）「保存配置」本来就按不动，这里不能说
+               "按一下就写进去"——那一按是灰的，用户只会以为界面坏了 */
+            <span className="text-xs text-fg-2">
+              {模型.view ? "按「保存配置」时一起写入" : "配置没读出来，这把 Key 现在存不了"}
+            </span>
+          ) : null}
           {模型.view?.keyHint ? (
             <span className="text-xs text-fg-2">已存 {模型.view.keyHint}</span>
           ) : null}
@@ -389,9 +390,9 @@ export function SettingsView(props: {
               className={btn}
               disabled={模型.忙 !== null || !!模型.key.trim()}
               title={模型.key.trim() ? "先清空输入框，再删这把 Key" : "删掉已存的 Key"}
-              onClick={模型.存Key}
+              onClick={模型.删Key}
             >
-              {模型.忙 === "key" && !模型.key.trim() ? "删除中…" : "删除 Key"}
+              {模型.忙 === "key" ? "删除中…" : "删除 Key"}
             </button>
           ) : null}
         </行>

@@ -24,11 +24,13 @@ import {
 } from "lucide-react";
 import { FirstRun } from "./FirstRun";
 import { BlockEditor } from "./editor/BlockEditor";
+import { OutlinePanel } from "./editor/OutlinePanel";
+import type { Editor } from "@tiptap/core";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
-import { 徽标, 徽标红, 可对话, 可检索 } from "./ui/ai";
+import { 可对话, 可检索 } from "./ui/ai";
 import { btn, btnOn, btnPrimary } from "./ui/controls";
 import { SettingsView } from "./ui/SettingsView";
-import { 判备份, 备份角标, type AI忙, type AI表单 } from "./ui/settings";
+import { 判备份, type AI忙, type AI表单 } from "./ui/settings";
 import { 来源徽章, 走了那句, 面板标题 } from "./ui/search";
 import {
   buildTree,
@@ -75,15 +77,7 @@ import { 读主题, 套主题, 写主题, 盯主题变化, type Theme } from "./
  * 交给 `dirty` 判据守（没改过就不落盘），不再靠一个模式开关。
  */
 type Mode =
-  "view"
-  | "inline"
-  | "source"
-  | "rename"
-  | "trash"
-  | "backup"
-  | "import"
-  | "settings"
-  | "ask";
+  "view" | "inline" | "source" | "rename" | "trash" | "backup" | "import" | "settings" | "ask";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
 /** 引用落点。nonce 让"同一块再点一次"也能重新滚动，而不是因为值没变被 React 忽略 */
@@ -117,7 +111,9 @@ function 树输入({
   return (
     <div
       className="py-1 pe-2"
-      style={{ paddingInlineStart: `calc(var(--space-3) + ${depth} * var(--space-4))` }}
+      style={{
+        paddingInlineStart: `calc(var(--space-3) + ${depth} * var(--space-4))`,
+      }}
     >
       <input
         autoFocus
@@ -163,18 +159,22 @@ function relativeTime(ms: number): string {
   const today = new Date();
   const sameDay = d.toDateString() === today.toDateString();
   const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  return sameDay ? hhmm : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return sameDay
+    ? hhmm
+    : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 const baseOf = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1);
 /** 文件名去掉扩展名——改名框里不该让用户自己处理 `.md` */
-const stemOf = (rel: string) => baseOf(rel).replace(/\.markdown$/, "").replace(/\.md$/, "");
+const stemOf = (rel: string) =>
+  baseOf(rel)
+    .replace(/\.markdown$/, "")
+    .replace(/\.md$/, "");
 
 /** 顶层三条是语义目录：能往里建东西，但改名/删除不是用户该做的事 */
 // 大小写不敏感：NTFS 上 `Notes` 与 `notes` 是同一个目录，后端保留名也按这个口径拒
 const 是语义顶层 = (b: DirBranch) =>
-  b.depth === 0 &&
-  ["notes", "inbox", "archive"].includes(b.path.toLowerCase());
+  b.depth === 0 && ["notes", "inbox", "archive"].includes(b.path.toLowerCase());
 
 /** 按路径找回目录节点。菜单只记路径，渲染时要拿回节点上的名字与子项数 */
 function 找目录(分支们: Branch[], path: string): DirBranch | null {
@@ -228,7 +228,11 @@ export function App() {
    * 正在拖的行、当前落点、指示线位置。`线顶` 用的是 nav 的**内容坐标**——
    * 线要跟着滚动内容走，拿视口坐标画会在滚动时飘掉。
    */
-  const [drag, setDrag] = useState<{ 被拖: 拖行; 落: 落点; 线顶: number | null } | null>(null);
+  const [drag, setDrag] = useState<{
+    被拖: 拖行;
+    落: 落点;
+    线顶: number | null;
+  } | null>(null);
   const dragRef = useRef<{ 被拖: 拖行; 落: 落点; 线顶: number | null } | null>(null);
   /**
    * 拖完那一下浏览器还会补一个 click，不拦就会顺手折叠目录 / 打开笔记。
@@ -277,7 +281,9 @@ export function App() {
   /**
    * AI 设置面板。`aiView` 是后端给的视图（**里面没有 Key**）；`aiKey` 只是这一次按"存"
    * 要发出去的那串字，存完立刻清空——界面上永不回显明文。
-   * `ai测过` 刻意不持久化：重启之后还挂着"已连通"，说的是上次开机时的事实。
+   *
+   * 这里**没有"测过"这一格**（2026-10-27 撤掉标题栏那枚角标时一并删了）：测试结论只活在
+   * `aiReport` 里，由设置页的报告说；它不许飘到别处替配置状态发言。
    */
   const [aiView, setAiView] = useState<AiView | null>(null);
   const [aiForm, setAiForm] = useState<AI表单>({
@@ -289,7 +295,6 @@ export function App() {
   const [aiKey, setAiKey] = useState("");
   const [aiReport, setAiReport] = useState<AiProbeReport | null>(null);
   const [aiBusy, setAiBusy] = useState<AI忙>(null);
-  const [ai测过, setAi测过] = useState<boolean | null>(null);
   /** 「这家有哪些模型」的结果。它**不持久化**：清单是端点此刻的事实，重启就可能变了 */
   const [ai发现, setAi发现] = useState<AiDiscovery | null>(null);
   /**
@@ -334,9 +339,8 @@ export function App() {
   const editing = mode === "source" || mode === "inline";
   const dirty = inlineRev > 0 || draft !== savedDraft;
   const unsaved = editing && dirty;
-  /** 备份那一格的判据只有一份（`判备份`）：侧栏角标、这一格、设置页与备份面板都从它取 */
+  /** 备份那一格的判据只有一份（`判备份`）：设置页与备份面板都从它取 */
   const 备份格 = 判备份(info);
-  const 备角 = info ? 备份角标(备份格) : null;
 
   const apply = useCallback(async (app: AppInfo) => {
     setInfo(app);
@@ -536,7 +540,10 @@ export function App() {
     }
     // 300ms 防抖：每次按键都打后端会把 8ms 预算变成排队
     searchTimer.current = window.setTimeout(() => {
-      api.searchKeyword(query, 30).then(setHits).catch((e) => setError(String(e)));
+      api
+        .searchKeyword(query, 30)
+        .then(setHits)
+        .catch((e) => setError(String(e)));
     }, 300);
   }, [query]);
 
@@ -587,7 +594,8 @@ export function App() {
     return () => window.clearTimeout(t);
   }, [flash]);
 
-  const list = notes?.notes ?? [];  const searching = query.trim().length > 0;
+  const list = notes?.notes ?? [];
+  const searching = query.trim().length > 0;
   /**
    * 搜索态直接渲染命中，不能拿它去和启动时缓存的列表求交集——
    * 那样刚速记进来的笔记（列表里没有）永远搜不到。一块命中一条笔记，按笔记去重。
@@ -603,7 +611,12 @@ export function App() {
       }
       return out;
     }
-    return list.map((n) => ({ rel: n.rel, title: n.title, sub: n.rel, ms: n.updatedMs }));
+    return list.map((n) => ({
+      rel: n.rel,
+      title: n.title,
+      sub: n.rel,
+      ms: n.updatedMs,
+    }));
   }, [searching, hits, list]);
 
   /**
@@ -612,6 +625,14 @@ export function App() {
    */
   const tree = useMemo(() => buildTree(list, order, dirs), [list, order, dirs]);
   const sidebarRows = useMemo(() => flatten(tree, collapsed), [tree, collapsed]);
+  /**
+   * 布局三的大纲栏要一份**活的编辑器实例**：BlockEditor 挂载时交出来、
+   * 卸载（换篇 / 进源码态）时收回 null——别的模式下面板自然不出现，
+   * 不需要再按 mode 判第二遍。
+   */
+  const [liveEditor, setLiveEditor] = useState<Editor | null>(null);
+  /** 面包屑：把当前篇的 rel 拆成 目录/…/文件名（反斜杠统一成正斜杠，与 tree.ts 同一口径） */
+  const 路径段 = selected ? selected.rel.replace(/\\/g, "/").split("/") : [];
   const toggleDir = (path: string) =>
     setCollapsed((c) => {
       const next = new Set(c);
@@ -679,10 +700,7 @@ export function App() {
     const r = el.getBoundingClientRect();
     const 落 = 判落点(被拖, 命中, 下一行of(el), y - r.top, r.height);
     const 原点 = nav.getBoundingClientRect().top - nav.scrollTop;
-    const 线顶 =
-      !落 || 落.kind === "into"
-        ? null
-        : (落.前 === 命中.名 ? r.top : r.bottom) - 原点;
+    const 线顶 = !落 || 落.kind === "into" ? null : (落.前 === 命中.名 ? r.top : r.bottom) - 原点;
     return { 被拖, 落, 线顶 };
   };
 
@@ -807,40 +825,44 @@ export function App() {
    * 带 `baseHash` 去存，磁盘上已经不是那份就报冲突——**冲突时不覆盖**，
    * 让用户选留哪份（docs/02 §写入与外部修改：绝不静默覆盖）。
    */
-  const persist = useCallback(async (force = false): Promise<boolean> => {
-    // 浏览态永不落盘：打开一篇看看就写文件，等于把"看"变成"改"。读一篇笔记永远不该动它
-    if (mode === "view") return true;
-    // 行内模式现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）
-    const md = mode === "inline" && editApi.current ? editApi.current() : draft;
-    if (!selected) return true;
-    if (md === savedDraft) {
-      /**
-       * 要写的字节与盘上那份一模一样 = **没有东西要存**，把状态归零。不归零就出不来：
-       * `dirty` 判的是 `inlineRev > 0 || draft !== savedDraft`，走到这条分支说明只剩
-       * `inlineRev` 在响，而它清不掉。真测过两例——文末的代码块按 `↓` 会补一个**不落盘**的
-       * 空段落、纯光标移动会被账本守卫改一下邻居块的属性，两例字节都没变。
-       * 卡住的不只是角标：`unsaved` 还挡着外部改动重载（Obsidian / 同步盘改这篇永远看不见）。
-       */
-      setInlineRev(0);
-      setSaveState("clean");
-      return true;
-    }
-    setSaveState("saving");
-    try {
-      const h = await api.saveNote(selected.rel, md, force ? undefined : baseHash);
-      setBaseHash(h);
-      setDraft(md);
-      setSavedDraft(md);
-      setInlineRev(0);
-      setSaveState("saved");
-      return true;
-    } catch (e) {
-      const { kind, message } = describeError(e);
-      if (kind === "conflict") setSaveState("conflict");
-      else setError(message);
-      return false;
-    }
-  }, [selected, mode, draft, savedDraft, baseHash]);
+  const persist = useCallback(
+    async (force = false): Promise<boolean> => {
+      // 浏览态永不落盘：打开一篇看看就写文件，等于把"看"变成"改"。读一篇笔记永远不该动它
+      if (mode === "view") return true;
+      // 行内模式现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）
+      const md = mode === "inline" && editApi.current ? editApi.current() : draft;
+      if (!selected) return true;
+      if (md === savedDraft) {
+        /**
+         * 要写的字节与盘上那份一模一样 = **没有东西要存**，把状态归零。不归零就出不来：
+         * `dirty` 判的是 `inlineRev > 0 || draft !== savedDraft`，走到这条分支说明只剩
+         * `inlineRev` 在响，而它清不掉。真测过两例——文末的代码块按 `↓` 会补一个**不落盘**的
+         * 空段落、纯光标移动会被账本守卫改一下邻居块的属性，两例字节都没变。
+         * 卡住的不只是那一行保存状态：`unsaved` 还挡着外部改动重载（Obsidian / 同步盘改这篇
+         * 永远看不见）。
+         */
+        setInlineRev(0);
+        setSaveState("clean");
+        return true;
+      }
+      setSaveState("saving");
+      try {
+        const h = await api.saveNote(selected.rel, md, force ? undefined : baseHash);
+        setBaseHash(h);
+        setDraft(md);
+        setSavedDraft(md);
+        setInlineRev(0);
+        setSaveState("saved");
+        return true;
+      } catch (e) {
+        const { kind, message } = describeError(e);
+        if (kind === "conflict") setSaveState("conflict");
+        else setError(message);
+        return false;
+      }
+    },
+    [selected, mode, draft, savedDraft, baseHash],
+  );
 
   // 停手 800ms 就存。手动 Ctrl+S 仍然留着——有人不信自动保存
   useEffect(() => {
@@ -1233,7 +1255,9 @@ export function App() {
       // 当前这篇的历史也要跟着刷：不刷的话"立即备份"之后列表还是旧的，
       // 刚备份完却看不到那一份，用户只会以为没备份上
       setHistory(selected ? await api.backupHistory(selected.rel) : []);
-      setFlash(made ? `已备份，这次收了 ${made.copiedFiles} 个文件` : "今天已经备份过了，什么都没做");
+      setFlash(
+        made ? `已备份，这次收了 ${made.copiedFiles} 个文件` : "今天已经备份过了，什么都没做",
+      );
     } catch (e) {
       setError(describeError(e).message);
     } finally {
@@ -1318,7 +1342,8 @@ export function App() {
         // 设置页自己带一条回正文的路（标题栏那枚齿轮是**入口**不是开关，再按它不会关掉设置）。
         // 输入框里不抢这一键：那里 Esc 该管的是它自己那点内容，不是整页。
         const t = e.target as HTMLElement | null;
-        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT"))
+          return;
         e.preventDefault();
         backToNote();
       } else if (e.key === "Escape" && mode === "ask" && !palette) {
@@ -1351,11 +1376,11 @@ export function App() {
   const 填回 = (v: AiView) => {
     setAiView(v);
     setAiForm({
-          baseUrl: v.baseUrl,
-          chatModel: v.chatModel,
-          embeddingModel: v.embeddingModel,
-          rerank: v.rerank,
-        });
+      baseUrl: v.baseUrl,
+      chatModel: v.chatModel,
+      embeddingModel: v.embeddingModel,
+      rerank: v.rerank,
+    });
   };
 
   const openAsk = async () => {
@@ -1367,11 +1392,11 @@ export function App() {
       const [v, 录] = await Promise.all([api.aiView(), api.aiRuns(8)]);
       setAiView(v);
       setAiForm({
-          baseUrl: v.baseUrl,
-          chatModel: v.chatModel,
-          embeddingModel: v.embeddingModel,
-          rerank: v.rerank,
-        });
+        baseUrl: v.baseUrl,
+        chatModel: v.chatModel,
+        embeddingModel: v.embeddingModel,
+        rerank: v.rerank,
+      });
       setRuns(录);
     } catch (e) {
       setError(describeError(e).message);
@@ -1465,16 +1490,15 @@ export function App() {
       await apply(新);
       /*
        * AI 的配置跟着**库**走（`.note/config.toml`），所以换库等于换了一份配置：上一次
-       * 那个「测过」结论、测试报告与模型清单都属于旧库，一律作废；表单也得读新库那份，
-       * 否则角标会拿着 A 库的配置去说 B 库的状态。
+       * 那份测试报告与模型清单都属于旧库，一律作废；表单也得读新库那份，否则设置页
+       * 会拿着 A 库的配置去说 B 库的状态。
        */
-      setAi测过(null);
       setAiReport(null);
       setAi发现(null);
       try {
         填回(await api.aiView());
       } catch {
-        /* 新库读不到配置时角标会退回"没配"；读失败的原因由 apply 那条错误横幅说 */
+        /* 新库读不到配置时设置页那格会退回「未配置」；读失败的原因由 apply 那条错误横幅说 */
       }
       setFlash(`已切到 ${新.vaultPath ?? 路径}`);
     } catch (e) {
@@ -1484,23 +1508,54 @@ export function App() {
     }
   };
 
-  /** 保存三格。探针读的是**盘上那份配置**，所以"测试连通"之前得先保存 */
+  /**
+   * 保存这一页的改动。探针读的是**盘上那份配置**，所以"测试连通"之前得先保存。
+   *
+   * **Key 也在这一个按钮里**（2026-10-27 改）：它落在 Windows 凭据管理器、三格落在
+   * `.note/config.toml`——存储分开是后端的实现，用户按的是"保存"，不该知道有两份存储，
+   * 更不该记得多按一次。先存配置再存 Key：Key 存失败时配置已经落盘（不算谎），错误照实说。
+   */
   const ai保存 = async () => {
     setAiBusy("save");
     try {
-      填回(
-        await api.aiSaveConfig(
-          aiForm.baseUrl,
-          aiForm.chatModel,
-          aiForm.embeddingModel,
-          aiForm.rerank,
-        ),
+      const 新Key = aiKey.trim();
+      let 新 = await api.aiSaveConfig(
+        aiForm.baseUrl,
+        aiForm.chatModel,
+        aiForm.embeddingModel,
+        aiForm.rerank,
       );
+      /*
+       * Key 存失败**不能把整页说成"什么都没保存"**：配置已经落盘了。所以先接住它、照常
+       * `填回`，再把 Key 那一句单独报出去——否则「模型与 Key」还写"未配置"、那条"有改动
+       * 没保存"也还挂着，而盘上其实已经是新的了。（Key 有自己的失败理由：超过长度上限、
+       * 带控制字符、凭据管理器锁着。）
+       */
+      let KeyErr: unknown = null;
+      if (新Key) {
+        try {
+          新 = await api.aiSaveKey(新Key);
+          // 只清掉"刚存进去的那一把"：等待期间又敲进来的字不能被这一按抹掉
+          setAiKey((k) => (k.trim() === 新Key ? "" : k));
+        } catch (e) {
+          KeyErr = e;
+        }
+      }
+      填回(新);
       setAiReport(null);
-      setAi测过(null);
       // 地址可能变了，上一份清单不再作数——留着它会让人照着过时的候选填
       setAi发现(null);
-      setFlash("配置已保存");
+      /*
+       * **成功才清旧账，失败只换成新的**（不再在每个动作开头清）：红字与上一条成功 toast
+       * 同屏说反话，正是这一节在修的形状——所以出错时也把 flash 撤掉。
+       */
+      if (KeyErr) {
+        setFlash(null);
+        setError("配置已保存，但 Key 没存上：" + describeError(KeyErr).message);
+      } else {
+        setError(null);
+        setFlash(新Key ? "配置与 Key 已保存" : "配置已保存");
+      }
     } catch (e) {
       setError(describeError(e).message);
     } finally {
@@ -1508,21 +1563,19 @@ export function App() {
     }
   };
 
-  const ai存Key = async () => {
+  /** **只删不存**：存 Key 已经并进「保存配置」，这枚按钮是"清掉盘上那把" */
+  const ai删Key = async () => {
     setAiBusy("key");
     try {
-      const 是存 = aiKey.trim().length > 0;
       /*
-       * **只换 Key 相关的那两格，不碰整份表单**：`ai_save_key` 返回的是**盘上那份**配置，
-       * 而用户可能正把新地址 / 新模型名填在框里还没保存——整份 `填回` 会把他刚打的字
-       * 当场清回旧值（首次配置时是两个空框，接着按「保存配置」就把空配置写进盘）。
-       * 角标读的是 `aiView`（盘上那份），所以不刷新表单也不会说错话。
+       * **只换 `aiView`，不碰整份表单**：`ai_save_key` 返回的是**盘上那份**配置，而用户
+       * 可能正把新地址 / 新模型名填在框里还没保存——整份 `填回` 会把他刚打的字当场清回
+       * 旧值。设置页那格读的是 `aiView`（盘上那份），所以不刷新表单也不会说错话。
        */
-      setAiView(await api.aiSaveKey(aiKey));
-      setAiKey("");
+      setAiView(await api.aiSaveKey(""));
       setAiReport(null);
-      setAi测过(null);
-      setFlash(是存 ? "Key 已保存" : "Key 已删除");
+      setError(null);
+      setFlash("Key 已删除");
     } catch (e) {
       setError(describeError(e).message);
     } finally {
@@ -1535,7 +1588,7 @@ export function App() {
     try {
       const 报 = await api.aiTest();
       setAiReport(报);
-      setAi测过(报.ok);
+      setError(null);
     } catch (e) {
       setError(describeError(e).message);
     } finally {
@@ -1561,15 +1614,60 @@ export function App() {
 
   const 面板项 = (): PaletteItem[] => {
     const 动作: PaletteItem[] = [
-      { id: "a-refresh", group: "动作", label: "重新读取索引与列表", run: () => void refresh() },
-      { id: "a-trash", group: "动作", label: "打开回收站", run: () => void openTrash() },
-      { id: "a-import", group: "动作", label: "导入外部 Markdown", run: () => void openImport() },
-      { id: "a-backup", group: "动作", label: "打开备份面板", run: () => void openBackup() },
-      { id: "a-settings", group: "动作", label: "打开设置（主题 / 备份 / 模型 / 库）", run: () => void openSettings() },
-      { id: "a-ask", group: "动作", label: "问 AI（带引用）", run: () => void openAsk() },
-      { id: "a-t1", group: "动作", label: "主题：跟随系统", run: () => setTheme("system") },
-      { id: "a-t2", group: "动作", label: "主题：亮色", run: () => setTheme("light") },
-      { id: "a-t3", group: "动作", label: "主题：暗色", run: () => setTheme("dark") },
+      {
+        id: "a-refresh",
+        group: "动作",
+        label: "重新读取索引与列表",
+        run: () => void refresh(),
+      },
+      {
+        id: "a-trash",
+        group: "动作",
+        label: "打开回收站",
+        run: () => void openTrash(),
+      },
+      {
+        id: "a-import",
+        group: "动作",
+        label: "导入外部 Markdown",
+        run: () => void openImport(),
+      },
+      {
+        id: "a-backup",
+        group: "动作",
+        label: "打开备份面板",
+        run: () => void openBackup(),
+      },
+      {
+        id: "a-settings",
+        group: "动作",
+        label: "打开设置（主题 / 备份 / 模型 / 库）",
+        run: () => void openSettings(),
+      },
+      {
+        id: "a-ask",
+        group: "动作",
+        label: "问 AI（带引用）",
+        run: () => void openAsk(),
+      },
+      {
+        id: "a-t1",
+        group: "动作",
+        label: "主题：跟随系统",
+        run: () => setTheme("system"),
+      },
+      {
+        id: "a-t2",
+        group: "动作",
+        label: "主题：亮色",
+        run: () => setTheme("light"),
+      },
+      {
+        id: "a-t3",
+        group: "动作",
+        label: "主题：暗色",
+        run: () => setTheme("dark"),
+      },
     ];
     if (selected) {
       动作.unshift({
@@ -1593,7 +1691,7 @@ export function App() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-page text-fg">
+    <div className="app-bg flex h-full flex-col text-fg">
       {palette ? (
         <CommandPalette
           标题="命令面板"
@@ -1603,15 +1701,20 @@ export function App() {
         />
       ) : null}
       <header className="titlebar surface" data-tauri-drag-region>
-        <span className="px-2 text-xs text-fg-2">知更 {info?.version}</span>
+        <span className="brand" data-tauri-drag-region>
+          <img src="/zhigeng.png" alt="" draggable={false} />
+          <span className="brand-name">知更</span>
+          {info?.version ? <span className="brand-ver">{info.version}</span> : null}
+        </span>
         <span className="title" data-tauri-drag-region>
           {info?.vaultPath ?? ""}
         </span>
-        {/* 主题那一格搬进了设置页。标题栏这里只留一枚入口 + 一句状态：
-            AI 的角标原来挂在左下角那格上，那格没了，状态就跟着入口走——
-            "配齐没有 + 这次测过没有"仍然不用点开才看得见 */}
+        {/* 主题那一格搬进了设置页，标题栏这里只剩一枚入口。
+            **AI 配没配不在这儿说了**（2026-10-27 拍板撤掉）：那枚角标要同时回答"盘上填了没"
+            与"这次测过没"，两件事挤在 12px 里各说半句，还和设置页那格重复；配置状态归
+            设置页，「测试连通」的结论归它自己的报告。 */}
         <button
-          className="win-btn flex w-auto gap-1 px-2"
+          className="win-btn"
           onClick={() => {
             // 齿轮是**入口**，不是开关：已经在设置页里就什么都不做。重进一次会把
             // 刚填的备份目录、模型字段与测试结果一起清掉（那三样都挂在 App 的 state 上）。
@@ -1620,15 +1723,6 @@ export function App() {
           title="设置：主题、备份、模型与 Key、库"
         >
           <Settings aria-hidden="true" />
-          {/* 四档都说话：没配 / 已配置 / 不通 / 能检索（或只对话）。**配齐没测过也要有字**——
-              从前这一档返回 null，整段被条件渲染掉，保存完配置那枚入口反而变成空白。
-              **判据读 `aiView`（盘上那份），不读 `aiForm`（草稿）**：读草稿的话，在设置页
-              打几个字还没保存，角标就先说"已配置"，与同一屏的「模型与 Key」状态自相矛盾。 */}
-          {aiView ? (
-            <span className={"text-xs " + (徽标红(ai测过) ? "text-danger" : "text-fg-2")}>
-              AI·{徽标(aiView, ai测过)}
-            </span>
-          ) : null}
         </button>
         <button className="win-btn" onClick={() => void refresh()} title="重新读取索引与列表">
           {busy ? "…" : <RotateCw aria-hidden="true" />}
@@ -1653,9 +1747,7 @@ export function App() {
       </header>
 
       {error ? (
-        <div className="border-b border-line bg-danger-soft px-4 py-2 text-sm text-fg">
-          {error}
-        </div>
+        <div className="border-b border-line bg-danger-soft px-4 py-2 text-sm text-fg">{error}</div>
       ) : null}
 
       {info && !info.vaultPath ? (
@@ -1663,6 +1755,17 @@ export function App() {
       ) : (
         <div className="flex min-h-0 flex-1">
           <aside className="flex w-72 shrink-0 flex-col border-r border-line bg-raised">
+            {/* 品牌头（2026-10-27）：大徽标 + 字标 + 一句定位。纯展示，
+                以后"点击看关于"挂这里；现在不放可点元素，避免和下面搜索框抢焦点序 */}
+            <div className="brand-head">
+              <img src="/zhigeng.png" alt="" draggable={false} />
+              <div className="min-w-0">
+                <div className="brand-head-name">知更</div>
+                <div className="brand-head-sub">
+                  本地优先知识库{info?.version ? ` · ${info.version}` : ""}
+                </div>
+              </div>
+            </div>
             <div className="flex gap-2 p-2">
               <input
                 className="min-w-0 flex-1 rounded-md border border-line bg-page px-2 py-1 text-sm focus-visible:border-accent"
@@ -1727,9 +1830,7 @@ export function App() {
                 <树输入
                   depth={0}
                   value={dirDraft}
-                  placeholder={
-                    dirAction.类型 === "建目录" ? "目录名，回车创建" : "标题，回车创建"
-                  }
+                  placeholder={dirAction.类型 === "建目录" ? "目录名，回车创建" : "标题，回车创建"}
                   onChange={setDirDraft}
                   onCommit={() => void 提交树动作()}
                   onCancel={取消树动作}
@@ -1754,15 +1855,10 @@ export function App() {
                         onClick={() => void openNote(n.rel, n.title)}
                         className={
                           "block w-full px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) " +
-                          (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
+                          (active ? "bg-accent-soft text-fg row-sel" : "hover:bg-hover")
                         }
                       >
-                        <span className="flex items-baseline gap-2">
-                          <span className="min-w-0 flex-1 truncate">{n.title}</span>
-                          <span className="shrink-0 font-mono text-xs text-fg-2">
-                            {relativeTime(n.ms)}
-                          </span>
-                        </span>
+                        <span className="block min-w-0 truncate">{n.title}</span>
                         <span className="block truncate font-mono text-xs text-fg-disabled">
                           {n.sub}
                         </span>
@@ -1845,7 +1941,12 @@ export function App() {
                                   }
                                   const r = e.currentTarget.getBoundingClientRect();
                                   const 路径 = b.path;
-                                  setDirMenu({ 路径, 右: r.right, 下: r.bottom + 4, 空: null });
+                                  setDirMenu({
+                                    路径,
+                                    右: r.right,
+                                    下: r.bottom + 4,
+                                    空: null,
+                                  });
                                   // 空不空问后端（一次 `read_dir`）。查不出来的话保持
                                   // null：不猜"空"，也就不给改删的入口。
                                   void api
@@ -1893,15 +1994,12 @@ export function App() {
                         style={pad}
                         className={
                           "flex w-full cursor-grab items-baseline gap-1 py-1 ps-3 pe-6 text-left text-sm transition-colors duration-(--dur-1) " +
-                          (active ? "bg-accent-soft text-fg" : "hover:bg-hover")
+                          (active ? "bg-accent-soft text-fg row-sel" : "hover:bg-hover")
                         }
                       >
                         {/* 与目录行的箭头占同一格，标题才对得齐 */}
                         <span className="w-3 shrink-0" />
                         <span className="min-w-0 flex-1 truncate">{b.title}</span>
-                        <span className="shrink-0 font-mono text-xs text-fg-2">
-                          {relativeTime(b.ms)}
-                        </span>
                       </button>
                     );
                   })}
@@ -1929,9 +2027,7 @@ export function App() {
                             : ""}
                     </span>
                   </div>
-                  {semErr ? (
-                    <div className="px-3 py-1 text-xs text-danger">{semErr}</div>
-                  ) : null}
+                  {semErr ? <div className="px-3 py-1 text-xs text-danger">{semErr}</div> : null}
                   {sem && !semErr
                     ? (() => {
                         const 新篇: HybridHit[] = [];
@@ -1944,9 +2040,7 @@ export function App() {
                         if (!新篇.length) {
                           return (
                             <div className="px-3 py-1 text-xs text-fg-disabled">
-                              {sem.hits.length
-                                ? "没有更多相关笔记。"
-                                : "没有找到相关笔记。"}
+                              {sem.hits.length ? "没有更多相关笔记。" : "没有找到相关笔记。"}
                             </div>
                           );
                         }
@@ -1958,9 +2052,7 @@ export function App() {
                           >
                             <span className="flex items-baseline gap-2">
                               <span className="min-w-0 flex-1 truncate">{h.title}</span>
-                              <span className="shrink-0 text-xs text-fg-2">
-                                {来源徽章(h.from)}
-                              </span>
+                              <span className="shrink-0 text-xs text-fg-2">{来源徽章(h.from)}</span>
                             </span>
                             <span className="block truncate text-xs text-fg-2">
                               {h.headerPath ? h.headerPath + " › " : ""}
@@ -1993,8 +2085,7 @@ export function App() {
                   // 空不空**问后端**：`list_notes` 只取一页，超过一页时非空目录
                   // 在树上看起来就是空的（菜单给了入口，后端才拒）。
                   const 可改删 = !是语义顶层(目) && dirMenu.空 === true;
-                  const 确认中 =
-                    dirAction?.类型 === "删除" && dirAction.目录 === 目.path;
+                  const 确认中 = dirAction?.类型 === "删除" && dirAction.目录 === 目.path;
                   return (
                     <div
                       className="tree-menu"
@@ -2029,27 +2120,29 @@ export function App() {
                           >
                             在此新建笔记
                           </button>
-                          {可改删 ? (
-                            <>
-                              <button
-                                role="menuitem"
-                                onClick={() => 开树动作({ 类型: "改名", 目录: 目.path })}
-                              >
-                                重命名
-                              </button>
-                              <button
-                                role="menuitem"
-                                className="danger"
-                                onClick={() => 开树动作({ 类型: "删除", 目录: 目.path })}
-                              >
-                                删除空目录
-                              </button>
-                            </>
-                          ) : dirMenu.空 === false && !是语义顶层(目) ? (
-                            <div className="tree-menu-tip">
-                              这一版只改空目录——先把它里面的东西挪走
-                            </div>
-                          ) : null /* 还在问后端：只给上面那两项，不猜 */}
+                          {
+                            可改删 ? (
+                              <>
+                                <button
+                                  role="menuitem"
+                                  onClick={() => 开树动作({ 类型: "改名", 目录: 目.path })}
+                                >
+                                  重命名
+                                </button>
+                                <button
+                                  role="menuitem"
+                                  className="danger"
+                                  onClick={() => 开树动作({ 类型: "删除", 目录: 目.path })}
+                                >
+                                  删除空目录
+                                </button>
+                              </>
+                            ) : dirMenu.空 === false && !是语义顶层(目) ? (
+                              <div className="tree-menu-tip">
+                                这一版只改空目录——先把它里面的东西挪走
+                              </div>
+                            ) : null /* 还在问后端：只给上面那两项，不猜 */
+                          }
                         </>
                       )}
                     </div>
@@ -2057,8 +2150,8 @@ export function App() {
                 })()
               : null}
             {/* flex + gap：这一排以前是裸的 inline-block，JSX 换行的空白被 React 丢掉，
-                五枚按钮之间实测 **0 间距**（边框两两贴合）。挂上徽标就换行，而换行后
-                行间距同样是 0——两排方框粘成一张格子。 */}
+                四枚按钮之间实测 **0 间距**（边框两两贴合）。**入口上不许再挂状态字样**：
+                多一个字就换行，而换行后行间距同样是 0——两排方框粘成一张格子。 */}
             <div className="flex flex-wrap gap-1 border-t border-line p-2">
               <button
                 className={btnOn(mode === "trash")}
@@ -2072,17 +2165,17 @@ export function App() {
               >
                 导入
               </button>
-              {/* 没备份是产品最坏的状态（docs/03：唯一副本 = 没有副本），入口上要看得见。
-                  判据只有 `判备份` 一份——设置页那一格与这枚角标不许各拼一次 */}
+              {/* **入口上不再挂"开没开"**（2026-10-27 拍板撤掉）：这句话在设置页的备份行
+                  与备份面板里各说一遍，挂在按钮上只会让那一排放不下（挂上就换行，换行后
+                  两排方框粘成一张格子）。入口只负责进去。 */}
               <button
                 className={btnOn(mode === "backup")}
                 onClick={() => void (mode === "backup" ? backToNote() : openBackup())}
               >
                 备份
-                {备角 ? <span className="ml-1 text-danger">· {备角}</span> : null}
               </button>
-              {/* 「AI」那一格没了：配置搬进了设置页，角标跟着入口去了标题栏。
-                  问答是"用"不是"配"，它留在这里 */}
+              {/* 「AI」那一格没了：配置搬进了设置页，标题栏那枚齿轮只是入口、不挂状态
+                  （2026-10-27 撤掉了曾经挂上去的那枚角标）。问答是"用"不是"配"，留在这里 */}
               <button
                 className={btnOn(mode === "ask")}
                 onClick={() => void (mode === "ask" ? backToNote() : openAsk())}
@@ -2092,540 +2185,572 @@ export function App() {
             </div>
           </aside>
 
-          <main className="min-w-0 flex-1 overflow-y-auto">
-            {mode === "import" ? (
-              <div className="measure-ui px-6 py-8">
-                <h2 className="text-xl text-fg">导入外部笔记</h2>
-                <p className="mt-2 text-sm text-fg-2">
-                  把一个目录里的 <span className="font-mono text-mono">.md</span>{" "}
-                  搬进这个库（Obsidian 库、别的文件夹都行）。内容一个字节都不改，子目录结构保留在{" "}
-                  <span className="font-mono text-mono">notes/</span>{" "}
-                  下面；库里已有同名但内容不同的一篇时自动避让，
-                  <span className="text-fg">绝不覆盖</span>你已有的笔记。
-                </p>
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <input
-                    className="min-w-64 flex-1 rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
-                    value={importSrc}
-                    spellCheck={false}
-                    placeholder="D:\\我的 Obsidian 库"
-                    onChange={(e) => setImportSrc(e.target.value)}
-                  />
-                  <button
-                    className={btn}
-                    disabled={importBusy || !importSrc.trim()}
-                    onClick={() => void previewImport()}
-                  >
-                    先看计划
-                  </button>
-                  <button
-                    className={btnPrimary}
-                    disabled={importBusy || !importSrc.trim()}
-                    onClick={() => void applyImport()}
-                  >
-                    导入
-                  </button>
-                </div>
+          {/* 布局三：主区分成「正文列 + 大纲栏」。大纲栏是独立的一列（不是 main 里的
+              sticky 侧条），滚动行为与侧栏同款——main 滚正文的，大纲滚自己的，
+              互不拖累。liveEditor 为 null（其它面板 / 源码态 / 装载中）时这一列整个不渲染 */}
+          <div className="flex min-w-0 flex-1">
+            <main className="min-w-0 flex-1 overflow-y-auto">
+              {mode === "import" ? (
+                <div className="measure-ui px-6 py-8">
+                  <h2 className="text-xl text-fg">导入外部笔记</h2>
+                  <p className="mt-2 text-sm text-fg-2">
+                    把一个目录里的 <span className="font-mono text-mono">.md</span>{" "}
+                    搬进这个库（Obsidian 库、别的文件夹都行）。内容一个字节都不改，子目录结构保留在{" "}
+                    <span className="font-mono text-mono">notes/</span>{" "}
+                    下面；库里已有同名但内容不同的一篇时自动避让，
+                    <span className="text-fg">绝不覆盖</span>你已有的笔记。
+                  </p>
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    <input
+                      className="min-w-64 flex-1 rounded-md border border-line bg-page px-3 py-1 font-mono text-mono text-fg"
+                      value={importSrc}
+                      spellCheck={false}
+                      placeholder="D:\\我的 Obsidian 库"
+                      onChange={(e) => setImportSrc(e.target.value)}
+                    />
+                    <button
+                      className={btn}
+                      disabled={importBusy || !importSrc.trim()}
+                      onClick={() => void previewImport()}
+                    >
+                      先看计划
+                    </button>
+                    <button
+                      className={btnPrimary}
+                      disabled={importBusy || !importSrc.trim()}
+                      onClick={() => void applyImport()}
+                    >
+                      导入
+                    </button>
+                  </div>
 
-                {importPlan ? (
-                  <div className="mt-6">
-                    <p className="text-sm text-fg-2">
-                      {importPlan.filter((e) => !e.alreadyThere).length} 个要新写 / 共 {importPlan.length}{" "}
-                      个文件，库里已有的会跳过。
-                      {importPlan.filter((e) => !e.alreadyThere && e.destRel !== "notes/" + e.srcRel)
-                        .length > 0
-                        ? " 带「改名」的那几篇，笔记里指向它们的 [[链接]] 需要你自己核对。"
-                        : ""}
-                    </p>
-                    <div className="mt-2 flex flex-col gap-1">
-                      {importPlan.slice(0, 40).map((e) => (
-                        <div
-                          key={e.srcRel}
-                          className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1 text-xs"
-                        >
-                          <span className="w-14 shrink-0 text-fg-2">
-                            {e.alreadyThere ? "已存在" : e.markdown ? "笔记" : "附件"}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate font-mono">{e.srcRel}</span>
-                          <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
-                            → {e.destRel}
-                          </span>
-                        </div>
-                      ))}
-                      {importPlan.length > 40 ? (
-                        <div className="text-xs text-fg-disabled">… 只列前 40 项</div>
+                  {importPlan ? (
+                    <div className="mt-6">
+                      <p className="text-sm text-fg-2">
+                        {importPlan.filter((e) => !e.alreadyThere).length} 个要新写 / 共{" "}
+                        {importPlan.length} 个文件，库里已有的会跳过。
+                        {importPlan.filter(
+                          (e) => !e.alreadyThere && e.destRel !== "notes/" + e.srcRel,
+                        ).length > 0
+                          ? " 带「改名」的那几篇，笔记里指向它们的 [[链接]] 需要你自己核对。"
+                          : ""}
+                      </p>
+                      <div className="mt-2 flex flex-col gap-1">
+                        {importPlan.slice(0, 40).map((e) => (
+                          <div
+                            key={e.srcRel}
+                            className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1 text-xs"
+                          >
+                            <span className="w-14 shrink-0 text-fg-2">
+                              {e.alreadyThere ? "已存在" : e.markdown ? "笔记" : "附件"}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate font-mono">{e.srcRel}</span>
+                            <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
+                              → {e.destRel}
+                            </span>
+                          </div>
+                        ))}
+                        {importPlan.length > 40 ? (
+                          <div className="text-xs text-fg-disabled">… 只列前 40 项</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {importResult ? (
+                    <div className="mt-6 rounded-md border border-line bg-raised px-4 py-3 text-sm">
+                      导入 {importResult.notes.length} 篇、附件 {importResult.assets.length}{" "}
+                      个，跳过 {importResult.skipped.length} 个，共{" "}
+                      {Math.round(importResult.bytes / 1024)} KB。
+                      {importResult.renamed.length > 0 ? (
+                        <ul className="mt-2 list-disc pl-5 text-xs text-fg-2">
+                          {importResult.renamed.map(([from, to]) => (
+                            <li key={from}>
+                              <span className="font-mono">{from}</span> →{" "}
+                              <span className="font-mono">{to}</span>
+                            </li>
+                          ))}
+                        </ul>
                       ) : null}
                     </div>
-                  </div>
-                ) : null}
-
-                {importResult ? (
-                  <div className="mt-6 rounded-md border border-line bg-raised px-4 py-3 text-sm">
-                    导入 {importResult.notes.length} 篇、附件 {importResult.assets.length} 个，跳过{" "}
-                    {importResult.skipped.length} 个，共 {Math.round(importResult.bytes / 1024)} KB。
-                    {importResult.renamed.length > 0 ? (
-                      <ul className="mt-2 list-disc pl-5 text-xs text-fg-2">
-                        {importResult.renamed.map(([from, to]) => (
-                          <li key={from}>
-                            <span className="font-mono">{from}</span> →{" "}
-                            <span className="font-mono">{to}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-            ) : mode === "backup" ? (
-              <div className="measure-ui px-6 py-8">
-                {/* flash 原本只在正文那一支渲染：结果"立即备份"的反馈在它自己的面板里看不见 */}
-                {flash ? <p className="mb-4 text-sm text-fg-2">{flash}</p> : null}
-                <h2 className="text-xl text-fg">备份与历史版本</h2>
-                <p className="mt-2 text-sm text-fg-2">
-                  每天第一次启动时，把库里<span className="text-fg">变化过的文件</span>复制到另一个目录，保留最近
-                  30 份。文件原样保存，不压缩，在资源管理器里直接能打开。
-                </p>
-                <div className="mt-4 rounded-md border border-line bg-raised px-4 py-3 text-sm">
-                  {备份格.档 === "开着" ? (
-                    <span>
-                      备份到{" "}
-                      <span className="font-mono text-mono">{备份格.目录}</span>
-                      {备份格.时刻
-                        ? ` · 最近一次 ${new Date(备份格.时刻).toLocaleString()}`
-                        : " · 还没备份过"}
-                    </span>
-                  ) : (
-                    <span className="text-danger">{备份格.文}</span>
-                  )}
-                </div>
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button
-                    className={btnPrimary}
-                    disabled={backupBusy}
-                    onClick={() => void runBackup()}
-                  >
-                    立即备份
-                  </button>
-                  {/* 目录与"不备份"是**配置**，搬进了设置页；这一格留的是"看历史、找回某一版"。
-                      没备份的人在这儿点一下就到改的地方，不用自己去找齿轮 */}
-                  <button className={btn} onClick={() => void openSettings()}>
-                    改目录 / 不备份 → 设置
-                  </button>
-                </div>
-
-                <h3 className="mt-8 text-sm text-fg-2">
-                  {selected ? `这篇的历史版本 · ${selected.title}` : "选一篇笔记，就能看它的历史版本"}
-                </h3>
-                <div className="mt-2 flex flex-col gap-1">
-                  {selected && history.length === 0 ? (
-                    <div className="text-sm text-fg-disabled">备份里还没有这一篇。</div>
                   ) : null}
-                  {selected
-                    ? history.map((r) => (
-                        <div
-                          key={r.id}
-                          className="flex items-baseline gap-3 rounded-md border border-line bg-raised px-3 py-2"
-                        >
-                          <span className="min-w-0 flex-1 truncate font-mono text-xs">{r.id}</span>
-                          <span className="shrink-0 text-xs text-fg-2">
-                            {new Date(r.takenAt).toLocaleString()}
-                          </span>
-                          <button
-                            className={btnPrimary}
-                            disabled={backupBusy}
-                            onClick={() => void restoreFrom(r.id)}
-                          >
-                            恢复成这一版
-                          </button>
-                        </div>
-                      ))
-                    : null}
                 </div>
-
-                <h3 className="mt-8 text-sm text-fg-2">最近的版本</h3>
-                <div className="mt-2 flex flex-col gap-1">
-                  {snapshots.length === 0 ? (
-                    <div className="text-sm text-fg-disabled">还没有版本。</div>
-                  ) : null}
-                  {snapshots.map((r) => (
-                    <div
-                      key={r.id}
-                      className="flex items-baseline gap-3 rounded-md border border-line px-3 py-2 text-sm"
-                    >
-                      <span className="min-w-0 flex-1 truncate font-mono text-xs">{r.id}</span>
-                      <span className="shrink-0 text-xs text-fg-2">
-                        {new Date(r.takenAt).toLocaleString()} · 本次复制 {r.copiedFiles} / 全库 {r.totalFiles}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : mode === "settings" ? (
-              <SettingsView
-                info={info}
-                flash={flash}
-                onBack={backToNote}
-                外观={{ theme, setTheme }}
-                备份={{
-                  draft: backupDraft,
-                  setDraft: setBackupDraft,
-                  忙: backupBusy,
-                  应用: (dir) => void applyBackup(dir),
-                }}
-                模型={{
-                  view: aiView,
-                  form: aiForm,
-                  setForm: setAiForm,
-                  key: aiKey,
-                  setKey: setAiKey,
-                  忙: aiBusy,
-                  报告: aiReport,
-                  发现: ai发现,
-                  保存: () => void ai保存(),
-                  存Key: () => void ai存Key(),
-                  测试: () => void ai测试(),
-                  发现模型: () => void ai发现模型(),
-                }}
-                库={{ 忙: 库忙, 打开: (p) => void 打开库(p) }}
-              />
-            ) : mode === "ask" ? (
-              <div className="measure-ui px-6 py-8">
-                <h2 className="text-xl text-fg">问 AI</h2>
-                <p className="mt-2 max-w-2xl text-sm text-fg-2">
-                  答案只根据你的笔记生成，并标出来自哪一篇；找不到依据时会直接说没有。
-                  发给模型的只有检索到的片段，不是整篇笔记。
-                  要改正文：回到文档里选中一段文字，点工具栏上的 ✨ 就能改这一段。
-                </p>
-                <div className="mt-4 flex max-w-2xl gap-2">
-                  <input
-                    className="min-w-0 flex-1 rounded-md border border-line bg-page px-3 py-1 text-fg"
-                    value={问}
-                    placeholder="比如：备份为什么要放到第二个目录？"
-                    onChange={(e) => set问(e.target.value)}
-                    onKeyDown={(e) => {
-                      // 与"问"那一枚按钮同一条门：没配齐就不发一趟注定被拒的请求
-                      if (是回车提交(e) && !问busy && !!aiView && 可对话(aiView)) void ai问();
-                    }}
-                  />
-                  <button
-                    className={btnPrimary}
-                    disabled={问busy || !问.trim() || !aiView || !可对话(aiView)}
-                    onClick={() => void ai问()}
-                  >
-                    {问busy ? "生成中…" : "问"}
-                  </button>
-                </div>
-                {!aiView || !可对话(aiView) ? (
-                  <p className="mt-2 text-xs text-fg-2">
-                    {aiView
-                      ? "模型还没配好，暂时不能提问；搜索不受影响。"
-                      : "模型配置还没读出来，暂时不能提问；搜索不受影响。"}
-                    <button className="underline" onClick={() => void openSettings()}>
-                      打开设置
-                    </button>
+              ) : mode === "backup" ? (
+                <div className="measure-ui px-6 py-8">
+                  {/* flash 原本只在正文那一支渲染：结果"立即备份"的反馈在它自己的面板里看不见 */}
+                  {flash ? <p className="mb-4 text-sm text-fg-2">{flash}</p> : null}
+                  <h2 className="text-xl text-fg">备份与历史版本</h2>
+                  <p className="mt-2 text-sm text-fg-2">
+                    每天第一次启动时，把库里
+                    <span className="text-fg">变化过的文件</span>
+                    复制到另一个目录，保留最近 30
+                    份。文件原样保存，不压缩，在资源管理器里直接能打开。
                   </p>
-                ) : null}
-                {/*
+                  <div className="mt-4 rounded-md border border-line bg-raised px-4 py-3 text-sm">
+                    {备份格.档 === "开着" ? (
+                      <span>
+                        备份到 <span className="font-mono text-mono">{备份格.目录}</span>
+                        {备份格.时刻
+                          ? ` · 最近一次 ${new Date(备份格.时刻).toLocaleString()}`
+                          : " · 还没备份过"}
+                      </span>
+                    ) : (
+                      <span className="text-danger">{备份格.文}</span>
+                    )}
+                  </div>
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    <button
+                      className={btnPrimary}
+                      disabled={backupBusy}
+                      onClick={() => void runBackup()}
+                    >
+                      立即备份
+                    </button>
+                    {/* 目录与"不备份"是**配置**，搬进了设置页；这一格留的是"看历史、找回某一版"。
+                      没备份的人在这儿点一下就到改的地方，不用自己去找齿轮 */}
+                    <button className={btn} onClick={() => void openSettings()}>
+                      改目录 / 不备份 → 设置
+                    </button>
+                  </div>
+
+                  <h3 className="mt-8 text-sm text-fg-2">
+                    {selected
+                      ? `这篇的历史版本 · ${selected.title}`
+                      : "选一篇笔记，就能看它的历史版本"}
+                  </h3>
+                  <div className="mt-2 flex flex-col gap-1">
+                    {selected && history.length === 0 ? (
+                      <div className="text-sm text-fg-disabled">备份里还没有这一篇。</div>
+                    ) : null}
+                    {selected
+                      ? history.map((r) => (
+                          <div
+                            key={r.id}
+                            className="flex items-baseline gap-3 rounded-md border border-line bg-raised px-3 py-2"
+                          >
+                            <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                              {r.id}
+                            </span>
+                            <span className="shrink-0 text-xs text-fg-2">
+                              {new Date(r.takenAt).toLocaleString()}
+                            </span>
+                            <button
+                              className={btnPrimary}
+                              disabled={backupBusy}
+                              onClick={() => void restoreFrom(r.id)}
+                            >
+                              恢复成这一版
+                            </button>
+                          </div>
+                        ))
+                      : null}
+                  </div>
+
+                  <h3 className="mt-8 text-sm text-fg-2">最近的版本</h3>
+                  <div className="mt-2 flex flex-col gap-1">
+                    {snapshots.length === 0 ? (
+                      <div className="text-sm text-fg-disabled">还没有版本。</div>
+                    ) : null}
+                    {snapshots.map((r) => (
+                      <div
+                        key={r.id}
+                        className="flex items-baseline gap-3 rounded-md border border-line px-3 py-2 text-sm"
+                      >
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs">{r.id}</span>
+                        <span className="shrink-0 text-xs text-fg-2">
+                          {new Date(r.takenAt).toLocaleString()} · 本次复制 {r.copiedFiles} / 全库{" "}
+                          {r.totalFiles}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : mode === "settings" ? (
+                <SettingsView
+                  info={info}
+                  flash={flash}
+                  onBack={backToNote}
+                  外观={{ theme, setTheme }}
+                  备份={{
+                    draft: backupDraft,
+                    setDraft: setBackupDraft,
+                    忙: backupBusy,
+                    应用: (dir) => void applyBackup(dir),
+                  }}
+                  模型={{
+                    view: aiView,
+                    form: aiForm,
+                    setForm: setAiForm,
+                    key: aiKey,
+                    setKey: setAiKey,
+                    忙: aiBusy,
+                    报告: aiReport,
+                    发现: ai发现,
+                    保存: () => void ai保存(),
+                    删Key: () => void ai删Key(),
+                    测试: () => void ai测试(),
+                    发现模型: () => void ai发现模型(),
+                  }}
+                  库={{ 忙: 库忙, 打开: (p) => void 打开库(p) }}
+                />
+              ) : mode === "ask" ? (
+                <div className="measure-ui px-6 py-8">
+                  <h2 className="text-xl text-fg">问 AI</h2>
+                  <p className="mt-2 max-w-2xl text-sm text-fg-2">
+                    答案只根据你的笔记生成，并标出来自哪一篇；找不到依据时会直接说没有。
+                    发给模型的只有检索到的片段，不是整篇笔记。
+                    要改正文：回到文档里选中一段文字，点工具栏上的 ✨ 就能改这一段。
+                  </p>
+                  <div className="mt-4 flex max-w-2xl gap-2">
+                    <input
+                      className="min-w-0 flex-1 rounded-md border border-line bg-page px-3 py-1 text-fg"
+                      value={问}
+                      placeholder="比如：备份为什么要放到第二个目录？"
+                      onChange={(e) => set问(e.target.value)}
+                      onKeyDown={(e) => {
+                        // 与"问"那一枚按钮同一条门：没配齐就不发一趟注定被拒的请求
+                        if (是回车提交(e) && !问busy && !!aiView && 可对话(aiView)) void ai问();
+                      }}
+                    />
+                    <button
+                      className={btnPrimary}
+                      disabled={问busy || !问.trim() || !aiView || !可对话(aiView)}
+                      onClick={() => void ai问()}
+                    >
+                      {问busy ? "生成中…" : "问"}
+                    </button>
+                  </div>
+                  {!aiView || !可对话(aiView) ? (
+                    <p className="mt-2 text-xs text-fg-2">
+                      {aiView
+                        ? "模型还没配好，暂时不能提问；搜索不受影响。"
+                        : "模型配置还没读出来，暂时不能提问；搜索不受影响。"}
+                      <button className="underline" onClick={() => void openSettings()}>
+                        打开设置
+                      </button>
+                    </p>
+                  ) : null}
+                  {/*
                   流式中的那张卡。**与最终答案同一副外壳**（同 border / bg / 字号），
                   只在定稿时换掉里面的内容——如果两态长得不一样，用户就会看到"答案跳一下"，
                   而那是这一档最不想要的外观。光标用 animate-pulse，不写 keyframes。
                 */}
-                {问busy && !答 && !问错 ? (
-                  <div className="mt-5 max-w-2xl rounded-md border border-line bg-raised px-4 py-3">
-                    {/* 开合看 `问busy` 而不是 `流字`：思考型模型先吐的是 `reasoning_content`，
+                  {问busy && !答 && !问错 ? (
+                    <div className="mt-5 max-w-2xl rounded-md border border-line bg-raised px-4 py-3">
+                      {/* 开合看 `问busy` 而不是 `流字`：思考型模型先吐的是 `reasoning_content`，
                         答案一个字都还没有——从前这里判 `流字`，那几十秒屏幕上什么都没有，
                         "它在想…" 那一句永远走不到。`!答 && !问错` 是为了定稿先到、审计
                         刷新还没回来那一段：那时 `问busy` 还是 true，不挡就会出现两张卡。 */}
-                    <div className="font-mono text-xs text-fg-2">
-                      {流字 ? "生成中…" : 想字 ? "正在思考…" : "正在等待回应…"}
-                      {流字 ? `｜已到 ${流字.length} 字` : ""}
-                      {想字 ? `｜已思考 ${想字} 字` : ""}
+                      <div className="font-mono text-xs text-fg-2">
+                        {流字 ? "生成中…" : 想字 ? "正在思考…" : "正在等待回应…"}
+                        {流字 ? `｜已到 ${流字.length} 字` : ""}
+                        {想字 ? `｜已思考 ${想字} 字` : ""}
+                      </div>
+                      {流字 ? (
+                        <p className="mt-2 whitespace-pre-wrap text-sm text-fg">
+                          {流字}
+                          <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-fg-2 align-middle" />
+                        </p>
+                      ) : null}
                     </div>
-                    {流字 ? (
-                      <p className="mt-2 whitespace-pre-wrap text-sm text-fg">
-                        {流字}
-                        <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-fg-2 align-middle" />
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-                {问错 ? (
-                  /*
+                  ) : null}
+                  {问错 ? (
+                    /*
                     失败也用答案那张卡的外壳：**同一副壳**，用户不用分辨"这是答案还是
                     出错了"——他只要知道这一问没有答案，以及为什么没有。
                   */
-                  <div className="mt-5 max-w-2xl rounded-md border border-danger bg-danger-soft px-4 py-3">
-                    <div className="font-mono text-xs text-fg-2">这一问没有答成</div>
-                    <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{问错}</p>
-                  </div>
-                ) : null}
-                {答 ? (
-                  <div
-                    className={
-                      "mt-5 max-w-2xl rounded-md border px-4 py-3 " +
-                      (答.insufficient ? "border-danger bg-danger-soft" : "border-line bg-raised")
-                    }
-                  >
-                    <div className="font-mono text-xs text-fg-2">
-                      {答.model} · {答.ms}ms · 检索 {答.candidates} 段 · 输入 {答.inTokens} /
-                      输出 {答.outTokens} tokens
-                      {答.retried ? " · 重新生成过一次" : ""}
+                    <div className="mt-5 max-w-2xl rounded-md border border-danger bg-danger-soft px-4 py-3">
+                      <div className="font-mono text-xs text-fg-2">这一问没有答成</div>
+                      <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{问错}</p>
                     </div>
-                    <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{答.text}</p>
-                    {答.citations.length ? (
-                      <div className="mt-3 flex flex-col gap-1">
-                        <span className="text-xs text-fg-2">
-                          引用来源 {答.citations.length} 条
-                        </span>
-                        {答.citations.map((c) => (
-                          <button
-                            key={c.label}
-                            onClick={() => void openNote(c.path, c.title, c.blockOrdinal)}
-                            className="block rounded-md border border-line px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover focus-visible:border-accent"
-                          >
-                            <span className="flex items-baseline gap-2">
-                              <span className="shrink-0 font-mono text-xs text-fg-2">
-                                {c.label}
-                              </span>
-                              <span className="min-w-0 flex-1 truncate text-fg">{c.crumb}</span>
-                            </span>
-                            <span className="mt-1 block truncate text-xs text-fg-2">
-                              {c.snippet}
-                            </span>
-                          </button>
-                        ))}
+                  ) : null}
+                  {答 ? (
+                    <div
+                      className={
+                        "mt-5 max-w-2xl rounded-md border px-4 py-3 " +
+                        (答.insufficient ? "border-danger bg-danger-soft" : "border-line bg-raised")
+                      }
+                    >
+                      <div className="font-mono text-xs text-fg-2">
+                        {答.model} · {答.ms}ms · 检索 {答.candidates} 段 · 输入 {答.inTokens} / 输出{" "}
+                        {答.outTokens} tokens
+                        {答.retried ? " · 重新生成过一次" : ""}
                       </div>
-                    ) : (
-                      <p className="mt-2 text-xs text-fg-disabled">
-                        {答.insufficient ? "没有找到可引用的笔记。" : "这次回答没有标出来源。"}
-                      </p>
-                    )}
-                  </div>
-                ) : null}
-                <h3 className="mt-8 text-sm text-fg-2">
-                  最近的生成
-                  <span className="ml-1 font-mono text-xs text-fg-2">{runs.length}</span>
-                </h3>
-                <div className="mt-2 flex max-w-2xl flex-col gap-1">
-                  {runs.length === 0 ? (
-                    <div className="text-sm text-fg-disabled">还没有记录。</div>
-                  ) : null}
-                  {runs.map((r) => (
-                    <div
-                      key={r.id}
-                      className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1 text-xs"
-                    >
-                      <span className={r.ok ? "text-fg" : "text-danger"}>
-                        {r.ok ? "已采用" : "未采用"}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
-                        {r.model}｜引用 {r.cited.length}/{r.candidates}
-                        {r.retried ? "｜重试过" : ""}
-                        {r.semantic && r.graph && !r.reranked
-                          ? ""
-                          : `｜${走了那句(r.semantic, r.graph, r.reranked)}`}
-                      </span>
-                      <span className="shrink-0 font-mono text-fg-2">
-                        {r.inTokens + r.outTokens} tokens · {new Date(r.createdAt).toLocaleTimeString()}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-                <p className="mt-6 max-w-2xl text-xs text-fg-disabled">
-                  审计记的是这个库问过什么、引用了哪几块、多少 token——失败与未采纳的那几次也在。
-                  token 数按回包原样记，对方不给就记 0，不猜。
-                </p>
-              </div>
-            ) : mode === "trash" ? (
-              <div className="measure-ui px-6 py-8">
-                <h2 className="text-xl text-fg">回收站</h2>
-                <p className="mt-2 text-sm text-fg-2">
-                  删掉的笔记存在 <span className="font-mono text-mono">.note/trash/</span>，恢复即移回原路径。清空这个目录才是真删。
-                </p>
-                <div className="mt-6 flex flex-col gap-1">
-                  {trash.length === 0 ? (
-                    <div className="text-sm text-fg-disabled">是空的。</div>
-                  ) : null}
-                  {trash.map((t) => (
-                    <div
-                      key={t.batch + t.rel}
-                      className="flex items-baseline gap-3 rounded-md border border-line bg-raised px-3 py-2"
-                    >
-                      <span className="min-w-0 flex-1 truncate text-sm">{stemOf(t.rel)}</span>
-                      <span className="shrink-0 font-mono text-xs text-fg-2">
-                        {t.rel} · {relativeTime(t.updatedMs)}
-                      </span>
-                      <button className={btnPrimary} onClick={() => void restore(t)}>
-                        恢复
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="prose-note measure px-6 py-8">
-                {selected ? (
-                  <>
-                    <div className="mb-3 flex items-center gap-2 text-xs">
-                      {mode === "rename" ? (
-                        <>
-                          <input
-                            autoFocus
-                            className="min-w-0 flex-1 rounded-md border border-accent bg-page px-2 py-1 text-sm"
-                            value={nameDraft}
-                            onChange={(e) => setNameDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (是回车提交(e)) void commitRename();
-                              else if (e.key === "Escape") backToNote();
-                            }}
-                          />
-                          <button className={btnPrimary} onClick={() => void commitRename()}>
-                            改名
-                          </button>
-                          <button className={btn} onClick={backToNote}>
-                            取消
-                          </button>
-                        </>
+                      <p className="mt-2 whitespace-pre-wrap text-sm text-fg">{答.text}</p>
+                      {答.citations.length ? (
+                        <div className="mt-3 flex flex-col gap-1">
+                          <span className="text-xs text-fg-2">
+                            引用来源 {答.citations.length} 条
+                          </span>
+                          {答.citations.map((c) => (
+                            <button
+                              key={c.label}
+                              onClick={() => void openNote(c.path, c.title, c.blockOrdinal)}
+                              className="block rounded-md border border-line px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover focus-visible:border-accent"
+                            >
+                              <span className="flex items-baseline gap-2">
+                                <span className="shrink-0 font-mono text-xs text-fg-2">
+                                  {c.label}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate text-fg">{c.crumb}</span>
+                              </span>
+                              <span className="mt-1 block truncate text-xs text-fg-2">
+                                {c.snippet}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
                       ) : (
-                        <>
-                          <span className="min-w-0 shrink truncate font-mono text-fg-2">
-                            {selected.rel}
-                          </span>
-                          {/* 没有"编辑/完成"了：打开就是可编辑的。管理动作压在右上角，
-                              平时半透明，指针靠近或拿到键盘焦点才实——它们不是正文的一部分，
-                              但也不该在用户写字时占住注意力。 */}
-                          <span className="ml-auto flex shrink-0 items-center gap-1 opacity-90 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
-                            <button className={btn} onClick={() => void switchSurface()}>
-                              {mode === "source" ? "所见即所得" : "源码"}
-                            </button>
-                            <button
-                              className={btn}
-                              onClick={() => {
-                                setNameDraft(stemOf(selected.rel));
-                                setMode("rename");
-                              }}
-                            >
-                              改名
-                            </button>
-                            <button className={btn} onClick={() => void toggleArchive()}>
-                              {selected.rel.startsWith("archive/") ? "取消归档" : "归档"}
-                            </button>
-                            <button
-                              className={btn + " text-danger"}
-                              onClick={() => void trashNote()}
-                            >
-                              删除
-                            </button>
-                          </span>
-                        </>
+                        <p className="mt-2 text-xs text-fg-disabled">
+                          {答.insufficient ? "没有找到可引用的笔记。" : "这次回答没有标出来源。"}
+                        </p>
                       )}
                     </div>
-                    {saveState === "conflict" ? (
-                      <div className="mb-4 rounded-md border border-danger bg-danger-soft px-3 py-2 text-sm">
-                        这篇在你编辑期间被别处改过（Obsidian、另一个窗口，或同步）。
-                        你写的还在框里，还没保存——选一个：
-                        <div className="mt-3 flex gap-2">
-                          <button className={btn} onClick={() => void reloadDisk()}>
-                            丢掉我的，用磁盘版本
-                          </button>
-                          <button className={btn} onClick={() => void persist(true)}>
-                            仍然存我这份
-                          </button>
-                        </div>
-                      </div>
+                  ) : null}
+                  <h3 className="mt-8 text-sm text-fg-2">
+                    最近的生成
+                    <span className="ml-1 font-mono text-xs text-fg-2">{runs.length}</span>
+                  </h3>
+                  <div className="mt-2 flex max-w-2xl flex-col gap-1">
+                    {runs.length === 0 ? (
+                      <div className="text-sm text-fg-disabled">还没有记录。</div>
                     ) : null}
-                    {flash ? <p className="mb-4 text-xs text-fg-2">{flash}</p> : null}
-
-                    {mode !== "source" && editDoc ? (
+                    {runs.map((r) => (
                       <div
-                        className="block-editor"
-                        onBlur={() => void persist()}
-                        onKeyDown={bodyKeys}
+                        key={r.id}
+                        className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1 text-xs"
                       >
-                        <BlockEditor
-                          key={`${selected.rel}:${editEpoch}`}
-                          doc={editDoc}
-                          editable={mode === "inline"}
-                          onEditStart={() => setMode("inline")}
-                          onEdit={() => setInlineRev((n) => n + 1)}
-                          onNotice={(文) => setFlash(文)}
-                          editApi={editApi}
-                          focusBlock={blockFocus}
-                          aiReady={!!aiView && 可对话(aiView)}
-                        />
+                        <span className={r.ok ? "text-fg" : "text-danger"}>
+                          {r.ok ? "已采用" : "未采用"}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-fg-2">
+                          {r.model}｜引用 {r.cited.length}/{r.candidates}
+                          {r.retried ? "｜重试过" : ""}
+                          {r.semantic && r.graph && !r.reranked
+                            ? ""
+                            : `｜${走了那句(r.semantic, r.graph, r.reranked)}`}
+                        </span>
+                        <span className="shrink-0 font-mono text-fg-2">
+                          {r.inTokens + r.outTokens} tokens ·{" "}
+                          {new Date(r.createdAt).toLocaleTimeString()}
+                        </span>
                       </div>
-                    ) : mode === "source" ? (
-                      <textarea
-                        autoFocus
-                        spellCheck={false}
-                        value={draft}
-                        onChange={(e) => setDraft(e.target.value)}
-                        onBlur={() => void persist()}
-                        onKeyDown={bodyKeys}
-                        className="h-[60vh] w-full resize-y rounded-md border border-line bg-sunken p-4 font-mono text-mono leading-body text-fg"
-                      />
-                    ) : (
-                      // 装载中：既不给上一篇留着，也不闪一个空框——骨架意味着"路上有东西"。
-                      // 尺寸照真实内容：一级标题 28px×1.3≈36px → h-9，正文行 23.25px → h-6，
-                      // 段间距 1.15em≈17.8px → gap-4（[06] §3"骨架抖动=布局错误的信号"）
-                      <div className="flex flex-col gap-4">
-                        <div className="skeleton h-9 w-2/3" />
-                        <div className="skeleton h-6 w-full" />
-                        <div className="skeleton h-6 w-5/6" />
-                      </div>
-                    )}
-                    {links && selected ? (
-                      <LinkPanelView
-                        panel={links}
-                        onOpen={(rel, title) => void openNote(rel, title)}
-                      />
+                    ))}
+                  </div>
+                  <p className="mt-6 max-w-2xl text-xs text-fg-disabled">
+                    审计记的是这个库问过什么、引用了哪几块、多少 token——失败与未采纳的那几次也在。
+                    token 数按回包原样记，对方不给就记 0，不猜。
+                  </p>
+                </div>
+              ) : mode === "trash" ? (
+                <div className="measure-ui px-6 py-8">
+                  <h2 className="text-xl text-fg">回收站</h2>
+                  <p className="mt-2 text-sm text-fg-2">
+                    删掉的笔记存在 <span className="font-mono text-mono">.note/trash/</span>
+                    ，恢复即移回原路径。清空这个目录才是真删。
+                  </p>
+                  <div className="mt-6 flex flex-col gap-1">
+                    {trash.length === 0 ? (
+                      <div className="text-sm text-fg-disabled">是空的。</div>
                     ) : null}
-                    {/* 保存状态挪到右下角，1.5 秒自己消失。它以前是顶栏上的一行常驻文字，
+                    {trash.map((t) => (
+                      <div
+                        key={t.batch + t.rel}
+                        className="flex items-baseline gap-3 rounded-md border border-line bg-raised px-3 py-2"
+                      >
+                        <span className="min-w-0 flex-1 truncate text-sm">{stemOf(t.rel)}</span>
+                        <span className="shrink-0 font-mono text-xs text-fg-2">
+                          {t.rel} · {relativeTime(t.updatedMs)}
+                        </span>
+                        <button className={btnPrimary} onClick={() => void restore(t)}>
+                          恢复
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="prose-note measure px-6 py-8">
+                  {selected ? (
+                    <>
+                      <div className="mb-3 flex items-center gap-2 text-xs">
+                        {mode === "rename" ? (
+                          <>
+                            <input
+                              autoFocus
+                              className="min-w-0 flex-1 rounded-md border border-accent bg-page px-2 py-1 text-sm"
+                              value={nameDraft}
+                              onChange={(e) => setNameDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (是回车提交(e)) void commitRename();
+                                else if (e.key === "Escape") backToNote();
+                              }}
+                            />
+                            <button className={btnPrimary} onClick={() => void commitRename()}>
+                              改名
+                            </button>
+                            <button className={btn} onClick={backToNote}>
+                              取消
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            {/* 面包屑（布局三）：目录链用次要色，最后一段（本篇）用主色——
+                              "我在哪个目录的哪一篇"一眼可读，不再是光秃秃一条 rel。
+                              截断留给整条 nav：窄窗时从尾部省略，目录链牺牲得起，篇名不能 */}
+                            <nav
+                              className="min-w-0 flex-1 truncate font-mono text-fg-2"
+                              aria-label="所在路径"
+                            >
+                              {路径段.map((段, i) => (
+                                <span key={`${i}:${段}`}>
+                                  {i > 0 ? (
+                                    <span aria-hidden="true" className="px-1 opacity-60">
+                                      /
+                                    </span>
+                                  ) : null}
+                                  <span className={i === 路径段.length - 1 ? "text-fg" : undefined}>
+                                    {段}
+                                  </span>
+                                </span>
+                              ))}
+                            </nav>
+                            {/* 没有"编辑/完成"了：打开就是可编辑的。管理动作压在右上角，
+                              平时半透明，指针靠近或拿到键盘焦点才实——它们不是正文的一部分，
+                              但也不该在用户写字时占住注意力。 */}
+                            <span className="ml-auto flex shrink-0 items-center gap-1 opacity-90 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
+                              <button className={btn} onClick={() => void switchSurface()}>
+                                {mode === "source" ? "所见即所得" : "源码"}
+                              </button>
+                              <button
+                                className={btn}
+                                onClick={() => {
+                                  setNameDraft(stemOf(selected.rel));
+                                  setMode("rename");
+                                }}
+                              >
+                                改名
+                              </button>
+                              <button className={btn} onClick={() => void toggleArchive()}>
+                                {selected.rel.startsWith("archive/") ? "取消归档" : "归档"}
+                              </button>
+                              <button
+                                className={btn + " text-danger"}
+                                onClick={() => void trashNote()}
+                              >
+                                删除
+                              </button>
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      {saveState === "conflict" ? (
+                        <div className="mb-4 rounded-md border border-danger bg-danger-soft px-3 py-2 text-sm">
+                          这篇在你编辑期间被别处改过（Obsidian、另一个窗口，或同步）。
+                          你写的还在框里，还没保存——选一个：
+                          <div className="mt-3 flex gap-2">
+                            <button className={btn} onClick={() => void reloadDisk()}>
+                              丢掉我的，用磁盘版本
+                            </button>
+                            <button className={btn} onClick={() => void persist(true)}>
+                              仍然存我这份
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                      {flash ? <p className="mb-4 text-xs text-fg-2">{flash}</p> : null}
+
+                      {mode !== "source" && editDoc ? (
+                        <div
+                          className="block-editor"
+                          onBlur={() => void persist()}
+                          onKeyDown={bodyKeys}
+                        >
+                          <BlockEditor
+                            key={`${selected.rel}:${editEpoch}`}
+                            doc={editDoc}
+                            editable={mode === "inline"}
+                            onEditStart={() => setMode("inline")}
+                            onEdit={() => setInlineRev((n) => n + 1)}
+                            onNotice={(文) => setFlash(文)}
+                            editApi={editApi}
+                            focusBlock={blockFocus}
+                            aiReady={!!aiView && 可对话(aiView)}
+                            onEditorChange={setLiveEditor}
+                          />
+                        </div>
+                      ) : mode === "source" ? (
+                        <textarea
+                          autoFocus
+                          spellCheck={false}
+                          value={draft}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onBlur={() => void persist()}
+                          onKeyDown={bodyKeys}
+                          className="h-[60vh] w-full resize-y rounded-md border border-line bg-sunken p-4 font-mono text-mono leading-body text-fg"
+                        />
+                      ) : (
+                        // 装载中：既不给上一篇留着，也不闪一个空框——骨架意味着"路上有东西"。
+                        // 尺寸照真实内容：一级标题 28px×1.3≈36px → h-9，正文行 23.25px → h-6，
+                        // 段间距 1.15em≈17.8px → gap-4（[06] §3"骨架抖动=布局错误的信号"）
+                        <div className="flex flex-col gap-4">
+                          <div className="skeleton h-9 w-2/3" />
+                          <div className="skeleton h-6 w-full" />
+                          <div className="skeleton h-6 w-5/6" />
+                        </div>
+                      )}
+                      {links && selected ? (
+                        <LinkPanelView
+                          panel={links}
+                          onOpen={(rel, title) => void openNote(rel, title)}
+                        />
+                      ) : null}
+                      {/* 保存状态挪到右下角，1.5 秒自己消失。它以前是顶栏上的一行常驻文字，
                         和"完成"按钮一起把"我在编辑"念个不停——现在打开就是可编辑的，
                         没改动就不写盘，状态只需要在**真的存了东西**时说一声。
                         冲突不走这里：那是要用户做决定的，用上面那条横幅。 */}
-                    {saveState === "saving" || saveState === "saved" ? (
-                      <div
-                        className="pointer-events-none fixed right-5 bottom-5 z-(--z-toast) rounded-full border border-line bg-raised px-3 py-1 text-xs text-fg-2 shadow-2"
-                        aria-live="polite"
-                      >
-                        {saveState === "saving" ? "保存中…" : "已自动保存"}
+                      {saveState === "saving" || saveState === "saved" ? (
+                        <div
+                          className="pointer-events-none fixed right-5 bottom-5 z-(--z-toast) rounded-full border border-line bg-raised px-3 py-1 text-xs text-fg-2 shadow-2"
+                          aria-live="polite"
+                        >
+                          {saveState === "saving" ? "保存中…" : "已自动保存"}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="flex flex-col items-start gap-4 text-fg-2">
+                      <div className="text-lg">
+                        {flash
+                          ? flash
+                          : notes && notes.notes.length === 0
+                            ? "还没有笔记。按 Alt+Shift+N 记一条，或者建一篇来写。"
+                            : "选一篇笔记，或者直接搜一个词。"}
                       </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <div className="flex flex-col items-start gap-4 text-fg-2">
-                    <div className="text-lg">
-                      {flash ? (
-                        flash
-                      ) : notes && notes.notes.length === 0 ? (
-                        "还没有笔记。按 Alt+Shift+N 记一条，或者建一篇来写。"
-                      ) : (
-                        "选一篇笔记，或者直接搜一个词。"
-                      )}
-                    </div>
-                    {/* [06] §3：空态是"文案 + 一个主操作"，不是插画满屏。空态是最容易被
+                      {/* [06] §3：空态是"文案 + 一个主操作"，不是插画满屏。空态是最容易被
                         忘掉的界面——这里以前只有一句话，用户站在这儿不知道下一步按什么 */}
-                    {info && !flash ? (
-                      <button className={btnPrimary} onClick={() => setCreating(true)}>
-                        新建一篇
-                      </button>
-                    ) : null}
-                    {/* 骨架屏只在真的有东西在路上时出现：常驻骨架=在骗人。
+                      {info && !flash ? (
+                        <button className={btnPrimary} onClick={() => setCreating(true)}>
+                          新建一篇
+                        </button>
+                      ) : null}
+                      {/* 骨架屏只在真的有东西在路上时出现：常驻骨架=在骗人。
                         高度对齐一行正文（15.5px × 1.5 = 23.25px → h-6），以前是 h-3=12px，
                         装载完内容一落到原位就是一次跳 */}
-                    {!info ? (
-                      <>
-                        <div className="skeleton h-6 w-64" />
-                        <div className="skeleton h-6 w-80" />
-                        <div className="skeleton h-6 w-48" />
-                      </>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-            )}
-          </main>
+                      {!info ? (
+                        <>
+                          <div className="skeleton h-6 w-64" />
+                          <div className="skeleton h-6 w-80" />
+                          <div className="skeleton h-6 w-48" />
+                        </>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              )}
+            </main>
+            {liveEditor ? <OutlinePanel editor={liveEditor} /> : null}
+          </div>
         </div>
       )}
     </div>

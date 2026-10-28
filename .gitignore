@@ -44,3 +44,7 @@ Desktop.ini
 /.qoder/
 /.workbuddy/
 /outputs/
+
+# 图标方案工作区（选型时的 12 张候选渲染稿与设计板，17M）
+/icon-options.miora
+/icon-options_assets/

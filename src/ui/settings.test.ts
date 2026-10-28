@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import type { AppInfo } from "../ipc/types";
-import { 主题档位, 判备份, 备份角标, 配置归属 } from "./settings";
+import { 主题档位, 判备份, 配置归属 } from "./settings";
 
 const 事实 = (过: Partial<AppInfo>): AppInfo => ({
   version: "0",
@@ -51,12 +51,6 @@ describe("备份那一格只有一个判据", () => {
     const 首回 = 判备份(事实({ backupDir: "E:\\x", backupUnconfigured: false }));
     expect(首回.档 === "开着" && 首回.时刻).toBe(null);
   });
-
-  it("角标只在没备份时说话，且两种没备份都是同一句'没开'", () => {
-    expect(备份角标(判备份(事实({ backupDisabled: true })))).toBe("没开");
-    expect(备份角标(判备份(事实({})))).toBe("没开");
-    expect(备份角标(判备份(事实({ backupDir: "E:\\x" })))).toBe(null);
-  });
 });
 
 describe("主题档位", () => {
@@ -88,7 +82,7 @@ describe("判据真的接在界面上", () => {
   const 主窗 = fs.readFileSync("src/App.tsx", "utf8");
   const 设置 = fs.readFileSync("src/ui/SettingsView.tsx", "utf8");
 
-  it("侧栏角标与两处面板都走 判备份，没有第二份拼法", () => {
+  it("两处面板都走 判备份，没有第二份拼法", () => {
     expect(主窗).toContain("判备份");
     expect(设置).toContain("判备份");
     expect(主窗).not.toMatch(/backupUnconfigured \|\| .*backupDisabled/);
@@ -138,24 +132,34 @@ describe("设置页的状态只有一个来源", () => {
   const 主窗 = fs.readFileSync("src/App.tsx", "utf8");
   const 设置 = fs.readFileSync("src/ui/SettingsView.tsx", "utf8");
 
-  it("角标读盘上那份（aiView），不读草稿", () => {
-    // 读草稿的话：在设置页打几个字还没保存，角标就说"已配置"，与同一屏的
-    // 「模型与 Key」状态自相矛盾，而且退出设置后它一直挂着那句假话
-    expect(主窗).toMatch(/徽标\(aiView, ai测过\)/);
-    expect(主窗).not.toMatch(/徽标\(aiForm/);
+  it("标题栏不再替配置发言（grep 守卫：状态字样与 徽标() 都不许回来）", () => {
+    // 那枚角标要同时回答"盘上填了没"与"这次测过没"，还和设置页那格重复；
+    // 2026-10-27 拍板撤掉。再挂回去，两个地方就会各说一句话。
+    // 判据故意写宽一点：光拦 `AI·` 挡不住写成 "AI 已配置" 的同一件事
+    expect(主窗).not.toMatch(/AI[·\s]+\s*(没配|已配置|不通|能检索|只对话)/);
+    expect(主窗).not.toMatch(/徽标(红)?\(/);
   });
 
-  it("存 / 删 Key 只换 view，不碰没保存的表单", () => {
-    // ai_save_key 返回的是盘上那份配置；整份 填回 会把用户刚打的地址 / 模型名
-    // 清回旧值（首次配置时是两个空框，接着按保存就把空配置写盘）
-    expect(主窗).toMatch(/setAiView\(await api\.aiSaveKey/);
+  it("存 Key 跟「保存配置」是同一按，删 Key 仍是另一件", () => {
+    // 凭据管理器与 config.toml 是两份存储，但用户按的是"保存"——不该记得多按一次
+    // （2026-10-27 用户拍板）。删除留在自己那一枚，它不该藏在"保存"里
+    expect(主窗).toMatch(/新 = await api\.aiSaveKey\(新Key\)/);
+    expect(主窗).toMatch(/const ai删Key = async \(\) => \{/);
+    // ai_save_key 返回的是盘上那份配置；整份 填回 会把用户刚打的地址 / 模型名清回旧值
     expect(主窗).not.toMatch(/填回\(await api\.aiSaveKey/);
   });
 
-  it("换库把上一次的测试结论与表单一起作废", () => {
-    // 配置跟着库走（.note/config.toml），A 库测过"能检索"不能贴到 B 库身上
+  it("Key 没存上时，也要照实说\"配置已经落盘\"", () => {
+    // Key 会被后端按长度（>4096 字节）/ 控制字符拒掉。那时配置已经写进 config.toml 了，
+    // 页面若还挂着"未配置"和"有改动没保存"，就是拿一句旧话盖住一件新事实
+    expect(主窗).toMatch(/配置已保存，但 Key 没存上/);
+    expect(主窗).toMatch(/let KeyErr: unknown = null;/);
+  });
+
+  it("换库把上一次的测试报告与表单一起作废", () => {
+    // 配置跟着库走（.note/config.toml），A 库的测试结论不能贴到 B 库身上
     const 换库 = 主窗.slice(主窗.indexOf("const 打开库"), 主窗.indexOf("const ai保存"));
-    expect(换库).toContain("setAi测过(null)");
+    expect(换库).toContain("setAiReport(null)");
     expect(换库).toMatch(/填回\(await api\.aiView\(\)\)/);
   });
 

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
-import { 可对话, 可检索, 徽标, 徽标红, 缺项, 步骤名, 探针数, 探针结论 } from "./ai";
+import { 可对话, 可检索, 缺项, 步骤名, 探针数, 探针结论 } from "./ai";
 
 const 齐 = { baseUrl: "https://api.example.com/v1", chatModel: "gpt-x", embeddingModel: "emb-1" };
 
-describe("AI 入口的角标", () => {
+describe("AI 配置的必填项", () => {
   it("必填只有两项：地址与对话模型", () => {
     expect(缺项({ baseUrl: "", chatModel: "", embeddingModel: "" })).toEqual([
       "base_url",
@@ -21,30 +21,6 @@ describe("AI 入口的角标", () => {
 
   it("只有空格也算没填对话模型", () => {
     expect(缺项({ ...齐, chatModel: "   " })).toEqual(["chat_model"]);
-  });
-
-  it("没配齐的角标是中性事实，不是红色警告", () => {
-    expect(徽标({ ...齐, baseUrl: "" }, null)).toBe("没配");
-    expect(徽标红(null)).toBe(false);
-  });
-
-  it("配齐了但没测过：说已配置，不许空着", () => {
-    // 空着比"没配"更糟：那枚入口会一个字都没有，看着像根本没接模型（2026-10-27 拍板）
-    expect(徽标(齐, null)).toBe("已配置");
-    expect(徽标红(null)).toBe(false);
-  });
-
-  it("测过之后角标说清这一路开到哪儿", () => {
-    expect(徽标(齐, true)).toBe("能检索");
-    expect(徽标红(true)).toBe(false);
-    // 只对话通了 ≠ 检索在用模型。从前这里统一写"通了"，是半个谎
-    expect(徽标({ ...齐, embeddingModel: "" }, true)).toBe("只对话");
-    expect(徽标(齐, false)).toBe("不通");
-    expect(徽标红(false)).toBe(true);
-  });
-
-  it("缺项时测没测都不给结论：没填齐根本不会发请求", () => {
-    expect(徽标({ ...齐, chatModel: "" }, false)).toBe("没配");
   });
 
   it("报告里的 stage 有中文名，未启用那一步也有", () => {
