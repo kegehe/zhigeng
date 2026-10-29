@@ -594,8 +594,9 @@ fn cmd_ai(path: PathBuf, 命令: AiCmd) -> Result<()> {
             }
             for r in 行 {
                 println!(
-                    "{}  {}  {}  in {} / out {}  引用 {} 个{}",
+                    "{}  {}  {}  {}  in {} / out {}  引用 {} 个{}",
                     r.id,
+                    r.task,
                     if r.ok { "采纳  " } else { "未采纳" },
                     r.model,
                     r.in_tokens,
@@ -1077,7 +1078,7 @@ fn cmd_write_bench(notes: usize, iters: usize) -> Result<()> {
         // 带 expect_hash 才走的是真路径：它多一次读盘 + 算 hash
         let base = hub.vault().note_file(rel)?.content_hash;
         let t = Instant::now();
-        hub.save_note_write(rel, &content, Some(&base))?;
+        hub.save_note_write(rel, &content, Some(&base), note_core::versions::手工)?;
         save_s.push(ms(t));
         let t = Instant::now();
         hub.index_one(rel)?;

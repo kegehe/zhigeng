@@ -456,6 +456,40 @@ mod tests {
         );
     }
 
+    /// **走真实保存路径**的那一笔：对话框点「替换」之后落盘，前像必须记成
+    /// `ai_applied`，并且连着两次各留一条——不许被 `manual` 那条 30 分钟合并窗口
+    /// 合成一条。真机实测过后果：两次 AI 改写相隔一分钟只留下一条前像，
+    /// 模型动手之前的那份原文就此取不回来。
+    #[test]
+    fn AI落的那一笔走保存路径也各留一条() {
+        let (d, mut hub) = 造库();
+        // 新建那一次没有前像可记（盘上本来没这篇）
+        hub.save_note_write("notes/甲.md", "第一版\n", None, 手工)
+            .unwrap();
+        hub.save_note_write("notes/甲.md", "第二版\n", None, AI落盘)
+            .unwrap();
+        hub.save_note_write("notes/甲.md", "第三版\n", None, AI落盘)
+            .unwrap();
+        // 同步那一半只排队，blob 与行由后台那一半落（守 8ms 红线）：手动冲一次，
+        // 等价于后台跑过一趟。真机上是 reindex 那一趟带的
+        动库(&hub, |ix| {
+            落待落(hub.vault(), ix, "notes/甲.md").unwrap();
+        });
+        let 行 = 列(&hub, "notes/甲.md");
+        let AI的: Vec<&版本行> = 行.iter().filter(|r| r.reason == AI落盘).collect();
+        assert_eq!(AI的.len(), 2, "两次 AI 落盘该各留一条：{行:?}");
+        let mut 前像: Vec<String> = AI的
+            .iter()
+            .map(|r| String::from_utf8(读回(d.path(), r).unwrap()).unwrap())
+            .collect();
+        前像.sort();
+        assert_eq!(
+            前像,
+            vec!["第一版\n".to_string(), "第二版\n".to_string()],
+            "前像必须是各自改之前那一份"
+        );
+    }
+
     /// 删掉一篇之后，版本必须还在（它活得比笔记久）。
     #[test]
     fn 笔记进了回收站版本还在() {

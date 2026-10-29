@@ -496,6 +496,9 @@ pub const 引用上限: usize = 8;
 #[serde(rename_all = "camelCase")]
 pub struct 运行 {
     pub id: String,
+    /// `ask` 还是 `rewrite`：问答与对话框改字共用这张账表，混在一起列出来就分不清
+    /// "问过什么"与"改过什么"了
+    pub task: String,
     pub model: String,
     pub ok: bool,
     pub error: Option<String>,
@@ -518,7 +521,7 @@ pub struct 运行 {
 /// 最近的若干次生成。**失败的那几次也要在**——审计页只列成功的就不是审计。
 pub fn 最近运行(conn: &Connection, limit: i64) -> Result<Vec<运行>> {
     let mut s = conn.prepare(
-        "SELECT id, model, ok, error, in_tokens, out_tokens, duration_ms, cited_blocks_json, created_at
+        "SELECT id, model, ok, error, in_tokens, out_tokens, duration_ms, cited_blocks_json, created_at, task
          FROM ai_runs ORDER BY created_at DESC LIMIT ?1",
     )?;
     let rows = s.query_map([limit], |r| {
@@ -553,6 +556,7 @@ pub fn 最近运行(conn: &Connection, limit: i64) -> Result<Vec<运行>> {
                 .unwrap_or(false),
             candidates: 解.get("candidates").and_then(|x| x.as_i64()).unwrap_or(0),
             created_at: r.get(8)?,
+            task: r.get(9)?,
         })
     })?;
     Ok(rows.filter_map(|x| x.ok()).collect())

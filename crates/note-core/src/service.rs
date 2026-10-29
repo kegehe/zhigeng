@@ -701,17 +701,22 @@ impl Hub {
     /// 改过（Obsidian、另一台机器同步、自己另开的窗口），这时**拒绝写入**而不是
     /// 静默覆盖——docs/02 §写入与外部修改 的底线。传 `None` 表示不做判定（导入、
     /// 迁移等自有顺序的批量路径用）。
+    ///
+    /// `来源` 决定这条版本前像记成什么：`手工` 走 30 分钟合并窗口与保留上限，
+    /// `AI落盘` 两条都不走。对话框点「替换」那一笔必须分开记，否则两次 AI 改写
+    /// 会被合并成一条，事后再也分不清哪句是模型写的（docs/02 §版本快照）。
     pub fn save_note_write(
         &mut self,
         rel: &str,
         content: &str,
         expect_hash: Option<&str>,
+        来源: &'static str,
     ) -> Result<String> {
         check_note_rel(rel)?;
         // 前像：落盘**之前**盘上那一份。它一次读干两件事——冲突判定要读它，
         // 版本快照要的也是它（docs/02 §写入与外部修改 的保存路径）。
         let 前像 = self.读前像(rel, expect_hash)?;
-        self.记前像(rel, crate::versions::手工, 前像);
+        self.记前像(rel, 来源, 前像);
         self.vault.write_atomic(rel, content.as_bytes())
     }
 
@@ -789,7 +794,7 @@ impl Hub {
 
     /// 落盘 + 索引一起做。CLI、测试与批量路径用；GUI 走拆分后的两步。
     pub fn save_note(&mut self, rel: &str, content: &str) -> Result<String> {
-        let hash = self.save_note_write(rel, content, None)?;
+        let hash = self.save_note_write(rel, content, None, crate::versions::手工)?;
         self.index_one(rel)?;
         Ok(hash)
     }
@@ -823,7 +828,7 @@ impl Hub {
             &crate::capture::gen_note_id(),
             &crate::capture::today(),
         );
-        self.save_note_write(&rel, &content, None)?;
+        self.save_note_write(&rel, &content, None, crate::versions::手工)?;
         Ok(rel)
     }
 
@@ -876,7 +881,7 @@ impl Hub {
         let patched = crate::capture::set_front_title(&content, &stem);
         self.note_move_file(rel, &new_rel)?;
         if patched != content {
-            self.save_note_write(&new_rel, &patched, None)?;
+            self.save_note_write(&new_rel, &patched, None, crate::versions::手工)?;
         }
         Ok(new_rel)
     }

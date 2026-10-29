@@ -59,8 +59,8 @@ export const api = {
   noteLinks: (rel: string, limit = 40) => invoke<LinkPanel>("note_links", { rel, limit }),
   /** 原文 + hash。hash 要原样带回 saveNote，服务端才判得出"磁盘这份还是不是你看到的那份" */
   readRaw: (rel: string) => invoke<NoteSource>("read_raw", { rel }),
-  saveNote: (rel: string, content: string, expectHash?: string) =>
-    invoke<string>("save_note", { rel, content, expectHash: expectHash ?? null }),
+  saveNote: (rel: string, content: string, expectHash?: string, ai = false) =>
+    invoke<string>("save_note", { rel, content, expectHash: expectHash ?? null, ai }),
   /** 返回新建笔记的相对路径。给了 `parent` 就落在那个目录里，不给 = 默认 `notes/` */
   noteCreate: (title: string, parent?: string) =>
     invoke<string>("note_create", { title, parent: parent ?? null }),

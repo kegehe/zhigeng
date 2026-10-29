@@ -640,7 +640,17 @@ export function App() {
     return docToMarkdown(liveEditor.state.doc, editDoc).slice(editDoc.frontMatter.length);
   }, [liveEditor, editDoc]);
   const aiNeedEdit = useCallback(() => setMode("inline"), []);
-  const aiApplied = useCallback(() => setInlineRev((n) => n + 1), []);
+  /**
+   * 这一笔待保存的改动里有没有"AI 点替换"落下的那一下。有，落盘时就把版本前像记成
+   * `ai_applied`：它不走 `manual` 那条 30 分钟合并窗口，事后才分得清哪句是模型写的
+   * （实测两次 AI 改写相隔一分钟，前像被合成一条，原始那份就取不回来了）。
+   * 防抖窗口里用户又手改了同一篇，那一笔仍按 AI 记——前像只有一份，不假装拆得开。
+   */
+  const AI落笔待存 = useRef(false);
+  const aiApplied = useCallback(() => {
+    AI落笔待存.current = true;
+    setInlineRev((n) => n + 1);
+  }, []);
   const aiNotice = useCallback((文: string) => setFlash(文), []);
   /** 面包屑：把当前篇的 rel 拆成 目录/…/文件名（反斜杠统一成正斜杠，与 tree.ts 同一口径） */
   const 路径段 = selected ? selected.rel.replace(/\\/g, "/").split("/") : [];
@@ -854,12 +864,21 @@ export function App() {
          */
         setInlineRev(0);
         setSaveState("clean");
+        // 没东西要存 = 那一次 AI 落笔没进盘（多半被 Ctrl+Z 撤掉了），标记得跟着清
+        AI落笔待存.current = false;
         return true;
       }
       setSaveState("saving");
       try {
-        const h = await api.saveNote(selected.rel, md, force ? undefined : baseHash);
+        const h = await api.saveNote(
+          selected.rel,
+          md,
+          force ? undefined : baseHash,
+          AI落笔待存.current,
+        );
         setBaseHash(h);
+        // 只在真落成功之后清：冲突/出错时那一笔还挂在文档里，下次重试仍算 AI 落的
+        AI落笔待存.current = false;
         setDraft(md);
         setSavedDraft(md);
         setInlineRev(0);
@@ -2412,7 +2431,7 @@ export function App() {
                   <p className="mt-2 max-w-2xl text-sm text-fg-2">
                     答案只根据你的笔记生成，并标出来自哪一篇；找不到依据时会直接说没有。
                     发给模型的只有检索到的片段，不是整篇笔记。
-                    要改正文：回到文档里选中一段文字，点工具栏上的 ✨ 就能改这一段。
+                    要改正文：回到文档里，用底部那条 AI 对话框——选中一段它就改那一段，不选就改光标所在的那一段。
                   </p>
                   <div className="mt-4 flex max-w-2xl gap-2">
                     <input

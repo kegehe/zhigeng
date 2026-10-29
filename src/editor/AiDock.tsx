@@ -29,6 +29,9 @@ import { 准备目标, 替换选区, 随事务, type 锚 } from "./rewrite";
 type 轮 = {
   id: number;
   范围: "选区" | "本段";
+  /** 发起那一刻目标有多长。落笔之后 `目标` 会被换成新文（它还要跟着后续事务平移），
+   *  历史条目上那个"N 字"不许跟着变——它记的是"当时让模型改了多长一段" */
+  目标字数: number;
   问: string;
   目标: 锚;
   答: string;
@@ -296,6 +299,7 @@ export const AiDock = memo(function AiDock({
         {
           id,
           范围: r.范围,
+          目标字数: 字数(r.锚.text),
           问: 令,
           目标: r.锚,
           答: "",
@@ -437,7 +441,7 @@ export const AiDock = memo(function AiDock({
               <div className="ai-turn" key={t.id}>
                 <div className="ai-turn-q">
                   <span className="ai-turn-tag">
-                    {t.范围} {字数(t.目标.text)} 字
+                    {t.范围} {t.目标字数} 字
                   </span>
                   {t.问}
                 </div>

@@ -43,7 +43,11 @@ function Clear-Port {
   param([int]$Port, [switch]$BestEffort)
   foreach ($ownedPid in (Get-PortOwners -Port $Port)) {
     $proc = Get-Process -Id $ownedPid -ErrorAction SilentlyContinue
-    $name = if ($proc) { $proc.ProcessName } else { '?' }
+    # 取完连接快照到查名字之间它会退出（-Stop 正在收尾时最常见）。这时端口上那个
+    # "持有者"已经不存在：既不有东西要杀，也不该报成"被 ? 占用"吓用户——下面那圈
+    # 等待会自己确认端口空了
+    if (-not $proc) { continue }
+    $name = $proc.ProcessName
     # **只认本项目的 dev 进程**：只按端口一刀切，会杀掉别人的 dev server / Docker 端口映射 /
     # ssh 隧道。vite 配 strictPort 的本意就是"被占用时报错，而不是替用户决定杀谁"
     if (@('node', 'pnpm', 'cargo', 'zhigeng') -notcontains $name) {

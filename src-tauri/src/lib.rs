@@ -482,6 +482,9 @@ fn vault_open(
 
 /// 写命令一律"落盘同步 + 索引后台"。返回即代表内容已经在磁盘上，
 /// 索引晚一点才追上——前端收到 `note://indexed` 再校正列表与正文。
+///
+/// `ai` 为真表示这一笔来自对话框点「替换」：版本前像记成 `ai_applied`，
+/// 于是不进 `manual` 那条 30 分钟合并窗口，事后查得到哪一句是模型落的。
 #[tauri::command]
 fn save_note(
     app: AppHandle,
@@ -489,9 +492,19 @@ fn save_note(
     rel: String,
     content: String,
     expect_hash: Option<String>,
+    ai: bool,
 ) -> Result<String, WriteErr> {
     let hash = with_hub_write(&state, |h| {
-        h.save_note_write(&rel, &content, expect_hash.as_deref())
+        h.save_note_write(
+            &rel,
+            &content,
+            expect_hash.as_deref(),
+            if ai {
+                note_core::versions::AI落盘
+            } else {
+                note_core::versions::手工
+            },
+        )
     })?;
     reindex_async(app, vec![rel.clone()], move |vault, index| {
         reindex_note(vault, index, &rel)

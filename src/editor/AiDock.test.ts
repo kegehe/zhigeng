@@ -198,6 +198,35 @@ describe("底部 AI 对话框", () => {
     拆();
   });
 
+  it("落笔之后仍写发起时的字数：回稿多长都不许改写那条历史", async () => {
+    // 真机照出来的一条：`目标` 在落笔时会被换成回稿（它还要跟着后续事务平移），
+    // 而标签原先是从 `目标.text` 现算的——于是"选区 16 字"在替换之后自己变成了"选区 22 字"，
+    // 回看时那个数已经不是用户当时圈住的那一段了
+    const editor = createTestEditor(篇("第一段文字"));
+    编辑器们.push(editor);
+    editor.commands.setTextSelection({ from: 1, to: 6 });
+    vi.mocked(api.aiRewrite).mockResolvedValue({
+      text: "换过的一共七个字",
+      inTokens: 1,
+      outTokens: 1,
+      ms: 5,
+      model: "假模型",
+      ctxChars: 0,
+    });
+    const { 根, 拆 } = await 挂(editor);
+    await 点(根.querySelector('button[aria-label="展开 AI 编辑"]')!);
+    await 打字(根.querySelector(".ai-dock-input") as HTMLTextAreaElement, "换个说法");
+    await 点(根.querySelector('.ai-dock-foot button[aria-label="发送"]')!);
+    await act(async () => {});
+    expect(根.querySelector(".ai-turn-tag")!.textContent).toContain("选区 5 字");
+    await 点(根.querySelector(".ai-turn-actions button")!);
+    await act(async () => {});
+    // 回稿（8 字）已经进了正文，那条历史仍该说当时圈住的是 5 字
+    expect(editor.state.doc.textContent).toContain("换过的一共七个字");
+    expect(根.querySelector(".ai-turn-tag")!.textContent).toContain("选区 5 字");
+    拆();
+  });
+
 
 
   it("正文只有空白时不说「私密篇」——后端本来就把空白背景当没带", async () => {

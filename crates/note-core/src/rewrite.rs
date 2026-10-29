@@ -194,14 +194,21 @@ fn 生成(
     上下文: Option<&str>,
     发问者: &mut impl 发问,
     播: &mut dyn FnMut(事件),
-) -> Result<(String, 用量)> {
-    let (粗, 量) = 发问者
+) -> (Result<String>, 用量) {
+    let (粗, 量) = match 发问者
         .流着问(&组装(指令, 原文, 上下文), &mut |块| match 块 {
             ai::流::答案(字) => 播(事件::文本(字)),
             ai::流::思考(字) => 播(事件::思考(字)),
         })
-        .map_err(|e| ai::翻不可用(e, 正文没动))?;
-    Ok((洗回稿(&粗)?, 量))
+        .map_err(|e| ai::翻不可用(e, 正文没动))
+    {
+        Ok(成了) => 成了,
+        // 这一趟没跑完，确实没花钱
+        Err(e) => return (Err(e), 用量::default()),
+    };
+    // 洗回稿拒收（多行 / 空 / 超长）时**用量必须跟着带出去**：模型答完了、钱也花了，
+    // 账上写 0/0 等于把这笔开销抹掉（真机照出来的：逼模型回三行那趟 in/out 都是 0）
+    (洗回稿(&粗), 量)
 }
 
 /// 这一篇标了隐私位吗（`ai.private` / `ai.no_ai`）。**整篇背景要按它收口**：
@@ -245,7 +252,7 @@ pub fn 改写流(
         })?
         .to_string();
     let mut 发问者 = 真发问 { cfg: &cfg };
-    let 结果 = 生成(&原文, &指令, 背景, &mut 发问者, 播);
+    let (回稿, 量) = 生成(&原文, &指令, 背景, &mut 发问者, 播);
     let ms = 起.elapsed().as_millis() as u64;
     if let Err(e) = 记账(
         conn,
@@ -253,14 +260,15 @@ pub fn 改写流(
         预设,
         原文.chars().count(),
         ctx_chars,
-        &结果,
+        &回稿,
+        量,
         ms,
     ) {
         // 与问答那条同一规矩：钱花完了、回稿也在手上，此时报错等于把结果换成一句失败；
         // 但绝不静默——审计对不上正是从"写不进去也不说"开始的
         tracing::warn!("ai_runs 没落进去（{e}），回稿照给");
     }
-    let (文本, 量) = 结果?;
+    let 文本 = 回稿?;
     Ok(改写 {
         text: 文本,
         in_tokens: 量.in_tokens,
@@ -272,6 +280,7 @@ pub fn 改写流(
 }
 
 /// 落一笔账。`task='rewrite'`、`trigger='user'`；**失败那趟也落**（ok=0 + 错误原文）。
+/// `量` 单独传进来：回稿被洗回稿拒收那一趟钱照样花，账上就得有那个数。
 /// `cited_blocks_json` 里只放预设与字数，**不放选区文字**。
 fn 记账(
     conn: &Connection,
@@ -279,7 +288,8 @@ fn 记账(
     预设: &str,
     入字: usize,
     背景字: usize,
-    结果: &Result<(String, 用量)>,
+    结果: &Result<String>,
+    量: 用量,
     ms: u64,
 ) -> Result<()> {
     let id = format!("r-{}", &crate::capture::gen_note_id()[2..]);
@@ -287,10 +297,11 @@ fn 记账(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let (ok, 入, 出, 错, 出字) = match 结果 {
-        Ok((文, 量)) => (true, 量.in_tokens, 量.out_tokens, None, 文.chars().count()),
-        Err(e) => (false, 0, 0, Some(e.to_string()), 0),
+    let (ok, 错, 出字) = match 结果 {
+        Ok(文) => (true, None, 文.chars().count()),
+        Err(e) => (false, Some(e.to_string()), 0),
     };
+    let (入, 出) = (量.in_tokens, 量.out_tokens);
     let 预设: String = 预设.chars().take(32).collect();
     let 预设 = if 预设.trim().is_empty() {
         "custom".to_string()
@@ -364,10 +375,10 @@ mod tests {
             收到: 收到.clone(),
         };
         let mut 播 = Vec::new();
-        let (文, 量) = 生成("原文在这里", "润色", None, &mut 假, &mut |e| {
+        let (回稿, 量) = 生成("原文在这里", "润色", None, &mut 假, &mut |e| {
             播.push(e)
-        })
-        .unwrap();
+        });
+        let 文 = 回稿.unwrap();
         assert_eq!(文, "润色后");
         assert_eq!(播, vec![事件::文本("润色后".into())]);
         assert_eq!(量.in_tokens, 9);
@@ -407,7 +418,7 @@ mod tests {
             收到: 收到.clone(),
         };
         let 全文 = format!("开头{}结尾", "字".repeat(上下文上限));
-        let _ = 生成("这一句", "润色", Some(&全文), &mut 假, &mut |_| {}).unwrap();
+        let _ = 生成("这一句", "润色", Some(&全文), &mut 假, &mut |_| {}).0.unwrap();
         let 请求 = 收到.borrow();
         assert!(
             请求.contains("整篇正文（只作为背景"),
@@ -454,16 +465,15 @@ mod tests {
     fn 成功与失败都落账且账里没有正文() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::schema::SCHEMA).unwrap();
-        let 好: Result<(String, 用量)> = Ok((
-            "回稿".into(),
-            用量 {
-                in_tokens: 7,
-                out_tokens: 3,
-            },
-        ));
-        记账(&conn, "m1", "polish", 4, 120, &好, 12).unwrap();
-        let 坏: Result<(String, 用量)> = Err(Error::Invalid("网络断了".into()));
-        记账(&conn, "m1", "custom", 4, 0, &坏, 30).unwrap();
+        let 量 = 用量 {
+            in_tokens: 7,
+            out_tokens: 3,
+        };
+        let 好: Result<String> = Ok("回稿".into());
+        记账(&conn, "m1", "polish", 4, 120, &好, 量, 12).unwrap();
+        // 网络那一趟根本没跑完：确实没花钱，账上就是 0——这跟"花了但被拒收"是两件事
+        let 坏: Result<String> = Err(Error::Invalid("网络断了".into()));
+        记账(&conn, "m1", "custom", 4, 0, &坏, 用量::default(), 30).unwrap();
 
         let mut s = conn
             .prepare(
@@ -498,6 +508,34 @@ mod tests {
         assert!(行[1].4.as_deref().unwrap_or("").contains("网络断了"));
     }
 
+    /// 回稿被洗回稿**拒收**那一趟，账上仍要记着花了多少：模型答完了、钱也花了，
+    /// 写 0/0 等于把这笔开销从账上抹掉。真机照出来的——逼模型"务必分成三行写"，
+    /// 界面正确地说"这次回稿没有采用"，而 `note ai runs` 给的是 `in 0 / out 0`。
+    #[test]
+    fn 拒收的那一趟账上仍记着花了多少() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::schema::SCHEMA).unwrap();
+        let 收到 = Rc::new(RefCell::new(String::new()));
+        let mut 假 = 假模型 {
+            脚本: vec!["第一行\n", "第二行\n"],
+            收到: 收到.clone(),
+        };
+        let (回稿, 量) = 生成("原句", "分成两行写", None, &mut 假, &mut |_| {});
+        assert!(回稿.is_err(), "多行回稿必须被拒收");
+        assert_eq!(量.in_tokens, 9, "拒收不许把用量一起丢掉");
+        assert_eq!(量.out_tokens, 4);
+        记账(&conn, "m1", "custom", 2, 0, &回稿, 量, 20).unwrap();
+        let (ok, 入, 出): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT ok, in_tokens, out_tokens FROM ai_runs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(ok, 0, "账上要看得出这一趟没被采纳");
+        assert_eq!((入, 出), (9, 4), "钱花了就得记账上");
+    }
+
     /// M2 ③ 的改写侧：**网络那头没反应要说成"模型暂时不可用"**，
     /// 而且要紧的那句是"正文一个字都没动"——这一档不静默改写（docs/04 §0），
     /// 失败时用户最该知道的就是"没改成"。
@@ -516,7 +554,9 @@ mod tests {
             }
         }
         let mut 断 = 断了;
-        let 错 = 生成("原文在这里", "润色", None, &mut 断, &mut |_| {}).unwrap_err();
+        let 错 = 生成("原文在这里", "润色", None, &mut 断, &mut |_| {})
+            .0
+            .unwrap_err();
         assert!(matches!(错, Error::Unavailable(_)), "{错:?}");
         let 话 = 错.to_string();
         assert!(话.contains("模型暂时不可用"), "{话}");
