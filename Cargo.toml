@@ -11,8 +11,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-authors = ["note_service"]
-repository = "note_service"
+authors = ["知更"]
 
 [workspace.dependencies]
 md-kernel = { path = "crates/md-kernel" }

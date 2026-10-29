@@ -254,9 +254,23 @@ pub fn 端点(base: &str) -> std::result::Result<String, String> {
     Ok(瘦.to_string())
 }
 
-/// 404 时那句"要不要试试末尾加 /v1"的判据。猜了就要说出来，绝不悄悄改用户填的地址。
+/// 末尾没带 `/v1` 就该提那一手。猜了就要说出来，绝不悄悄改用户填的地址。
+fn 该提_v1(base: &str) -> bool {
+    !base.ends_with("/v1")
+}
+
+/// 那句提示的原文。带状态码与不带状态码两条失败路都要说同一句，免得一边说了另一边没说。
+fn 补_v1提示(base: &str) -> &'static str {
+    if 该提_v1(base) {
+        "｜这个地址末尾可能要加 /v1（例如 https://api.openai.com/v1）"
+    } else {
+        ""
+    }
+}
+
+/// 404 时那句"要不要试试末尾加 /v1"的判据。
 fn 建议补_v1(status: u16, base: &str) -> bool {
-    status == 404 && !base.ends_with("/v1")
+    status == 404 && 该提_v1(base)
 }
 
 /// 把对方的错误原文压成一行能读的（很多 provider 回的是 JSON，里面那句才是人话）。
@@ -390,7 +404,7 @@ fn 打(
                 stage: 名.into(),
                 ok: false,
                 ms: 起.elapsed().as_millis() as u64,
-                detail: format!("{url} 连不上：{e}{尾}"),
+                detail: format!("{url} 连不上：{e}{尾}{}", 补_v1提示(base)),
             }
         }
     };
@@ -538,7 +552,7 @@ pub fn 列模型(cfg: &AiConfig) -> Result<发现> {
     };
     let 答 = 请
         .send()
-        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}")))?;
+        .map_err(|e| Error::Invalid(format!("{url} 连不上：{e}{}", 补_v1提示(&base))))?;
     let 状 = 答.status();
     let 文 = 答
         .text()
@@ -617,7 +631,7 @@ pub fn embed(cfg: &AiConfig, 文本: &[String]) -> Result<Vec<Vec<f32>>> {
     };
     let 答 = 请
         .send()
-        .map_err(|e| Error::Unavailable(format!("{url} 连不上：{e}")))?;
+        .map_err(|e| Error::Unavailable(format!("{url} 连不上：{e}{}", 补_v1提示(&base))))?;
     let 状 = 答.status();
     let 文 = 答.text().unwrap_or_default();
     if !状.is_success() {
@@ -925,6 +939,8 @@ fn 发一次(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Invalid("没填对话模型名".into()))?;
     let url = 地址(cfg)?;
+    // 提示要看的是用户填的 base，不是拼完的 url
+    let 基 = 基址(cfg)?;
     let 客 = if 流式 {
         流式客户端()
     } else {
@@ -937,7 +953,7 @@ fn 发一次(
         None => 请,
     };
     请.send()
-        .map_err(|e| Error::Unavailable(format!("{url} 连不上：{e}")))
+        .map_err(|e| Error::Unavailable(format!("{url} 连不上：{e}{}", 补_v1提示(&基))))
 }
 
 /// 非 2xx 翻成一句人话；2xx 把响应**原样还回来**给调用方读。
@@ -1247,6 +1263,51 @@ mod tests {
         assert!(
             !建议补_v1(401, "https://api.deepseek.com"),
             "401 是鉴权问题，与路径无关"
+        );
+    }
+
+    #[test]
+    fn 连不上拿不到状态码时也提那一手() {
+        // 实测的坑：有网关对错误路径的 POST 不回 404，而是挂到超时再断连（conflux-api.work
+        // 少写 /v1 时 21 秒后 RST）。只盯 404 的话，用户看到的就只剩"连不上"，
+        // 于是反复去查那个其实没问题的 Key。
+        let 报 = probe(&AiConfig {
+            base_url: Some("http://127.0.0.1:9".into()),
+            chat_model: Some("m".into()),
+            embedding_model: None,
+            ..Default::default()
+        });
+        let 步 = 报
+            .steps
+            .iter()
+            .find(|s| s.stage == "chat")
+            .expect("填了对话模型就必须有这一步");
+        assert!(!步.ok, "端口 9 是 discard，这一步必须红");
+        assert!(
+            步.detail.contains("末尾可能要加 /v1"),
+            "没有状态码更要给这一手: {}",
+            步.detail
+        );
+    }
+
+    #[test]
+    fn 连不上但地址已经带_v1_就不许再提() {
+        let 报 = probe(&AiConfig {
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            chat_model: Some("m".into()),
+            embedding_model: None,
+            ..Default::default()
+        });
+        let 步 = 报
+            .steps
+            .iter()
+            .find(|s| s.stage == "chat")
+            .expect("填了对话模型就必须有这一步");
+        assert!(!步.ok, "同样连不上，这一步照样红");
+        assert!(
+            !步.detail.contains("末尾可能要加 /v1"),
+            "已经带 v1 还让人加一遍，就是把人往沟里再推一次: {}",
+            步.detail
         );
     }
 
