@@ -1528,9 +1528,9 @@
     white-space: nowrap;
   }
   /*
-   * 标题栏品牌位（2026-10-27，铜版画图标进 UI 那一档）：
-   * 徽标 + 加粗字距字标 + 版本号。img 上 pointer-events:none，
-   * 让按住图标也能拖窗口（拖拽区是 header 的 data-tauri-drag-region）。
+   * 标题栏品牌位（2026-10-27，铜版画图标进 UI 那一档）：徽标 + 加粗字距字标。
+   * 版本号原先挂在字标右边，2026-10-30 撤了——同一串数字在设置页「关于」里已经说过了。
+   * img 上 pointer-events:none，让按住图标也能拖窗口（拖拽区是 header 的 data-tauri-drag-region）。
    */
   .brand {
     display: flex;
@@ -1549,46 +1549,6 @@
     font-weight: 700;
     letter-spacing: 0.08em;
     color: var(--text-primary);
-  }
-  .brand .brand-ver {
-    font-size: var(--text-xs);
-    /* 版本号是真内容，不走 --text-disabled（[06] §4：豁免位不得用在真内容上）；
-       与侧栏品牌头副标同一个档，两处口径一致 */
-    color: var(--text-secondary);
-  }
-  /*
-   * 侧栏品牌头：大徽标 + 字标 + 一句定位副标。
-   * 这是"点击看关于"的自然落点（那一档还没做，先只放静态品牌区）。
-   */
-  .brand-head {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-2) var(--space-3);
-    margin: 0 0 var(--space-2);
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  .brand-head img {
-    width: var(--icon-brand-side);
-    height: var(--icon-brand-side);
-    flex-shrink: 0;
-    pointer-events: none;
-    user-select: none;
-  }
-  .brand-head .brand-head-name {
-    font-size: var(--text-base);
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    color: var(--text-primary);
-    line-height: 1.3;
-  }
-  .brand-head .brand-head-sub {
-    font-size: var(--text-xs);
-    color: var(--text-secondary);
-    line-height: 1.35;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   /*
    * 侧栏选中行的第二信号：行左缘一条 accent 竖标（书签）。

@@ -1734,7 +1734,6 @@ export function App() {
         <span className="brand" data-tauri-drag-region>
           <img src="/zhigeng.png" alt="" draggable={false} />
           <span className="brand-name">知更</span>
-          {info?.version ? <span className="brand-ver">{info.version}</span> : null}
         </span>
         <span className="title" data-tauri-drag-region>
           {info?.vaultPath ?? ""}
@@ -1785,17 +1784,6 @@ export function App() {
       ) : (
         <div className="flex min-h-0 flex-1">
           <aside className="flex w-72 shrink-0 flex-col border-r border-line bg-raised">
-            {/* 品牌头（2026-10-27）：大徽标 + 字标 + 一句定位。纯展示，
-                以后"点击看关于"挂这里；现在不放可点元素，避免和下面搜索框抢焦点序 */}
-            <div className="brand-head">
-              <img src="/zhigeng.png" alt="" draggable={false} />
-              <div className="min-w-0">
-                <div className="brand-head-name">知更</div>
-                <div className="brand-head-sub">
-                  本地优先知识库{info?.version ? ` · ${info.version}` : ""}
-                </div>
-              </div>
-            </div>
             <div className="flex gap-2 p-2">
               <input
                 className="min-w-0 flex-1 rounded-md border border-line bg-page px-2 py-1 text-sm focus-visible:border-accent"
