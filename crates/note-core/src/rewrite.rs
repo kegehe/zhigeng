@@ -142,8 +142,12 @@ pub fn 洗回稿(粗: &str) -> Result<String> {
         文 = 文.trim();
     }
     if 文.is_empty() {
-        return Err(Error::Invalid(
-            "模型回了个空。这次没有可替换的文字——再试一次".into(),
+        // 真机取证：要求写"把这段清除掉、删干净"时，对方想完之后的答案就是一个空串
+        // （finish_reason=stop），因为它照我们的系统提示"只输出改写后的那一段"办事——
+        // 全删了就没有那一段。这不是网络问题，是**这一档的本事到边界了**：它只会把一段
+        // 换成另一段，删不掉东西。这句实话只能由改写这层说，`ai.rs` 不知道这一档能不能删。
+        return Err(Error::EmptyAnswer(
+            "对方回了一个空：没有可替换的文字，正文一个字都没动。这一档只会把一段换成另一段，删不掉东西——要清掉这段，选中它按 Delete。".into(),
         ));
     }
     if 文.contains('\n') || 文.contains('\r') {
@@ -418,7 +422,9 @@ mod tests {
             收到: 收到.clone(),
         };
         let 全文 = format!("开头{}结尾", "字".repeat(上下文上限));
-        let _ = 生成("这一句", "润色", Some(&全文), &mut 假, &mut |_| {}).0.unwrap();
+        let _ = 生成("这一句", "润色", Some(&全文), &mut 假, &mut |_| {})
+            .0
+            .unwrap();
         let 请求 = 收到.borrow();
         assert!(
             请求.contains("整篇正文（只作为背景"),
@@ -442,7 +448,16 @@ mod tests {
     fn 多行与空回稿都不收() {
         let 多行 = 洗回稿("第一段\n第二段").unwrap_err().to_string();
         assert!(多行.contains("多行"), "{多行}");
-        assert!(洗回稿("").is_err());
+        // 空回稿的实话要说**这一档的本事边界**，不许推给网络：真机那次"把这段清除掉"
+        // 就是对方答了个空，而原先的话术是"模型回了个空……再试一次"——再试一次还是空
+        let 空 = 洗回稿("").unwrap_err().to_string();
+        assert!(空.contains("删不掉"), "要说清删不掉这件事：{空}");
+        assert!(空.contains("正文一个字都没动"), "{空}");
+        assert!(
+            !空.contains("再试一次"),
+            "把用户推向同一个空答案不算建议：{空}"
+        );
+        assert!(!空.starts_with("输入不合法"), "这不是用户写错了什么：{空}");
         assert!(洗回稿("   ").is_err());
     }
 
@@ -526,11 +541,9 @@ mod tests {
         assert_eq!(量.out_tokens, 4);
         记账(&conn, "m1", "custom", 2, 0, &回稿, 量, 20).unwrap();
         let (ok, 入, 出): (i64, i64, i64) = conn
-            .query_row(
-                "SELECT ok, in_tokens, out_tokens FROM ai_runs",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
+            .query_row("SELECT ok, in_tokens, out_tokens FROM ai_runs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .unwrap();
         assert_eq!(ok, 0, "账上要看得出这一趟没被采纳");
         assert_eq!((入, 出), (9, 4), "钱花了就得记账上");

@@ -752,7 +752,7 @@ pub fn chat流(
         return Ok((全文, 量));
     }
     let mut 读 = std::io::BufReader::new(答);
-    let (全文, 量, 想了, 见到结束) = 收流(&mut 读, 每块)?;
+    let (全文, 量, 想了, 见到结束, 收尾) = 收流(&mut 读, 每块)?;
     if 全文.trim().is_empty() && 想了 == 0 {
         // **一个字都没收到 = 对方多半根本不支持 stream**（真机照出来的：这家网关会在流中途
         // 直接 reset 连接）。这时用非流式再问一次——用户要的是答案，不是我们的实现偏好。
@@ -763,11 +763,20 @@ pub fn chat流(
         return Ok((全文, 量));
     }
     if 全文.trim().is_empty() {
-        // 只回了思考过程 = 被截断或对方把答案吞了。这种**不**自动重试：
-        // 它已经想了那么久，再打一趟是双倍的钱与双倍的等待，交回用户决定
-        return Err(Error::Invalid(format!(
-            "对方只回了思考过程（{想了} 字），没有答案——多半是被超时截断了。试着把问题问短一点，或在设置里换一家更快的模型"
-        )));
+        // 空答案分两类，只有第二类算传输失败：
+        // - **对方答完了，答的就是空**（收到 [DONE] 或 finish_reason=stop）：这不是我们
+        //   这层能判的事——空对改写是"没有可替换的文字"，对问答是"没给结论"，两层的下一步
+        //   不一样。所以把空串带出去交给调用方，顺带把已经到手的 usage 一起带走：在这儿报错
+        //   等于把这笔开销从账上抹掉（同 rewrite.rs 那条"拒收也要记账上"）。
+        // - **没答完就断了**：截断，报。判据仍然只有看得见的那两条。
+        if 空答案算截断(见到结束, 收尾.as_deref()) {
+            return Err(Error::EmptyAnswer(空答案的实话(
+                想了,
+                见到结束,
+                收尾.as_deref(),
+            )));
+        }
+        return Ok((String::new(), 量));
     }
     if let Some(错) = 缺收尾(&全文, 想了, 见到结束) {
         return Err(Error::Invalid(错));
@@ -777,14 +786,17 @@ pub fn chat流(
 
 /// 把一条 SSE 流读到 EOF 或 `[DONE]`。**EOF 不在这里判完整**：正常收尾与半路断开
 /// 在 `read_line` 眼里都是 0，区别只在 `见到结束`——交给 `缺收尾` 判。
+/// 最后那个 `收尾` 是对方自己报的 `finish_reason`（`stop` / `length` / `content_filter`…），
+/// 它是"为什么没答案"的唯一一手证据，我们只转述、不推断。
 fn 收流(
     读: &mut impl std::io::BufRead,
     每块: &mut dyn FnMut(流),
-) -> Result<(String, 用量, usize, bool)> {
+) -> Result<(String, 用量, usize, bool, Option<String>)> {
     let mut 全文 = String::new();
     let mut 想了 = 0usize;
     let mut 量 = 用量::default();
     let mut 见到结束 = false;
+    let mut 收尾: Option<String> = None;
     let mut 行 = String::new();
     loop {
         行.clear();
@@ -803,7 +815,15 @@ fn 收流(
                 想了 += t.chars().count();
                 每块(流::思考(t));
             }
-            流块::用量(u) => 量 = u,
+            流块::用量 {
+                量: u, 尾: 尾块
+            } => {
+                量 = u;
+                if let Some(t) = 尾块 {
+                    收尾 = Some(t);
+                }
+            }
+            流块::收尾(r) => 收尾 = Some(r),
             流块::结束 => {
                 见到结束 = true;
                 break;
@@ -811,7 +831,44 @@ fn 收流(
             流块::忽略 => {}
         }
     }
-    Ok((全文, 量, 想了, 见到结束))
+    Ok((全文, 量, 想了, 见到结束, 收尾))
+}
+
+/// 空答案要不要在**传输层**报错。真机取证到的形状是：思考几百字、`content` 一直空着、
+/// `finish_reason=stop`、然后 `[DONE]`——那是对方答完了、答的是空，不是我们没收到。
+/// 这种交给调用方判（改写说"没有可替换的文字"，问答说"没给结论"），这里只拦"没走完"的。
+fn 空答案算截断(见到结束: bool, 收尾: Option<&str>) -> bool {
+    match 收尾 {
+        // 对方自己说"是被输出长度截的"——后面就算跟了 `[DONE]` 也是截断，不是答完
+        Some("length") => true,
+        Some("stop") => false,
+        _ => !见到结束,
+    }
+}
+
+/// 没答完的空答案那句实话。只按看见过的证据分，**没有证据就不下结论**：
+/// - 对方报了 `length` → 是被它的输出长度上限截的，与我们的超时无关；
+/// - 报了别的 `finish_reason`（如 `content_filter`）→ 它自己收的尾，可答案还是空的；
+/// - 两条都没有 → 流半路断了。这才叫截断，而且截在哪我们不知道。
+///
+/// 原先那一句"多半是被超时截断了"是把猜测当结论——真机那一趟 20.8 秒，
+/// 而流式的超时上限是 180 秒，超时根本没发生过。
+fn 空答案的实话(想了: usize, 见到结束: bool, 收尾: Option<&str>) -> String {
+    let 头 = format!("对方想了 {想了} 字，一个字答案都没给");
+    match 收尾 {
+        Some("length") => format!(
+            "{头}，而对方自己报的 finish_reason=length——被它的输出长度上限截断了，不是我们的超时。这一趟没有答案。"
+        ),
+        Some(其他) => format!(
+            "{头}，而且这一趟是正常收尾的（finish_reason={其他}）。它没答上来，不是网络断了——换个说法再问，或者自己改。"
+        ),
+        None if 见到结束 => {
+            format!("{头}，而且流收到了 [DONE] 才算走完。它没答上来，不是网络断了——换个说法再问，或者自己改。")
+        }
+        None => format!(
+            "{头}，而且没收到 [DONE] 流就断了——这一趟确实是被截断的，截在哪我们不知道。再试一次。"
+        ),
+    }
 }
 
 /// 有字但没收到 `[DONE]`：这是半路断开的流，不是完整答案。
@@ -839,7 +896,16 @@ pub enum 流块 {
     /// **思考过程**的字（DeepSeek-R1 一类会先吐 `reasoning_content`，`content` 一直空着）。
     /// 它不是答案：不进 `答复.text`、不进引用判定，只能当进度显示
     思考(String),
-    用量(用量),
+    /// 计账块。有些网关把 `usage` 与 `finish_reason` 塞进同一行（空 `delta` 的收尾块
+    /// 顺带计账，OpenAI 兼容壳里存在这种形状），所以用量块要**顺带**把收尾带出来——
+    /// 只报其一都会丢证据：丢 usage 等于把这一趟的账抹掉，丢收尾等于让
+    /// "为什么没答案"失明（见 `空答案算截断`）。
+    用量 {
+        量: 用量,
+        尾: Option<String>,
+    },
+    /// 对方给这一趟定的性质（`choices[0].finish_reason`）。空答案时它是唯一的判据
+    收尾(String),
     结束,
     忽略,
 }
@@ -877,7 +943,26 @@ pub fn 解流行(行: &str) -> 流块 {
     };
     let 增量 = 取("content");
     let 思 = 取("reasoning_content");
-    let 量 = 解.get("usage").map(|u| 用量 {
+    // 一行只报一件事，而**字最要紧**。原先 usage 排在字前面，于是每个块都带
+    // `"usage": null` 的网关（OpenAI 兼容壳里很常见）会把带字的块整块吞成"用量"：
+    // 全文与思考双双归零，看起来就像"这家根本不支持流式"。null 不算用量。
+    if !思.is_empty() {
+        return 流块::思考(思);
+    }
+    if !增量.is_empty() {
+        return 流块::文本(增量);
+    }
+    // 收尾通常在空 `delta` 的最后一块上。先取出来再看这行带不带 usage：两样同行时
+    // 由用量块一并带走，**不许互相吞**——收尾排在用量后面会让用量吞掉收尾，
+    // 排在前面则反过来，都是把一手证据弄丢一份。
+    let 尾 = 解
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str())
+        .unwrap_or("")
+        .to_string();
+    let 量 = 解.get("usage").filter(|u| !u.is_null()).map(|u| 用量 {
         in_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
         out_tokens: u
             .get("completion_tokens")
@@ -885,15 +970,15 @@ pub fn 解流行(行: &str) -> 流块 {
             .unwrap_or(0) as usize,
     });
     if let Some(u) = 量 {
-        return 流块::用量(u);
+        return 流块::用量 {
+            量: u,
+            尾: (!尾.is_empty()).then(|| 尾.clone()),
+        };
     }
-    if !思.is_empty() {
-        return 流块::思考(思);
+    if !尾.is_empty() {
+        return 流块::收尾(尾);
     }
-    if 增量.is_empty() {
-        return 流块::忽略;
-    }
-    流块::文本(增量)
+    流块::忽略
 }
 
 fn 基址(cfg: &AiConfig) -> Result<String> {
@@ -1061,9 +1146,44 @@ mod tests {
         match 解流行(
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":7}}",
         ) {
-            块::用量(u) => assert_eq!((u.in_tokens, u.out_tokens), (12, 7)),
+            块::用量 { 量: u, 尾 } => {
+                assert_eq!((u.in_tokens, u.out_tokens), (12, 7));
+                assert_eq!(尾, None, "这行没有 finish_reason，就不许编一个出来");
+            }
             其他 => panic!("该认出用量，来了 {其他:?}"),
         }
+        // 有些网关把收尾与计账塞进同一行（空 `delta` + finish_reason + usage）。
+        // 两样都必须活下来：丢收尾，"为什么没答案"就失明；丢 usage，这趟的账就抹了
+        match 解流行(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}",
+        ) {
+            块::用量 { 量: u, 尾 } => {
+                assert_eq!((u.in_tokens, u.out_tokens), (1, 2));
+                assert_eq!(
+                    尾.as_deref(),
+                    Some("length"),
+                    "同行的 finish_reason 不许被用量吞掉"
+                );
+            }
+            其他 => panic!("该认出带收尾的用量，来了 {其他:?}"),
+        }
+        // 收尾块：`delta` 是空的，只有 finish_reason。它是"为什么没答案"的判据
+        assert!(
+            matches!(
+                解流行("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}"),
+                块::收尾(t) if t == "stop"
+            ),
+            "finish_reason 要认下来"
+        );
+        // 有些网关每个块都带 `"usage": null`。它**不是**用量：认了就是把带字的块整块吞掉，
+        // 全文与思考双双归零，看起来像"这家不支持流式"（真机照过的形状）
+        assert!(
+            matches!(
+                解流行("data: {\"choices\":[{\"delta\":{\"content\":\"甲\"}}],\"usage\":null}"),
+                块::文本(t) if t == "甲"
+            ),
+            "usage 是 null 时不许吞掉这一块的正文"
+        );
         // 坏 JSON 不许 panic，也不许当成内容
         assert!(matches!(解流行("data: {不是 json"), 块::忽略));
     }
@@ -1074,19 +1194,73 @@ mod tests {
     fn 读到done才算流收完() {
         let 收 = |文: &str| {
             let mut 出 = Vec::new();
-            let (全, _, 想, 见) = 收流(&mut std::io::Cursor::new(文), &mut |b| 出.push(b)).unwrap();
-            (全, 想, 见, 出)
+            let (全, _, 想, 见, 尾) =
+                收流(&mut std::io::Cursor::new(文), &mut |b| 出.push(b)).unwrap();
+            (全, 想, 见, 尾, 出)
         };
-        let (全, _, 见, 出) = 收(
+        let (全, _, 见, 尾, 出) = 收(
             "data: {\"choices\":[{\"delta\":{\"content\":\"甲\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n",
         );
         assert_eq!(全, "甲");
         assert!(见, "收到 [DONE] 才算收尾");
+        assert_eq!(尾, None, "这一路没有 finish_reason，就不许编一个出来");
         assert_eq!(出, vec![流::答案("甲".into())]);
 
-        let (全, _, 见, _) = 收("data: {\"choices\":[{\"delta\":{\"content\":\"甲\"}}]}\r\n\r\n");
+        let (全, _, 见, _, _) =
+            收("data: {\"choices\":[{\"delta\":{\"content\":\"甲\"}}]}\r\n\r\n");
         assert_eq!(全, "甲", "断之前收到的字照样要播出去");
         assert!(!见, "读到 EOF 不等于收到 [DONE]");
+
+        let (_, _, _, 尾, _) = 收(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"想\"}}]}\r\n\r\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\r\n\r\n\
+             data: [DONE]\r\n\r\n",
+        );
+        assert_eq!(尾.as_deref(), Some("length"), "finish_reason 要带出来");
+    }
+
+    /// 空答案那句实话：三种情形三条话，**每一条都只说自己看得见的东西**。
+    /// 原先那一句"多半是被超时截断了"是把猜测当结论——真机那一趟 20.8 秒，
+    /// 而流式的超时上限是 180 秒，超时根本没发生过。
+    #[test]
+    fn 空答案按证据说话不许猜超时() {
+        let 被长度截 = 空答案的实话(1142, true, Some("length"));
+        assert!(被长度截.contains("length"), "{被长度截}");
+        assert!(被长度截.contains("1142"), "想了多少字要说出来：{被长度截}");
+        assert!(
+            被长度截.contains("不是我们的超时"),
+            "要把超时这条嫌疑摘掉：{被长度截}"
+        );
+
+        let 想完没答 = 空答案的实话(1142, true, Some("stop"));
+        assert!(想完没答.contains("正常收尾"), "{想完没答}");
+        assert!(!想完没答.contains("超时"), "正常收尾不许提超时：{想完没答}");
+        assert!(
+            !想完没答.contains("把问题问短"),
+            "问题长短不是判据，别让它进话术"
+        );
+
+        let 正常收尾没报因 = 空答案的实话(30, true, None);
+        assert!(正常收尾没报因.contains("[DONE]"), "{正常收尾没报因}");
+
+        let 半路断 = 空答案的实话(30, false, None);
+        assert!(半路断.contains("没收到 [DONE]"), "{半路断}");
+        assert!(半路断.contains("再试一次"), "截断这条要给下一步：{半路断}");
+    }
+
+    /// 真机取证的形状：思考几百字、`content` 全空、`finish_reason=stop`、然后 `[DONE]`。
+    /// 那是**对方答完了、答的是空**，不许由传输层报错——报了就等于把已经到手的 usage
+    /// 从账上抹掉，还把"这一档删不掉东西"说成"网络有问题"。
+    #[test]
+    fn 答完的空答案不算传输失败() {
+        assert!(
+            !空答案算截断(true, Some("stop")),
+            "取证到的那一趟就是这个形状"
+        );
+        assert!(!空答案算截断(true, None), "收到 [DONE] 就是走完了");
+        assert!(!空答案算截断(false, Some("stop")), "对方说停了就按停了算");
+        assert!(空答案算截断(false, None), "既没 [DONE] 也没 stop = 半路断");
+        assert!(空答案算截断(true, Some("length")), "被长度截了必须报");
     }
 
     #[test]

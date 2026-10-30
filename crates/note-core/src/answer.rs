@@ -324,8 +324,16 @@ pub fn 生成与播(
         .cloned()
         .collect();
     let 不足 = 最终.contains("依据不足") || citations.is_empty();
+    // 对方答完了、答的是空（真机取证：思考几百字 + finish_reason=stop + content 全空）。
+    // 传输层把这种"走完的空"交回每一档判，所以这边必须给它一句话：
+    // 空的 `text` 会在界面上渲染成一个什么都没有的气泡，那比报错更糟
+    let 定稿 = if 最终.trim().is_empty() {
+        "对方答完了，但一个字的答案都没给——这条没有结论。".to_string()
+    } else {
+        最终
+    };
     Ok(答复 {
-        text: 最终,
+        text: 定稿,
         insufficient: 不足,
         retried: 重试过,
         citations,
