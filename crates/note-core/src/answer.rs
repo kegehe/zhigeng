@@ -784,6 +784,26 @@ mod tests {
         assert!(第一趟.ends_with("问题：备份去哪"), "{第一趟}");
     }
 
+    /// 对方答完了、答的是空（真机取证：思考几百字 + `finish_reason=stop` + `content` 全空）。
+    /// 传输层把这种"走完的空"交给每一档判，所以问答这边必须给它一句话——
+    /// 空的 `text` 会在界面上渲染成一个什么都没有的气泡，那比报错更糟。
+    #[test]
+    fn 空答复也要有一句话说() {
+        let 依 = 依据集(2);
+        let 收到 = Rc::new(RefCell::new(Vec::new()));
+        let mut 假模型 = 假 {
+            脚本: RefCell::new(vec!["".into()]),
+            收到: 收到.clone(),
+        };
+        let 答 = 生成(&依, "问", &mut 假模型).unwrap();
+        assert!(答.insufficient, "空答案不能算成了");
+        assert!(!答.text.trim().is_empty(), "不许留一个空白泡：「{}」", 答.text);
+        assert!(答.text.contains("没有结论"), "{:#?}", 答.text);
+        assert!(答.citations.is_empty());
+        assert_eq!(答.in_tokens, 10, "这一趟也花了钱，账要带上");
+        assert_eq!(答.out_tokens, 5, "同上：空答案不是零开销");
+    }
+
     #[test]
     fn 出现幻觉就重生成一次并把违规说回去() {
         let 依 = 依据集(2);
