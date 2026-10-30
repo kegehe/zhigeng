@@ -797,7 +797,11 @@ mod tests {
         };
         let 答 = 生成(&依, "问", &mut 假模型).unwrap();
         assert!(答.insufficient, "空答案不能算成了");
-        assert!(!答.text.trim().is_empty(), "不许留一个空白泡：「{}」", 答.text);
+        assert!(
+            !答.text.trim().is_empty(),
+            "不许留一个空白泡：「{}」",
+            答.text
+        );
         assert!(答.text.contains("没有结论"), "{:#?}", 答.text);
         assert!(答.citations.is_empty());
         assert_eq!(答.in_tokens, 10, "这一趟也花了钱，账要带上");
