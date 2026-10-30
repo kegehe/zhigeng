@@ -46,6 +46,14 @@ import {
   type DirBranch,
 } from "./ui/tree";
 import { 判落点, 算动作, type 行 as 拖行, type 落点 } from "./ui/dragdrop";
+import {
+  目录菜单,
+  笔记菜单,
+  空白菜单,
+  菜单坐标,
+  type 菜单项,
+  type 菜单键,
+} from "./ui/tree-menu";
 import { 是回车提交 } from "./ui/keys";
 import { LinkPanelView } from "./ui/Links";
 import { CommandPalette } from "./ui/CommandPalette";
@@ -92,7 +100,26 @@ type 树动作 =
   | { 类型: "建目录"; 父: string }
   | { 类型: "建笔记"; 父: string }
   | { 类型: "改名"; 目录: string }
+  | { 类型: "改名笔记"; rel: string }
   | { 类型: "删除"; 目录: string };
+
+/**
+ * 侧栏上开着的菜单。目录、笔记、树的空白处各一副内容，但**坐标与关闭只有这一处**：
+ * 行尾「…」与右键都落到这里。坐标是视口坐标——菜单挂在 `nav` 外面用 `position: fixed`，
+ * 否则侧栏那层 `overflow-y-auto` 会把靠底部的行弹出来的菜单裁掉一半。
+ */
+type 树菜单 =
+  | {
+      类型: "目录";
+      路径: string;
+      点: { x: number; y: number };
+      /** 「…」贴着自己的右缘往左展开；右键从指针往右展开 */
+      向左: boolean;
+      /** 目录是不是物理空的。`null` = 还在问后端——这期间不给改名/删除 */
+      空: boolean | null;
+    }
+  | { 类型: "笔记"; rel: string; 点: { x: number; y: number } }
+  | { 类型: "空白"; 点: { x: number; y: number } };
 
 /** 树里那行输入框。与"新建笔记"那一格同一副样子，只是缩进跟着层级走 */
 function 树输入({
@@ -173,11 +200,6 @@ const stemOf = (rel: string) =>
     .replace(/\.markdown$/, "")
     .replace(/\.md$/, "");
 
-/** 顶层三条是语义目录：能往里建东西，但改名/删除不是用户该做的事 */
-// 大小写不敏感：NTFS 上 `Notes` 与 `notes` 是同一个目录，后端保留名也按这个口径拒
-const 是语义顶层 = (b: DirBranch) =>
-  b.depth === 0 && ["notes", "inbox", "archive"].includes(b.path.toLowerCase());
-
 /** 按路径找回目录节点。菜单只记路径，渲染时要拿回节点上的名字与子项数 */
 function 找目录(分支们: Branch[], path: string): DirBranch | null {
   for (const b of 分支们) {
@@ -209,16 +231,10 @@ export function App() {
    */
   const [dirs, setDirs] = useState<string[]>([]);
   /**
-   * 打开着的目录操作菜单。坐标是**视口坐标**：菜单挂在 `nav` 外面用 `position: fixed`，
-   * 否则侧栏那层 `overflow-y-auto` 会把靠底部的行弹出来的菜单裁掉一半。
+   * 开着的那副树菜单（目录 / 笔记 / 空白处）。一次只开一副：
+   * 两份菜单同时浮着，等于让用户猜下一次回车落到哪一个上。
    */
-  const [dirMenu, setDirMenu] = useState<{
-    路径: string;
-    右: number;
-    下: number;
-    /** 目录是不是物理空的。`null` = 还在问后端——这期间不给改名/删除 */
-    空: boolean | null;
-  } | null>(null);
+  const [树菜单, set树菜单] = useState<树菜单 | null>(null);
   const [dirAction, setDirAction] = useState<树动作 | null>(null);
   const [dirDraft, setDirDraft] = useState("");
   /**
@@ -405,7 +421,7 @@ export function App() {
     此刻的库.current = 库;
     // 换库时树上的动作一起收起：`dirAction` 存的是**相对路径**，留着的话下一次
     // 回车会把新库里同名的那一个目录改掉 / 删掉（后端只看路径，不认识是哪个库）。
-    setDirMenu(null);
+    set树菜单(null);
     setDirAction(null);
     setDirDraft("");
     if (!库 || !inTauri()) return;
@@ -1042,32 +1058,52 @@ export function App() {
     }
   };
 
-  const toggleArchive = async () => {
-    if (!selected) return;
-    const from = selected.rel;
-    const target = from.startsWith("archive/")
-      ? `notes/${baseOf(from)}`
-      : `archive/${baseOf(from)}`;
+  /**
+   * 树上的行操作按 rel 走，不要求先把那一篇打开；但**正开着的那一篇先落盘**——
+   * 改名 / 归档 / 回收都会换路径或搬文件，揣着没存的内容去搬就是搬丢。
+   */
+  const 备好这篇 = async (rel: string) => {
+    if (editing && selected?.rel === rel) return await persist();
+    return true;
+  };
+
+  /** 归档与否看它**现在**在不在 `archive/`（[02]：归档状态 = 所在目录） */
+  const 归档这篇 = async (rel: string) => {
+    if (!(await 备好这篇(rel))) return;
+    const 归档中 = rel.startsWith("archive/");
+    const target = 归档中 ? `notes/${baseOf(rel)}` : `archive/${baseOf(rel)}`;
     try {
-      await api.noteMove(from, target);
-      await afterChange(target);
-      setFlash(from.startsWith("archive/") ? "已移出归档" : "已归档");
+      await api.noteMove(rel, target);
+      if (selected?.rel === rel) await afterChange(target);
+      else await refresh();
+      setFlash(归档中 ? "已移出归档" : "已归档");
     } catch (e) {
       const { kind, message } = describeError(e);
       setError(kind === "conflict" ? "目标目录里已经有同名笔记了，没动你的文件" : message);
     }
   };
 
-  const trashNote = async () => {
-    if (!selected) return;
-    const gone = selected.title;
+  const 回收这篇 = async (rel: string) => {
+    if (!(await 备好这篇(rel))) return;
+    const 名 = stemOf(rel);
     try {
-      await api.noteTrash(selected.rel);
-      await afterChange(null);
-      setFlash(`「${gone}」已移入回收站`);
+      await api.noteTrash(rel);
+      if (selected?.rel === rel) await afterChange(null);
+      else await refresh();
+      setFlash(`「${名}」已移入回收站`);
     } catch (e) {
       setError(describeError(e).message);
     }
+  };
+
+  const toggleArchive = async () => {
+    if (!selected) return;
+    await 归档这篇(selected.rel);
+  };
+
+  const trashNote = async () => {
+    if (!selected) return;
+    await 回收这篇(selected.rel);
   };
 
   /** 重建目录清单。建/改名/删之后都要来一次：树里那一份是后端遍历出来的，改不了乐观值 */
@@ -1092,14 +1128,21 @@ export function App() {
     });
 
   const 开树动作 = (动作: 树动作) => {
-    setDirDraft(动作.类型 === "改名" ? baseOf(动作.目录) : "");
+    setDirDraft(
+      动作.类型 === "改名"
+        ? baseOf(动作.目录)
+        : 动作.类型 === "改名笔记"
+          ? stemOf(动作.rel)
+          : ""
+    );
     setDirAction(动作);
     // 树里同一时刻只该有一行输入框：顶上那一格开着就收掉
     setCreating(false);
     setNewTitle("");
     // 删除要在菜单里再确认一次，所以菜单不关；其余动作关掉菜单，让输入行露出来
-    if (动作.类型 !== "删除") setDirMenu(null);
-    if (动作.类型 === "删除") return;
+    if (动作.类型 !== "删除") set树菜单(null);
+    // 笔记行本来就看得见才点得到它，不用展开谁
+    if (动作.类型 === "删除" || 动作.类型 === "改名笔记") return;
     const 展开谁 = 动作.类型 === "改名" ? 动作.目录 : 动作.父;
     if (!展开谁) return;
     setCollapsed((c) => {
@@ -1113,7 +1156,7 @@ export function App() {
   const 取消树动作 = () => {
     setDirAction(null);
     setDirDraft("");
-    setDirMenu(null);
+    set树菜单(null);
   };
 
   const 提交树动作 = async () => {
@@ -1133,6 +1176,12 @@ export function App() {
         await api.dirRename(动作.目录, 文);
         await 刷新目录();
         setOrder(await api.treeOrder());
+      } else if (动作.类型 === "改名笔记") {
+        if (!(await 备好这篇(动作.rel))) return;
+        const 新 = await api.noteRename(动作.rel, 文);
+        // 改的正是眼前这篇：跟着新路径走（不然下一次保存会写回旧文件名）
+        if (selected?.rel === 动作.rel) await afterChange(新);
+        else await refresh();
       } else {
         await api.dirDelete(动作.目录);
         await 刷新目录();
@@ -1171,22 +1220,39 @@ export function App() {
    * 收起菜单。**待确认的删除一起放弃**：菜单没了还留着它，下一次打开同一个目录的
    * 菜单会直接弹出"删除「X」？"，下一次误触回车就会删掉一个目录。
    *
-   * 三条路都走这里：点外面、按 Esc、`…` 再点一下（以及开始搜索）。
+   * 四条路都走这里：点外面、按 Esc、`…` 再点一下（以及开始搜索）。
    */
-  const 收起目录菜单 = useCallback(() => {
-    setDirMenu(null);
+  const 收起菜单 = useCallback(() => {
+    set树菜单(null);
     setDirAction((a) => (a?.类型 === "删除" ? null : a));
   }, []);
 
+  /** 换开另一副菜单前先走一遍收起：上一副留着的删除确认不许跟过来 */
+  const 换菜单 = (下一副: 树菜单) => {
+    收起菜单();
+    set树菜单(下一副);
+  };
+
+  /** 目录菜单。空不空**问后端**（一次 `read_dir`），查不出来就保持 null：不猜"空" */
+  const 开目录菜单 = (路径: string, 点: { x: number; y: number }, 向左: boolean) => {
+    换菜单({ 类型: "目录", 路径, 点, 向左, 空: null });
+    void api
+      .dirEmpty(路径)
+      .then((空) =>
+        set树菜单((m) => (m?.类型 === "目录" && m.路径 === 路径 ? { ...m, 空 } : m))
+      )
+      .catch(() => {});
+  };
+
   useEffect(() => {
-    if (!dirMenu) return;
+    if (!树菜单) return;
     const 关 = (e: PointerEvent) => {
       const t = e.target;
       if (t instanceof Element && t.closest(".tree-menu, [data-tree-more]")) return;
-      收起目录菜单();
+      收起菜单();
     };
     const 键 = (e: KeyboardEvent) => {
-      if (e.key === "Escape") 收起目录菜单();
+      if (e.key === "Escape") 收起菜单();
     };
     window.addEventListener("pointerdown", 关);
     window.addEventListener("keydown", 键);
@@ -1194,12 +1260,12 @@ export function App() {
       window.removeEventListener("pointerdown", 关);
       window.removeEventListener("keydown", 键);
     };
-  }, [dirMenu, 收起目录菜单]);
+  }, [树菜单, 收起菜单]);
 
   // 搜索态换上平铺命中，树不在屏幕上了；菜单还浮着就成了一个点和它没关系的东西
   useEffect(() => {
-    if (searching) 收起目录菜单();
-  }, [searching, 收起目录菜单]);
+    if (searching) 收起菜单();
+  }, [searching, 收起菜单]);
 
   const openTrash = async () => {
     if (editing && !(await persist())) return;
@@ -1840,7 +1906,17 @@ export function App() {
                 />
               </div>
             ) : null}
-            <nav ref={navRef} className="relative min-h-0 flex-1 overflow-y-auto pb-4">
+            {/* 空白处右键：这一层没有"行"可以挂，但"往库里建东西"照样该点得到。
+                行上的右键自己接住并 stopPropagation 了，能冒到这里的只有空白 */}
+            <nav
+              ref={navRef}
+              className="relative min-h-0 flex-1 overflow-y-auto pb-4"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                if (searching) return; // 平铺命中没地方可建
+                换菜单({ 类型: "空白", 点: { x: e.clientX, y: e.clientY } });
+              }}
+            >
               {/* 库根那一层没有"目录行"可以挂输入框，所以顶层建目录的输入行单独立在这里 */}
               {dirAction &&
               (dirAction.类型 === "建目录" || dirAction.类型 === "建笔记") &&
@@ -1871,6 +1947,11 @@ export function App() {
                       <button
                         key={n.rel}
                         onClick={() => void openNote(n.rel, n.title)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          换菜单({ 类型: "笔记", rel: n.rel, 点: { x: e.clientX, y: e.clientY } });
+                        }}
                         className={
                           "block w-full px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) " +
                           (active ? "bg-accent-soft text-fg row-sel" : "hover:bg-hover")
@@ -1901,7 +1982,7 @@ export function App() {
                         dirAction.父 === b.path
                           ? dirAction
                           : null;
-                      const 菜单开着 = dirMenu?.路径 === b.path;
+                      const 菜单开着 = 树菜单?.类型 === "目录" && 树菜单.路径 === b.path;
                       return (
                         <Fragment key={信.键}>
                           {改名中 ? (
@@ -1922,6 +2003,11 @@ export function App() {
                               data-tree-self={信.自身}
                               style={pad}
                               className={"tree-row" + (移入 ? " tree-into" : "")}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                开目录菜单(b.path, { x: e.clientX, y: e.clientY }, false);
+                              }}
                             >
                               <button
                                 onClick={() => {
@@ -1954,25 +2040,11 @@ export function App() {
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   if (菜单开着) {
-                                    收起目录菜单();
+                                    收起菜单();
                                     return;
                                   }
                                   const r = e.currentTarget.getBoundingClientRect();
-                                  const 路径 = b.path;
-                                  setDirMenu({
-                                    路径,
-                                    右: r.right,
-                                    下: r.bottom + 4,
-                                    空: null,
-                                  });
-                                  // 空不空问后端（一次 `read_dir`）。查不出来的话保持
-                                  // null：不猜"空"，也就不给改删的入口。
-                                  void api
-                                    .dirEmpty(路径)
-                                    .then((空) =>
-                                      setDirMenu((m) => (m && m.路径 === 路径 ? { ...m, 空 } : m)),
-                                    )
-                                    .catch(() => {});
+                                  开目录菜单(b.path, { x: r.right, y: r.bottom + 4 }, true);
                                 }}
                               >
                                 <MoreHorizontal aria-hidden="true" />
@@ -1996,6 +2068,20 @@ export function App() {
                     }
                     const active = selected?.rel === b.rel;
                     const 信 = 行信息(b);
+                    if (dirAction?.类型 === "改名笔记" && dirAction.rel === b.rel) {
+                      return (
+                        <Fragment key={信.键}>
+                          <树输入
+                            depth={b.depth}
+                            value={dirDraft}
+                            placeholder="新标题，回车改名"
+                            onChange={setDirDraft}
+                            onCommit={() => void 提交树动作()}
+                            onCancel={取消树动作}
+                          />
+                        </Fragment>
+                      );
+                    }
                     return (
                       <button
                         key={信.键}
@@ -2004,6 +2090,11 @@ export function App() {
                           void openNote(b.rel, b.title);
                         }}
                         onPointerDown={(e) => onRowDown(e, 信)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          换菜单({ 类型: "笔记", rel: b.rel, 点: { x: e.clientX, y: e.clientY } });
+                        }}
                         data-tree-key={信.键}
                         data-tree-parent={信.父}
                         data-tree-name={信.名}
@@ -2095,74 +2186,97 @@ export function App() {
               ) : null}
             </nav>
             {/* 菜单挂在 nav 外面：nav 是 overflow-y-auto，贴着底部的行弹出来的菜单会被裁掉。
-                坐标在打开那一刻量好（视口坐标），滚动/折叠都不再跟——它是一次性的操作面 */}
-            {dirMenu
+                坐标在打开那一刻量好（视口坐标），滚动/折叠都不再跟——它是一次性的操作面。
+                行尾「…」贴着自己的右缘往左展开，右键从指针往右展开；只有这一处渲染、
+                一处定位，两种入口才不会在窗口边上各错各的 */}
+            {树菜单
               ? (() => {
-                  const 目 = 找目录(tree, dirMenu.路径);
-                  if (!目) return null;
-                  // 空不空**问后端**：`list_notes` 只取一页，超过一页时非空目录
-                  // 在树上看起来就是空的（菜单给了入口，后端才拒）。
-                  const 可改删 = !是语义顶层(目) && dirMenu.空 === true;
-                  const 确认中 = dirAction?.类型 === "删除" && dirAction.目录 === 目.path;
-                  return (
-                    <div
-                      className="tree-menu"
-                      role="menu"
-                      style={{
-                        left: dirMenu.右,
-                        top: Math.min(dirMenu.下, window.innerHeight - 220),
-                        transform: "translateX(-100%)",
-                      }}
-                    >
-                      {确认中 ? (
-                        <>
-                          <div className="tree-menu-tip">删除「{层名(目)}」？</div>
-                          <div className="tree-menu-actions">
-                            <button onClick={取消树动作}>取消</button>
-                            <button className="danger" onClick={() => void 提交树动作()}>
-                              删除
-                            </button>
-                          </div>
-                        </>
+                  const 菜 = 树菜单;
+                  const 视口 = { 宽: window.innerWidth, 高: window.innerHeight };
+                  const 位 =
+                    菜.类型 === "目录" && 菜.向左
+                      ? {
+                          left: 菜.点.x,
+                          top: Math.max(0, Math.min(菜.点.y, 视口.高 - 240)),
+                          transform: "translateX(-100%)",
+                        }
+                      : 菜单坐标(菜.点, 视口);
+                  /** 项的名字与危险色只有一份写法：三个菜单各自只需回答"点了做什么" */
+                  const 渲染 = (项们: 菜单项[], 做: (键: 菜单键) => void) =>
+                    项们.map((项) =>
+                      项.类 === "提示" ? (
+                        <div key={项.字样} className="tree-menu-tip">
+                          {项.字样}
+                        </div>
                       ) : (
-                        <>
-                          <button
-                            role="menuitem"
-                            onClick={() => 开树动作({ 类型: "建目录", 父: 目.path })}
-                          >
-                            新建子目录
-                          </button>
-                          <button
-                            role="menuitem"
-                            onClick={() => 开树动作({ 类型: "建笔记", 父: 目.path })}
-                          >
-                            在此新建笔记
-                          </button>
-                          {
-                            可改删 ? (
-                              <>
-                                <button
-                                  role="menuitem"
-                                  onClick={() => 开树动作({ 类型: "改名", 目录: 目.path })}
-                                >
-                                  重命名
-                                </button>
-                                <button
-                                  role="menuitem"
-                                  className="danger"
-                                  onClick={() => 开树动作({ 类型: "删除", 目录: 目.path })}
-                                >
-                                  删除空目录
-                                </button>
-                              </>
-                            ) : dirMenu.空 === false && !是语义顶层(目) ? (
-                              <div className="tree-menu-tip">
-                                这一版只改空目录——先把它里面的东西挪走
-                              </div>
-                            ) : null /* 还在问后端：只给上面那两项，不猜 */
-                          }
-                        </>
-                      )}
+                        <button
+                          key={项.键}
+                          role="menuitem"
+                          className={项.危险 ? "danger" : undefined}
+                          onClick={() => 做(项.键)}
+                        >
+                          {项.字样}
+                        </button>
+                      )
+                    );
+                  if (菜.类型 === "目录") {
+                    const 目 = 找目录(tree, 菜.路径);
+                    if (!目) return null;
+                    // 删除要在菜单里再确认一次：目录删下去是**不可恢复**的
+                    const 确认中 = dirAction?.类型 === "删除" && dirAction.目录 === 目.path;
+                    const 做 = (键: 菜单键) => {
+                      if (键 === "建子目录") 开树动作({ 类型: "建目录", 父: 目.path });
+                      else if (键 === "建笔记") 开树动作({ 类型: "建笔记", 父: 目.path });
+                      else if (键 === "改名目录") 开树动作({ 类型: "改名", 目录: 目.path });
+                      else if (键 === "删空目录") 开树动作({ 类型: "删除", 目录: 目.path });
+                    };
+                    return (
+                      <div className="tree-menu" role="menu" style={位}>
+                        {确认中 ? (
+                          <>
+                            <div className="tree-menu-tip">删除「{层名(目)}」？</div>
+                            <div className="tree-menu-actions">
+                              <button onClick={取消树动作}>取消</button>
+                              <button className="danger" onClick={() => void 提交树动作()}>
+                                删除
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          // 空不空**问后端**：`list_notes` 只取一页，超过一页时非空目录
+                          // 在树上看起来就是空的（菜单给了入口，后端才拒）
+                          渲染(目录菜单(目, 菜.空), 做)
+                        )}
+                      </div>
+                    );
+                  }
+                  if (菜.类型 === "笔记") {
+                    const rel = 菜.rel;
+                    const 做 = (键: 菜单键) => {
+                      set树菜单(null);
+                      if (键 === "打开") void openNote(rel);
+                      else if (键 === "改名笔记") 开树动作({ 类型: "改名笔记", rel });
+                      // 归档与取消归档是同一个动作，按它在不在 `archive/` 自己判
+                      else if (键 === "归档" || 键 === "取消归档") void 归档这篇(rel);
+                      else if (键 === "回收") void 回收这篇(rel);
+                    };
+                    return (
+                      <div className="tree-menu" role="menu" style={位}>
+                        {渲染(笔记菜单(rel), 做)}
+                      </div>
+                    );
+                  }
+                  const 做 = (键: 菜单键) => {
+                    if (键 === "顶层建笔记") {
+                      取消树动作();
+                      setCreating(true);
+                    } else if (键 === "顶层建目录") {
+                      开树动作({ 类型: "建目录", 父: "" });
+                    }
+                  };
+                  return (
+                    <div className="tree-menu" role="menu" style={位}>
+                      {渲染(空白菜单(), 做)}
                     </div>
                   );
                 })()
