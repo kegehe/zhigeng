@@ -11,6 +11,7 @@ import {
   格式刷状态of,
   能开格式刷,
 } from "./formatPainter";
+import { 改选区 } from "./tableSelectPlugin";
 import { createTestEditor } from "./testEditor";
 
 /**
@@ -69,6 +70,32 @@ function 选中(editor: ReturnType<typeof createTestEditor>, from: number, to: n
   editor.commands.setTextSelection({ from, to });
 }
 
+function 表格起点(editor: ReturnType<typeof createTestEditor>): number {
+  let p = -1;
+  editor.state.doc.forEach((n, off) => {
+    if (n.type.name === "mdTable") p = off;
+  });
+  return p;
+}
+
+/** 表里第 n 个格子（文档序，0 起）的绝对起点 */
+function 格起点(editor: ReturnType<typeof createTestEditor>, n: number): number {
+  const 表起 = 表格起点(editor);
+  const 表 = editor.state.doc.nodeAt(表起)!;
+  let i = 0;
+  let 找 = -1;
+  表.forEach((行, 行偏) =>
+    行.forEach((_格, 格偏) => {
+      if (i++ === n) 找 = 表起 + 1 + 行偏 + 1 + 格偏;
+    }),
+  );
+  return 找;
+}
+
+function 进格(editor: ReturnType<typeof createTestEditor>, n: number): void {
+  editor.commands.setTextSelection(格起点(editor, n) + 1);
+}
+
 const 粗 = (editor: ReturnType<typeof createTestEditor>) => editor.state.schema.marks.bold!.create();
 const 斜 = (editor: ReturnType<typeof createTestEditor>) => editor.state.schema.marks.italic!.create();
 
@@ -94,6 +121,29 @@ describe("取格式", () => {
     expect(取格式(editor.state)).toBeNull();
     expect(开格式刷(editor)).toBe(false);
     expect(格式刷状态of(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
+  it("只选到空白字符时开不起来：按钮亮灭与取快照同一判据，不是亮着没反应", () => {
+    const editor = createTestEditor(篇(块("   "), 块("目标")));
+    const 位 = 找(editor, " ");
+    选中(editor, 位, 位 + 3);
+    expect(能开格式刷(editor.state)).toBe(false);
+    expect(取格式(editor.state)).toBeNull();
+    expect(开格式刷(editor)).toBe(false);
+    expect(格式刷状态of(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
+  it("源在表格格子里：只抄行内格式，块类型为 null", () => {
+    const 表 = ["| A | B |", "| --- | --- |", "| **甲** | 乙 |"].join("\n");
+    const editor = createTestEditor(篇(块("", { kind: "table", raw: 表 + "\n" })));
+    进格(editor, 2);
+    const 位 = 格起点(editor, 2) + 1;
+    选中(editor, 位, 位 + 1);
+    const 快照 = 取格式(editor.state)!;
+    expect(快照.block).toBeNull();
+    expect(快照.marks).toEqual([{ type: "bold", attrs: {} }]);
     editor.destroy();
   });
 });
@@ -201,7 +251,7 @@ describe("刷格式", () => {
     editor.destroy();
   });
 
-  it("目标在表格里：格内文字照样刷行内格式，整块类型不动并计一次跳过", () => {
+  it("目标在表格里：格内文字照样刷行内格式，且不报“整块没动”", () => {
     const 表 = ["| 列A | 列B |", "| --- | --- |", "| 甲 | 乙 |"].join("\n");
     const doc = 篇(块("**源**"), 块("", { kind: "table", raw: 表 + "\n" }));
     const editor = createTestEditor(doc);
@@ -209,14 +259,64 @@ describe("刷格式", () => {
     选中(editor, 源, 源 + 1);
     开格式刷(editor);
 
+    const 提示: string[] = [];
+    const 收 = (e: Event) => 提示.push((e as CustomEvent<string>).detail);
+    editor.view.dom.addEventListener("md-notice", 收);
+
     const 甲 = 找(editor, "甲");
     选中(editor, 甲, 甲 + 1);
     const 果 = 应用格式刷(editor);
     expect(果.刷了).toBe(true);
-    expect(果.跳过).toBe(1);
+    // 块类型不转是结构使然，格内文字确实刷了——报成“跳过”会让用户以为没刷上
+    expect(果.跳过).toBe(0);
+    expect(提示).toHaveLength(0);
     expect(editor.state.doc.rangeHasMark(甲, 甲 + 1, 粗(editor))).toBe(true);
     // 表格照 GFM 重新拼，但没有把整张表洗成段落
     expect(docToMarkdown(editor.state.doc, doc)).toContain("| **甲** | 乙 |");
+    editor.view.dom.removeEventListener("md-notice", 收);
+    editor.destroy();
+  });
+
+  it("表格矩形选区：框到的每一格都刷行内格式，一笔事务", () => {
+    const 表 = ["| A | B |", "| --- | --- |", "| 甲 | 乙 |"].join("\n");
+    const doc = 篇(块("**源**"), 块("", { kind: "table", raw: 表 + "\n" }));
+    const editor = createTestEditor(doc);
+    const 源 = 找(editor, "源");
+    选中(editor, 源, 源 + 1);
+    开格式刷(editor);
+
+    进格(editor, 2);
+    editor.view.dispatch(改选区(editor.state, 表格起点(editor), { r0: 1, c0: 0, r1: 1, c1: 1 }));
+    const 果 = 应用格式刷(editor);
+    expect(果.刷了).toBe(true);
+    const 甲 = 找(editor, "甲");
+    const 乙 = 找(editor, "乙");
+    expect(editor.state.doc.rangeHasMark(甲, 甲 + 1, 粗(editor))).toBe(true);
+    expect(editor.state.doc.rangeHasMark(乙, 乙 + 1, 粗(editor))).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toContain("| **甲** | **乙** |");
+    editor.destroy();
+  });
+
+  it("字色与高亮连同 attrs 一起抄", () => {
+    const doc = 篇(块("源"), 块("目标"));
+    const editor = createTestEditor(doc);
+    const 源位 = 找(editor, "源");
+    const 标 = editor.state.schema.marks;
+    editor.view.dispatch(
+      editor.state.tr
+        .addMark(源位, 源位 + 1, 标.textColor!.create({ color: "#ff0000" }))
+        .addMark(源位, 源位 + 1, 标.highlight!.create()),
+    );
+    选中(editor, 源位, 源位 + 1);
+    开格式刷(editor);
+
+    const 目标 = 找(editor, "目标");
+    选中(editor, 目标, 目标 + 2);
+    应用格式刷(editor);
+    expect(
+      editor.state.doc.rangeHasMark(目标, 目标 + 1, 标.textColor!.create({ color: "#ff0000" })),
+    ).toBe(true);
+    expect(editor.state.doc.rangeHasMark(目标, 目标 + 1, 标.highlight!.create())).toBe(true);
     editor.destroy();
   });
 
@@ -273,6 +373,55 @@ describe("开关与手势", () => {
     editor.destroy();
   });
 
+  it("在正文外面松手也算手势结束：托到边缘外再松不会白框一场", async () => {
+    const editor = createTestEditor(篇(块("**源**"), 块("目标")));
+    const 源 = 找(editor, "源");
+    选中(editor, 源, 源 + 1);
+    开格式刷(editor);
+
+    const 目标 = 找(editor, "目标");
+    选中(editor, 目标, 目标 + 2);
+    document.body.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true }));
+    await Promise.resolve();
+    expect(editor.state.doc.rangeHasMark(目标, 目标 + 2, 粗(editor))).toBe(true);
+    editor.destroy();
+  });
+
+  it("右键松手不刷，也不吃掉单次档", async () => {
+    const editor = createTestEditor(篇(块("**源**"), 块("目标")));
+    const 源 = 找(editor, "源");
+    选中(editor, 源, 源 + 1);
+    开格式刷(editor);
+
+    const 目标 = 找(editor, "目标");
+    选中(editor, 目标, 目标 + 2);
+    editor.view.dom.dispatchEvent(new MouseEvent("mouseup", { button: 2, bubbles: true }));
+    await Promise.resolve();
+    expect(editor.state.doc.rangeHasMark(目标, 目标 + 2, 粗(editor))).toBe(false);
+    expect(格式刷状态of(editor.state)).not.toBeNull();
+    editor.destroy();
+  });
+
+  it("键盘连按方向键：松开方向键不落笔，松开 Shift 才刷", async () => {
+    const editor = createTestEditor(篇(块("**源**"), 块("目标")));
+    const 源 = 找(editor, "源");
+    选中(editor, 源, 源 + 1);
+    开格式刷(editor);
+
+    const 目标 = 找(editor, "目标");
+    选中(editor, 目标, 目标 + 1);
+    editor.view.dom.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowRight", bubbles: true }));
+    await Promise.resolve();
+    expect(editor.state.doc.rangeHasMark(目标, 目标 + 1, 粗(editor))).toBe(false);
+
+    选中(editor, 目标, 目标 + 2);
+    editor.view.dom.dispatchEvent(new KeyboardEvent("keyup", { key: "Shift", bubbles: true }));
+    await Promise.resolve();
+    expect(editor.state.doc.rangeHasMark(目标, 目标 + 2, 粗(editor))).toBe(true);
+    expect(格式刷状态of(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
   it("双击那一档刷完还在，Esc 才收起", () => {
     const editor = createTestEditor(篇(块("**源**"), 块("一"), 块("二")));
     const 源 = 找(editor, "源");
@@ -293,6 +442,17 @@ describe("开关与手势", () => {
     editor.view.dom.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
     );
+    expect(格式刷状态of(editor.state)).toBeNull();
+    editor.destroy();
+  });
+
+  it("焦点停在工具栏上时 Esc 也能收起：不靠编辑器自己的键盘处理", () => {
+    const editor = createTestEditor(篇(块("**源**"), 块("目标")));
+    const 源 = 找(editor, "源");
+    选中(editor, 源, 源 + 1);
+    开格式刷(editor);
+
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(格式刷状态of(editor.state)).toBeNull();
     editor.destroy();
   });
