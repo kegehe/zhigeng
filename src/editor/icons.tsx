@@ -14,6 +14,7 @@ import {
   Minus,
   MoveDown,
   MoveUp,
+  Paintbrush,
   Pin,
   Quote,
   Redo2,
@@ -43,6 +44,7 @@ export type 图标名 =
   | "highlighter"
   | "ai"
   | "clear"
+  | "paintbrush"
   | "divider"
   | "quote"
   | "table"
@@ -154,6 +156,7 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   highlighter: Highlighter,
   ai: Sparkles,
   clear: RemoveFormatting,
+  paintbrush: Paintbrush,
   divider: Minus,
   quote: Quote,
   table: Table,

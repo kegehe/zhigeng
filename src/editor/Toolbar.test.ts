@@ -5,6 +5,7 @@ import { afterEach, expect, it } from "vitest";
 import type { EditBlock, EditDoc } from "./blocks";
 import { 调色板 } from "./colors";
 import { createTestEditor } from "./testEditor";
+import { 格式刷状态of } from "./formatPainter";
 import { Toolbar } from "./Toolbar";
 
 /**
@@ -96,6 +97,33 @@ it("文字颜色与底色是两枚按钮，各自只开自己的色板", async (
       marks: [{ type: "textColor", attrs: { color: 调色板[0]!.hex } }],
     }),
   );
+  拆();
+  editor.destroy();
+});
+
+it("格式刷常驻在工具栏：有选区才可点，点开按住态，双击进连续档", async () => {
+  const editor = createTestEditor(篇("第一段文字"));
+  const { 根, 拆 } = await 挂(editor);
+  const 刷 = 根.querySelector('button[aria-label^="格式刷"]') as HTMLButtonElement;
+  expect(刷).not.toBeNull();
+  // 没有选区就没有"抄谁"的源，按钮灰着
+  expect(刷.disabled).toBe(true);
+
+  await act(async () => {
+    editor.commands.setTextSelection({ from: 1, to: 3 });
+  });
+  expect(刷.disabled).toBe(false);
+
+  await act(async () => {
+    刷.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(格式刷状态of(editor.state)).not.toBeNull();
+  expect(刷.getAttribute("aria-pressed")).toBe("true");
+
+  await act(async () => {
+    刷.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  });
+  expect(格式刷状态of(editor.state)?.锁定).toBe(true);
   拆();
   editor.destroy();
 });

@@ -29,6 +29,7 @@ import { 批量, TableSelect } from "./tableSelectPlugin";
 import { 拼开栏, 拆开栏, 围栏行of } from "./fence";
 import { 短写, 已识别, 语言清单, 语言of, 着色区间, 识别 } from "./highlight";
 import { 引用高亮扩展 } from "./citeFocus";
+import { FormatPainter } from "./formatPainter";
 import { mightRender, renderOpaque } from "./render";
 
 /**
@@ -1990,6 +1991,7 @@ export const mdExtensions = [
   TablePaste,
   ImagePaste,
   TableSelect,
+  FormatPainter,
   CodeHighlight,
   FocusIndicator,
   OpaqueFace,

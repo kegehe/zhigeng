@@ -24,6 +24,7 @@ import {
   type BlockTypeId,
 } from "./blocks";
 import { 批量, 矩形of } from "./tableSelectPlugin";
+import { 关格式刷, 开格式刷, 能开格式刷, 格式刷状态of } from "./formatPainter";
 import type { Align } from "./table";
 import { 工具图标, type 图标名 } from "./icons";
 import { 调色板, 底色of } from "./colors";
@@ -65,11 +66,24 @@ export function Toolbar({ editor }: { editor: Editor }) {
       键 = 新;
       bump((n) => n + 1);
     };
+    /**
+     * 格式刷的开 / 关同样是**只带 meta 的事务**。按引用比对插件 state：开关一次是
+     * 新对象，其余事务拿回同一个旧对象，所以这条只在真的切换时才重渲染。
+     */
+    let 键刷 = 格式刷状态of(editor.state);
+    const 同步格式刷 = () => {
+      const 新 = 格式刷状态of(editor.state);
+      if (新 === 键刷) return;
+      键刷 = 新;
+      bump((n) => n + 1);
+    };
     editor.on("transaction", 同步矩形);
+    editor.on("transaction", 同步格式刷);
     return () => {
       editor.off("selectionUpdate", on);
       editor.off("update", on);
       editor.off("transaction", 同步矩形);
+      editor.off("transaction", 同步格式刷);
     };
   }, [editor]);
 
@@ -145,6 +159,7 @@ export function Toolbar({ editor }: { editor: Editor }) {
     做: () => void,
     开着 = false,
     禁用 = false,
+    双击?: () => void,
   ) => {
     const Icon = 工具图标[图];
     return (
@@ -157,6 +172,7 @@ export function Toolbar({ editor }: { editor: Editor }) {
         className={开着 ? "on" : ""}
         disabled={禁用}
         onClick={做}
+        onDoubleClick={双击}
       >
         <Icon />
       </button>
@@ -264,6 +280,21 @@ export function Toolbar({ editor }: { editor: Editor }) {
         false,
         !node,
       )}
+      {(() => {
+        const 刷态 = 格式刷状态of(editor.state);
+        const 可开 = editor.isEditable && 能开格式刷(editor.state);
+        return btn(
+          "paint",
+          刷态
+            ? "格式刷已开：拖选目标文字；Esc 取消"
+            : "格式刷：先选中一段带格式的文字，再拖选目标（双击可连续刷，Esc 取消）",
+          "paintbrush",
+          () => (刷态 ? 关格式刷(editor) : 开格式刷(editor)),
+          刷态 !== null,
+          !刷态 && !可开,
+          () => 开格式刷(editor, true),
+        );
+      })()}
       <span className="sep" aria-hidden="true" />
       {/* 结构块从 INSERTABLE 生成：加一种块只改那张表，工具栏与 `/` 菜单同时长出来 */}
       {INSERTABLE.map((b) =>

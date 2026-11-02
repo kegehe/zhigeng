@@ -182,6 +182,11 @@
     min-height: 60vh;
     cursor: text;
   }
+  /* 格式刷待命：正文上方换成十字。`data-md-paint` 由 FormatPainter 的插件 view
+     写 / 删（只动 DOM，不发事务），界面靠它说"现在点哪都是刷格式"。 */
+  .block-editor .ProseMirror[data-md-paint] {
+    cursor: crosshair;
+  }
   /* 引用落点。整块挂底色而不是选中文字：用户点的是"这条答案引的是哪一块"，
      要一眼看到那一整块；底色在第一次文档改动时由插件清掉。 */
   .block-editor .cite-hit {

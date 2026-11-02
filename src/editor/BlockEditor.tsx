@@ -20,6 +20,7 @@ import {
 import { 归一 } from "./tableSelect";
 import { 改选区, 定锚点, 矩形of, 选区of } from "./tableSelectPlugin";
 import { mdExtensions } from "./schema";
+import { 关格式刷, 开格式刷, 能开格式刷, 格式刷状态of } from "./formatPainter";
 import { 就绪后标出 } from "./citeFocus";
 import { 工具图标, type 图标名 } from "./icons";
 import { LinkEditor, Toolbar } from "./Toolbar";
@@ -117,6 +118,9 @@ export function BlockEditor({
   const [drop, setDrop] = useState<{ top: number; index: number } | null>(null);
   const dropRef = useRef<{ top: number; index: number } | null>(null);
   const [linking, setLinking] = useState(false);
+  // 格式刷开关走只带 meta 的事务，既不触发 selectionUpdate 也不触发 update；
+  // 这个 tick 只用来让气泡上的按扣跟着重渲染（比较引用，见下面的 onTr）
+  const [, set刷Tick] = useState(0);
 
   const editor = useEditor({
     extensions: mdExtensions,
@@ -368,8 +372,14 @@ export function BlockEditor({
      * 所以补一条事务订阅。带判据订阅是必须的：不判就每击一次键都多跑一次 `anchorRect`
      * （读 window 选区 + 量矩形），那条是花在打字路径上的。
      */
+    let 键刷 = 格式刷状态of(editor.state);
     const onTr = () => {
       if (矩形of(editor.state)) syncSel();
+      const 刷 = 格式刷状态of(editor.state);
+      if (刷 !== 键刷) {
+        键刷 = 刷;
+        set刷Tick((n) => n + 1);
+      }
     };
     editor.on("transaction", onTr);
     const hostEl = wrap.current;
@@ -587,6 +597,27 @@ export function BlockEditor({
           >
             <工具图标.link />
           </button>
+          {(() => {
+            const 刷态 = 格式刷状态of(editor.state);
+            return (
+              <button
+                type="button"
+                className={刷态 ? "on" : ""}
+                title={
+                  刷态
+                    ? "格式刷已开：拖选目标文字；Esc 取消"
+                    : "格式刷（双击连续刷，Esc 取消）"
+                }
+                aria-label="格式刷"
+                aria-pressed={刷态 ? true : undefined}
+                disabled={!刷态 && !能开格式刷(editor.state)}
+                onClick={() => (刷态 ? 关格式刷(editor) : 开格式刷(editor))}
+                onDoubleClick={() => 开格式刷(editor, true)}
+              >
+                <工具图标.paintbrush />
+              </button>
+            );
+          })()}
           {linking ? (
             // 输入框用工具栏那份实现：两处各写一份，早晚一处改了 `extendMarkRange`
             // 另一处没改，链接就会吃掉或漏掉半个词

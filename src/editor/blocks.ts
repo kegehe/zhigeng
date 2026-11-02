@@ -486,6 +486,24 @@ export function 块内范围(state: EditorState): { 起: number; 止: number } |
 }
 
 /**
+ * 节点当前是哪一种可转块类型（`BLOCK_TYPES` 的 id）。代码 / 引用 / 表格 / 图片给 null：
+ * 它们不在可转名单里，格式刷也不该把"源是一段正文"刷成"块类型是 null 的别人"。
+ */
+export function 块类型of(node: PmNode): BlockTypeId | null {
+  const 型 = node.type.name;
+  if (型 === "mdHeading") {
+    const level = Math.min(6, Math.max(1, Number(node.attrs.mdLevel ?? 1)));
+    return `heading${level}` as BlockTypeId;
+  }
+  if (型 === "mdItem") {
+    const kind = String(node.attrs.mdKind ?? "");
+    return kind === "bullet" || kind === "numbered" || kind === "todo" ? kind : null;
+  }
+  if (型 === "mdParagraph") return "paragraph";
+  return null;
+}
+
+/**
  * 把块改成目标类型需要的节点类型与属性补丁。**返回 null 表示不用改或不能改**——
  * 包括不透明块，以及"目标就是当前类型"（不这么判的话一次无意义的 setNodeMarkup 会
  * 改掉 `mdSig`，把整块重新序列化，用户只是点了同一个菜单项却多出一次落盘）。
