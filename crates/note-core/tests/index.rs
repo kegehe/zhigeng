@@ -1026,3 +1026,44 @@ fn 颜色与高亮不进检索正文与面包屑() {
         .unwrap();
     assert_eq!(html, 0);
 }
+
+#[test]
+fn 上下标不进检索正文且行首不判成HTML块() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let body = "---\nid: n-sup0001\ntitle: 上下标试验\n---\n\n<sup>2</sup> 是平方\n\nH<sub>2</sub>O 是水\n";
+    v.write_atomic("notes/上下标试验.md", body.as_bytes())
+        .unwrap();
+    let (v, idx) = open(dir.path());
+    idx.rebuild_all(&v).unwrap();
+
+    let text: String = idx
+        .conn()
+        .query_row("SELECT text FROM chunks ORDER BY rowid LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(!text.contains("<sup"), "切片正文带了标签: {text}");
+    assert!(!text.contains("<sub"), "切片正文带了标签: {text}");
+    assert!(text.contains("2 是平方"), "{text}");
+    assert!(text.contains("H2O"), "{text}");
+
+    let dirty: i64 = idx
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM blocks WHERE text LIKE '%<sup%' OR text LIKE '%<sub%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dirty, 0, "有块的 text 里还带着上下标标签");
+
+    // 行首的 <sup> 不许把整块判成 html（那样再打开就不能当正文编辑）
+    let html: i64 = idx
+        .conn()
+        .query_row("SELECT count(*) FROM blocks WHERE type='html'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(html, 0);
+}

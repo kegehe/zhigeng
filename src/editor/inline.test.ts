@@ -92,4 +92,36 @@ describe("颜色与高亮", () => {
     ]);
     expect(段[2]!.marks[0]!.color).toBe(红);
   });
+
+  it("上标 / 下标的精确标签原样往返", () => {
+    expect(成环("<sup>2</sup>")).toBe("<sup>2</sup>");
+    expect(成环("H<sub>2</sub>O")).toBe("H<sub>2</sub>O");
+  });
+  it("带属性的 sup / sub 仍当字面文字", () => {
+    expect(成环('<sup class="x">2</sup>')).toBe('<sup class="x">2</sup>');
+    expect(成环("<sub style=\"x\">2</sub>")).toBe("<sub style=\"x\">2</sub>");
+  });
+  it("上下标与颜色 / 高亮叠加：固定层序，字节稳定", () => {
+    // 上标在最外层，颜色 / 高亮的记号留在标签内部
+    expect(成环(`<span style="color:${红}"><sup>2</sup></span>`)).toBe(
+      `<sup><span style="color:${红}">2</span></sup>`,
+    );
+    expect(成环("<sup>==字==</sup>")).toBe("<sup>==字==</sup>");
+  });
+  it("上标与下标互斥：后加的那个替换先加的", () => {
+    const el = document.createElement("div");
+    document.body.append(el);
+    const editor = new Editor({
+      element: el,
+      extensions: mdExtensions,
+      content: {
+        type: "doc",
+        content: [{ type: "mdParagraph", content: inlineToJson("<sub>2</sub>") }],
+      } as never,
+    });
+    编辑器.push(editor);
+    editor.commands.setTextSelection({ from: 1, to: 2 });
+    editor.commands.toggleMark("sup");
+    expect(serializeInline(editor.state.doc.firstChild!)).toBe("<sup>2</sup>");
+  });
 });

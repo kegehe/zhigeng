@@ -75,6 +75,23 @@ fn 行首的颜色span仍是段落而不是HTML块() {
 }
 
 #[test]
+fn 行首的上下标仍是段落而不是HTML块() {
+    let doc = parse("<sup>2</sup> 是平方\n\n<sub>2</sub> 是下标\n");
+    assert_eq!(doc.blocks.len(), 2, "{:?}", doc.blocks.len());
+    for b in &doc.blocks {
+        assert!(
+            matches!(b.kind, Kind::Paragraph),
+            "行首的上下标被读成了 {:?}",
+            b.kind.as_str()
+        );
+    }
+    assert_eq!(plain_inline(&doc.blocks[0].content), "2 是平方");
+    // 带属性的标签不是我们产出的形状，照旧按 HTML 块处理
+    let html = parse("<sup class=\"x\">2</sup>\n");
+    assert!(matches!(html.blocks[0].kind, Kind::Html));
+}
+
+#[test]
 fn 颜色与高亮的语法不进检索文本() {
     // 颜色落成 `<span style="…">`（docs/02 D35）。标签必须剥掉：留着的话搜 "span"
     // 能搜出一堆笔记，AI 的上下文里也全是 CSS；而字一个都不能少。
@@ -96,6 +113,9 @@ fn 颜色与高亮的语法不进检索文本() {
     assert_eq!(plain_inline("这段 ==要跳出来== 了"), "这段 要跳出来 了");
     // 数学写法里的 == 不动：`a == b` 只剩一个 ==，没有收口
     assert_eq!(plain_inline("当 a == b 成立时"), "当 a == b 成立时");
+    // 上下标标签剥掉，字留下；没有开标签的收尾标签按字面留着
+    assert_eq!(plain_inline("H<sub>2</sub>O 与 x<sup>2</sup>"), "H2O 与 x2");
+    assert_eq!(plain_inline("字面 </sup> 留着"), "字面 </sup> 留着");
 }
 
 #[test]

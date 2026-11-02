@@ -38,6 +38,8 @@ export const 可刷标记 = [
   "italic",
   "strike",
   "code",
+  "sup",
+  "sub",
   "highlight",
   "textColor",
   "bgColor",

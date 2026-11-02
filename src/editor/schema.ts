@@ -1132,6 +1132,26 @@ export const MdCode = makeMark("code", "code", "");
 export const MdStrike = makeMark("strike", "s", "");
 
 /**
+ * 上标 / 下标。Markdown 没有原生语法，落盘用 `<sup>` / `<sub>`（docs/02 D38）。
+ *
+ * 互斥必须**两边都写**：ProseMirror 的 `Mark.addToSet` 遇到"现有标记排除了新标记"会
+ * 直接丢弃新的（`other.type.excludes(this.type)` 那条）。只给一边写，反方向点下去
+ * 会静默不生效——界面上按钮亮了，字却没变。
+ */
+export const MdSup = Mark.create({
+  name: "sup",
+  excludes: "sub",
+  parseHTML: () => [{ tag: "sup" }],
+  renderHTML: ({ HTMLAttributes }) => ["sup", HTMLAttributes, 0],
+});
+export const MdSub = Mark.create({
+  name: "sub",
+  excludes: "sup",
+  parseHTML: () => [{ tag: "sub" }],
+  renderHTML: ({ HTMLAttributes }) => ["sub", HTMLAttributes, 0],
+});
+
+/**
  * 高亮。`==文字==` 落盘（Obsidian 兼容），底色由 `--md-mark` 一个 token 决定——
  * 高亮表达的是"这一段要跳出来"，不是"用户挑了一个颜色"，所以它不参与调色板。
  */
@@ -1979,6 +1999,8 @@ export const mdExtensions = [
   MdItalic,
   MdCode,
   MdStrike,
+  MdSup,
+  MdSub,
   MdHighlight,
   MdTextColor,
   MdBgColor,

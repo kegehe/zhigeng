@@ -21,6 +21,8 @@ import {
   RemoveFormatting,
   Sparkles,
   Strikethrough,
+  Subscript,
+  Superscript,
   Table,
   Undo2,
   type LucideProps,
@@ -39,6 +41,8 @@ export type 图标名 =
   | "italic"
   | "strike"
   | "code"
+  | "sup"
+  | "sub"
   | "link"
   | "baseline"
   | "highlighter"
@@ -149,6 +153,8 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   italic: Italic,
   strike: Strikethrough,
   code: Code,
+  sup: Superscript,
+  sub: Subscript,
   link: Link2,
   // 文字色与底色是两枚：Baseline（A 加一道底色条）与 Highlighter（马克笔）——
   // Google Docs / Word 那一套。用户不用先认"这枚按钮是调色板还是字体色"

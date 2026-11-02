@@ -3,6 +3,7 @@ import type { Transaction } from "@tiptap/pm/state";
 import { describe, expect, it } from "vitest";
 
 import { docToMarkdown, reassemble, type EditBlock, type EditDoc } from "./blocks";
+import { 调色板 } from "./colors";
 import {
   关格式刷,
   取格式,
@@ -168,6 +169,21 @@ describe("刷格式", () => {
     editor.destroy();
   });
 
+  it("上标 / 下标也在可刷名单里：抄过去，目标的旧上下标会被摘掉", () => {
+    const doc = 篇(块("<sup>源</sup>"), 块("<sub>目标</sub>"));
+    const editor = createTestEditor(doc);
+    const 源 = 找(editor, "源");
+    选中(editor, 源, 源 + 1);
+    开格式刷(editor);
+
+    const 目标 = 找(editor, "目标");
+    选中(editor, 目标, 目标 + 2);
+    const 果 = 应用格式刷(editor);
+    expect(果.刷了).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("<sup>源</sup>\n\n<sup>目标</sup>\n");
+    editor.destroy();
+  });
+
   it("块类型刷到选区碰到的每一块；目标自己的链接留着", () => {
     const doc = 篇(
       块("**源**", { kind: "heading", level: 2 }),
@@ -304,7 +320,7 @@ describe("刷格式", () => {
     const 标 = editor.state.schema.marks;
     editor.view.dispatch(
       editor.state.tr
-        .addMark(源位, 源位 + 1, 标.textColor!.create({ color: "#ff0000" }))
+        .addMark(源位, 源位 + 1, 标.textColor!.create({ color: 调色板[0]!.hex }))
         .addMark(源位, 源位 + 1, 标.highlight!.create()),
     );
     选中(editor, 源位, 源位 + 1);
@@ -314,7 +330,7 @@ describe("刷格式", () => {
     选中(editor, 目标, 目标 + 2);
     应用格式刷(editor);
     expect(
-      editor.state.doc.rangeHasMark(目标, 目标 + 1, 标.textColor!.create({ color: "#ff0000" })),
+      editor.state.doc.rangeHasMark(目标, 目标 + 1, 标.textColor!.create({ color: 调色板[0]!.hex })),
     ).toBe(true);
     expect(editor.state.doc.rangeHasMark(目标, 目标 + 1, 标.highlight!.create())).toBe(true);
     editor.destroy();

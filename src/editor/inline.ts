@@ -9,10 +9,11 @@ import type { Node as PmNode } from "@tiptap/pm/model";
  * 才影响文件。自动链接、脚注、以及**我们不产出的** HTML 一律按纯文本处理——宁可少识别，
  * 也不许把用户的字吃掉。
  *
- * 颜色与高亮是**唯一两种借 HTML 落盘的样式**（2026-10-28 定，见 docs/02 D35）：
+ * 颜色、高亮与上下标是**借 HTML / 记号落盘的样式**（见 docs/02 D35、D38）：
  *   `==文字==`                              高亮（Obsidian 兼容，固定底色）
  *   `<span style="color:#rrggbb">文字</span>`  文字色
  *   `<span style="background-color:#rrggbb">` 底色
+ *   `<sup>文字</sup>` / `<sub>文字</sub>`     上标 / 下标（互斥）
  * 判据只有一条：**本序列化器产出的形状，解析回来必须逐字节还原**——否则改一个字就把整块
  * 字节洗掉。手写出来的另一种嵌套顺序（如 `==<span …>字</span>==`）会在**改过的块**上按固定
  * 层序归一成 `<span …>==字==</span>`，与 `__粗__` → `**粗**` 同一条既有性质；未改动的块
@@ -39,8 +40,17 @@ const SPANS: [string, string][] = [
  */
 const 色开 = /<span style="(color|background-color):(#[0-9a-fA-F]{8}|#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3})">/y;
 
-/** 递归上限。行内嵌套只有强调 / 链接 / 颜色三类，8 层早已超出真实写作 */
+/** 递归上限。行内嵌套只有强调 / 链接 / 颜色 / 上下标几类，8 层早已超出真实写作 */
 const 最深层 = 8;
+
+/**
+ * 上标 / 下标。Markdown 没有原生语法，落盘用精确的 `<sup>` / `<sub>`（docs/02 D38）。
+ * 和颜色 span 一样只认我们自己产出的形状：带属性的 `<sup class="x">` 继续是字面文字。
+ */
+const 上下标: [string, string, string][] = [
+  ["<sup>", "</sup>", "sup"],
+  ["<sub>", "</sub>", "sub"],
+];
 
 /**
  * 从 `from` 起找与开头那个 span 配对的 `</span>`。
@@ -126,7 +136,24 @@ export function parseInline(src: string, 层 = 0): Inline[] {
         continue;
       }
     }
-    // 2) 高亮 `==…==`
+    // 2) 上下标。只认精确开闭标签，别的 HTML 继续落到"字面文字"那条路
+    let 脚本: [string, string, string] | null = null;
+    for (const 项 of 上下标) {
+      if (src.startsWith(项[0], i)) {
+        脚本 = 项;
+        break;
+      }
+    }
+    if (脚本) {
+      const body = i + 脚本[0].length;
+      const close = src.indexOf(脚本[1], body);
+      if (close >= 0) {
+        收(src.slice(body, close), { name: 脚本[2] });
+        i = close + 脚本[1].length;
+        continue;
+      }
+    }
+    // 3) 高亮 `==…==`
     if (src.startsWith("==", i)) {
       const close = 找闭高亮(src, i + 2);
       if (close > 0) {
@@ -135,7 +162,7 @@ export function parseInline(src: string, 层 = 0): Inline[] {
         continue;
       }
     }
-    // 3) 链接 `[文字](目标)`
+    // 4) 链接 `[文字](目标)`
     if (src[i] === "[") {
       const close = src.indexOf("]", i);
       if (close > i && src[close + 1] === "(") {
@@ -147,7 +174,7 @@ export function parseInline(src: string, 层 = 0): Inline[] {
         }
       }
     }
-    // 4) 强调 / 行内码
+    // 5) 强调 / 行内码
     let hit = false;
     for (const [token, mark] of SPANS) {
       if (!src.startsWith(token, i)) continue;
@@ -206,6 +233,10 @@ const 层序: Record<string, number> = {
   highlight: 5,
   textColor: 6,
   bgColor: 7,
+  // 上下标在最外层：`==` / `**` / 反引号留在标签内部，Obsidian 那类按 token 解析
+  // 高亮的实现才认得出；两者互斥，不会同时出现。
+  sup: 8,
+  sub: 9,
 };
 
 function wrap(inner: string, token: string): string {
@@ -228,6 +259,15 @@ function 包色(inner: string, prop: "color" | "background-color", color: string
   // 一个 `</span>`，判了就把外层整个丢掉（真机上表现为"选中的底色一保存就没了"）。
   // 收口靠解析那边的层数计数（`找闭span`），不靠这里少包一层。
   return `<span style="${prop}:${color}">${inner}</span>`;
+}
+
+/**
+ * 上下标。体内已经有同名开 / 闭标签时不包：包了会产出解析不回来的字节
+ * （`<sup>a</sup>b</sup>` 这种），与 `wrap` 拒绝重复 token 是同一条性质。
+ */
+function 包上下标(inner: string, tag: "sup" | "sub"): string {
+  if (inner.includes(`<${tag}>`) || inner.includes(`</${tag}>`)) return inner;
+  return `<${tag}>${inner}</${tag}>`;
 }
 
 export function serializeInline(node: PmNode): string {
@@ -262,6 +302,12 @@ export function serializeInline(node: PmNode): string {
           break;
         case "bgColor":
           text = 包色(text, "background-color", String(mark.attrs.color ?? ""));
+          break;
+        case "sup":
+          text = 包上下标(text, "sup");
+          break;
+        case "sub":
+          text = 包上下标(text, "sub");
           break;
         default:
           break;

@@ -90,9 +90,16 @@ function pushText(out: Node[], d: Document, src: string): void {
         node = wrap;
         continue;
       }
-      const tag = { bold: "strong", italic: "em", code: "code", strike: "s", link: "a", highlight: "mark" }[
-        mark.name
-      ];
+      const tag = {
+        bold: "strong",
+        italic: "em",
+        code: "code",
+        strike: "s",
+        link: "a",
+        highlight: "mark",
+        sup: "sup",
+        sub: "sub",
+      }[mark.name];
       if (!tag) continue;
       const wrap = el(d, tag as "strong");
       if (tag === "a" && mark.href) wrap.setAttribute("href", mark.href);

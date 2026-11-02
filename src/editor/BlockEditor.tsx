@@ -41,6 +41,8 @@ const MARKS: { name: string; 标签: string; 图: 图标名 }[] = [
   { name: "italic", 标签: "斜体", 图: "italic" },
   { name: "strike", 标签: "删除线", 图: "strike" },
   { name: "code", 标签: "行内代码", 图: "code" },
+  { name: "sup", 标签: "上标", 图: "sup" },
+  { name: "sub", 标签: "下标", 图: "sub" },
 ];
 
 /**

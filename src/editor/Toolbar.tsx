@@ -220,6 +220,8 @@ export function Toolbar({ editor }: { editor: Editor }) {
       {btn("italic", "斜体 Ctrl+I", "italic", () => editor.chain().focus().toggleMark("italic").run(), editor.isActive("italic"))}
       {btn("strike", "删除线", "strike", () => editor.chain().focus().toggleMark("strike").run(), editor.isActive("strike"))}
       {btn("code", "行内代码", "code", () => editor.chain().focus().toggleMark("code").run(), editor.isActive("code"))}
+      {btn("sup", "上标", "sup", () => editor.chain().focus().toggleMark("sup").run(), editor.isActive("sup"))}
+      {btn("sub", "下标", "sub", () => editor.chain().focus().toggleMark("sub").run(), editor.isActive("sub"))}
       {btn("link", "链接", "link", () => setLinking((v) => !v), editor.isActive("link"))}
       {linking ? <LinkEditor editor={editor} onDone={() => setLinking(false)} /> : null}
       {/*
@@ -258,7 +260,7 @@ export function Toolbar({ editor }: { editor: Editor }) {
       })}
       {btn(
         "clear",
-        "清除格式（回到正文，去掉加粗 / 斜体 / 删除线 / 行内码 / 高亮 / 颜色；链接保留）",
+        "清除格式（回到正文，去掉加粗 / 斜体 / 删除线 / 行内码 / 上标 / 下标 / 高亮 / 颜色；链接保留）",
         "clear",
         () => {
           // 只去行内样式，**留着链接**：`unsetAllMarks` 会把 link 一起抹掉，而"清除格式"
@@ -271,6 +273,8 @@ export function Toolbar({ editor }: { editor: Editor }) {
             .unsetMark("italic")
             .unsetMark("strike")
             .unsetMark("code")
+            .unsetMark("sup")
+            .unsetMark("sub")
             .unsetMark("highlight")
             .unsetMark("textColor")
             .unsetMark("bgColor")

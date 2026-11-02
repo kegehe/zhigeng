@@ -65,6 +65,14 @@ describe("显示形：分隔线 / 引用 / Callout", () => {
     expect(q?.textContent).not.toContain("[[");
   });
 
+  it("上下标在显示形里是 sup / sub，不留字面标签", () => {
+    const q = r("quote", "> H<sub>2</sub>O 与 x<sup>2</sup>");
+    expect(q?.querySelector("sub")?.textContent).toBe("2");
+    expect(q?.querySelector("sup")?.textContent).toBe("2");
+    expect(q?.textContent).not.toContain("<sub>");
+    expect(q?.textContent).not.toContain("<sup>");
+  });
+
   it("Callout 出类型与标题，正文另起", () => {
     const c = r("callout", "> [!question] 打扰预算是多少？\n> 一天超过 3 次推送就应该收敛策略。");
     expect(c?.dataset["callout"]).toBe("question");
