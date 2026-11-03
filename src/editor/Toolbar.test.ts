@@ -128,6 +128,33 @@ it("格式刷常驻在工具栏：有选区才可点，点开按住态，双击�
   editor.destroy();
 });
 
+it("上标与下标各有入口，互斥地套在选区上", async () => {
+  const editor = createTestEditor(篇("第一段文字"));
+  editor.commands.setTextSelection({ from: 1, to: 6 });
+  const { 根, 拆 } = await 挂(editor);
+  const 上标 = 根.querySelector('button[aria-label="上标"]') as HTMLButtonElement;
+  const 下标 = 根.querySelector('button[aria-label="下标"]') as HTMLButtonElement;
+  expect(上标).not.toBeNull();
+  expect(下标).not.toBeNull();
+
+  await act(async () => {
+    上标.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.content![0]).toEqual(
+    expect.objectContaining({ marks: [{ type: "sup" }] }),
+  );
+
+  // 两个标记互斥：后点的那个把先点的顶掉，而不是叠成两层
+  await act(async () => {
+    下标.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.content![0]).toEqual(
+    expect.objectContaining({ marks: [{ type: "sub" }] }),
+  );
+  拆();
+  editor.destroy();
+});
+
 it("底色面板第一格是高亮，套的是 ==…== 那一档", async () => {
   const editor = createTestEditor(篇("第一段文字"));
   editor.commands.setTextSelection({ from: 1, to: 6 });

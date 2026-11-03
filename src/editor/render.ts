@@ -51,7 +51,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 /**
- * 行内显示形。复用 `parseInline`（加粗 / 斜体 / 行内码 / 删除线 / 链接），
+ * 行内显示形。复用 `parseInline`（加粗 / 斜体 / 行内码 / 删除线 / 上下标 / 高亮 / 颜色 / 链接），
  * `[[wikilink]]` 在这里就地处理——**不动 inline.ts**：那份函数喂着序列化器，
  * 为显示去改它等于拿用户的字节做实验。
  */

@@ -33,7 +33,8 @@ import { FormatPainter } from "./formatPainter";
 import { mightRender, renderOpaque } from "./render";
 
 /**
- * 与 md-kernel 块模型一一对应的节点集，加上五个行内标记。
+ * 与 md-kernel 块模型一一对应的节点集，加上十个行内标记
+ * （加粗 / 斜体 / 行内码 / 删除线 / 上标 / 下标 / 高亮 / 文字色 / 底色 / 链接）。
  *
  * 刻意不引 StarterKit：它带进来的 bulletList/orderedList/paragraph/heading 正是我们
  * 不想要的那套块结构；更糟的是**同名节点会把自定义节点顶掉**，节点类型一旦不是我们自己

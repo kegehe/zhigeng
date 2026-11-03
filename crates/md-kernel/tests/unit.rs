@@ -116,6 +116,15 @@ fn 颜色与高亮的语法不进检索文本() {
     // 上下标标签剥掉，字留下；没有开标签的收尾标签按字面留着
     assert_eq!(plain_inline("H<sub>2</sub>O 与 x<sup>2</sup>"), "H2O 与 x2");
     assert_eq!(plain_inline("字面 </sup> 留着"), "字面 </sup> 留着");
+    // **只开没闭**的也按字面留着：前面那个 `<sup>` 不能与后面真正的收口配成一对，
+    // 否则"用 <sup> 说明：x<sup>2</sup>"里的说明文字会整段消失
+    assert_eq!(
+        plain_inline("用 <sup> 说明：x<sup>2</sup>"),
+        "用 <sup> 说明：x2"
+    );
+    assert_eq!(plain_inline("10<sup>2"), "10<sup>2");
+    // 手写嵌套里配对的照样剥掉，只留没配上的那个
+    assert_eq!(plain_inline("10<sup>2<sub>3</sub>"), "10<sup>23");
 }
 
 #[test]

@@ -401,8 +401,10 @@ pub fn plain_inline(text: &str) -> String {
     let mut i = 0;
     // 只对**我们自己写出**的标签记账：正文里随手写的 `</span>` / `</sup>` 该原样留着
     let mut span_depth = 0usize;
-    let mut sup_depth = 0usize;
-    let mut sub_depth = 0usize;
+    // `<sup>` / `<sub>` 只有成对才当语法。开标签先记下剥掉它的位置，扫完还留着没配对的，
+    // 再原样补回去——与前端 `parseInline` 同一条判据：宁可少识别，也不吃用户的字面文字。
+    // `out` 只增不减，位置随出现顺序单调不减。
+    let mut opens: Vec<(usize, &'static str)> = Vec::new();
     while i < b.len() {
         match b[i] {
             b'`' => {
@@ -510,17 +512,33 @@ pub fn plain_inline(text: &str) -> String {
                     span_depth -= 1;
                     i += 7;
                 } else if rest.starts_with("<sup>") {
-                    sup_depth += 1;
+                    opens.push((out.len(), "<sup>"));
                     i += 5;
-                } else if rest.starts_with("</sup>") && sup_depth > 0 {
-                    sup_depth -= 1;
-                    i += 6;
+                } else if rest.starts_with("</sup>") {
+                    match opens.iter().rposition(|&(_, t)| t == "<sup>") {
+                        Some(at) => {
+                            opens.remove(at);
+                            i += 6;
+                        }
+                        None => {
+                            out.push('<');
+                            i += 1;
+                        }
+                    }
                 } else if rest.starts_with("<sub>") {
-                    sub_depth += 1;
+                    opens.push((out.len(), "<sub>"));
                     i += 5;
-                } else if rest.starts_with("</sub>") && sub_depth > 0 {
-                    sub_depth -= 1;
-                    i += 6;
+                } else if rest.starts_with("</sub>") {
+                    match opens.iter().rposition(|&(_, t)| t == "<sub>") {
+                        Some(at) => {
+                            opens.remove(at);
+                            i += 6;
+                        }
+                        None => {
+                            out.push('<');
+                            i += 1;
+                        }
+                    }
                 } else {
                     out.push('<');
                     i += 1;
@@ -557,6 +575,11 @@ pub fn plain_inline(text: &str) -> String {
                 i += c.len_utf8();
             }
         }
+    }
+    // 没等到收口的开标签按原样补回去。倒序插入，前面记下的偏移才不会被后面的插入推走；
+    // 同位置的标签（`<sup><sub>` 紧挨着）也靠倒序还原成原来的先后。
+    for &(at, tag) in opens.iter().rev() {
+        out.insert_str(at, tag);
     }
     out
 }

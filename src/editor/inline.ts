@@ -53,6 +53,14 @@ const 上下标: [string, string, string][] = [
 ];
 
 /**
+ * 配对的体内再有上下标标签，就不是我们写出的形状。外层若照收，后面那一半会被吞掉：
+ * `用 <sup> 说明：x<sup>2</sup>` 会把第一个 `<sup>` 与最后的 `</sup>` 配成一对，
+ * 中间 11 个字节直接消失。手写的嵌套（`<sup>2<sub>3</sub></sup>`）逐段按字面留下，
+ * 序列化反而能原样还原。
+ */
+const 内有脚本 = /<\/?(?:sup|sub)>/;
+
+/**
  * 从 `from` 起找与开头那个 span 配对的 `</span>`。
  *
  * 必须数层：颜色与底色叠在同一段字上时，序列化会产出一个套一个的同名标签，
@@ -147,7 +155,8 @@ export function parseInline(src: string, 层 = 0): Inline[] {
     if (脚本) {
       const body = i + 脚本[0].length;
       const close = src.indexOf(脚本[1], body);
-      if (close >= 0) {
+      // 空标签（`<sup></sup>`）也留下：收下它生不出任何文字节点，序列化就丢了这条字节
+      if (close > body && !内有脚本.test(src.slice(body, close))) {
         收(src.slice(body, close), { name: 脚本[2] });
         i = close + 脚本[1].length;
         continue;

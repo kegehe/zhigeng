@@ -124,4 +124,13 @@ describe("颜色与高亮", () => {
     editor.commands.toggleMark("sup");
     expect(serializeInline(editor.state.doc.firstChild!)).toBe("<sup>2</sup>");
   });
+
+  it("体内再出现上下标标签时按字面留下，不把两对配成一对", () => {
+    // 只开了没闭的 `<sup>` 若被收成语法，会与后面真正的收口配成一对，中间的字整段消失
+    expect(成环("用 <sup> 说明：x<sup>2</sup>")).toBe("用 <sup> 说明：x<sup>2</sup>");
+    // 手写的嵌套在 PM 里表达不出来（sup / sub 互斥），逐段按字面留下才能字节还原
+    expect(成环("10<sup>2<sub>3</sub></sup>")).toBe("10<sup>2<sub>3</sub></sup>");
+    // 空标签收下去生不出文字节点，序列化会把它整条丢掉
+    expect(成环("<sup></sup>")).toBe("<sup></sup>");
+  });
 });
