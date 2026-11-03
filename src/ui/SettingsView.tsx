@@ -2,8 +2,9 @@ import { useState, type KeyboardEvent, type ReactNode } from "react";
 import { btn, btnPrimary, 路径框 } from "./controls";
 import { 缺项, 步骤名, 探针结论 } from "./ai";
 import { 是回车提交 } from "./keys";
-import { 主题档位, 判备份, 配置归属, type AI忙, type AI表单 } from "./settings";
+import { 主题档位, 行距档位, 判备份, 配置归属, type AI忙, type AI表单 } from "./settings";
 import type { Theme } from "./theme";
+import type { 行距 } from "./typography";
 import type { AppInfo, AiDiscovery, AiProbeReport, AiView } from "../ipc/types";
 
 /**
@@ -81,7 +82,12 @@ export function SettingsView(props: {
    * 进得去出不来的地方。**这一页也不接住齿轮那一下**：那是标题栏的事，不归视图。
    */
   onBack: () => void;
-  外观: { theme: Theme; setTheme: (t: Theme) => void };
+  外观: {
+    theme: Theme;
+    setTheme: (t: Theme) => void;
+    行距: 行距;
+    set行距: (v: 行距) => void;
+  };
   备份: {
     draft: string;
     setDraft: (s: string) => void;
@@ -177,6 +183,32 @@ export function SettingsView(props: {
               </option>
             ))}
           </select>
+        </行>
+        <行 标签="正文行高">
+          {/* 打开设置会把编辑器卸载，光给一个下拉就看不到"多高"；样例读同一个 token，
+              切档时这里当场变——设置页不必为了预览再把正文挂回来 */}
+          <select
+            aria-label="正文行高"
+            className="w-32 rounded-md border border-line bg-page px-2 py-1 text-xs text-fg"
+            value={外观.行距}
+            onChange={(e) => 外观.set行距(e.target.value as 行距)}
+          >
+            {行距档位.map((档) => (
+              <option key={档.值} value={档.值}>
+                {档.标签}
+              </option>
+            ))}
+          </select>
+          <span
+            aria-hidden="true"
+            className="min-w-0 flex-1 rounded-md border border-line bg-page px-3 py-2 text-sm text-fg-2"
+            style={{ lineHeight: "var(--leading-note)" }}
+          >
+            这一行用来看行距：紧一点还是松一点，读起来不一样。
+            <br />
+            第二行紧挨着，两行之间的距离就是这一档的全部差别。
+          </span>
+          <span className="text-xs text-fg-2">只改正文；代码块与标题保持原样</span>
         </行>
       </节>
 

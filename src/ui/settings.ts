@@ -1,5 +1,6 @@
 import type { AppInfo } from "../ipc/types";
 import type { Theme } from "./theme";
+import type { 行距 } from "./typography";
 
 /**
  * 主题的三档。顺序 = 界面上的顺序，`跟随系统` 排第一因为它是默认值
@@ -9,6 +10,16 @@ export const 主题档位: { 值: Theme; 标签: string }[] = [
   { 值: "system", 标签: "跟随系统" },
   { 值: "light", 标签: "亮色" },
   { 值: "dark", 标签: "暗色" },
+];
+
+/**
+ * 正文行高三档。顺序按"从紧到松"排，与屏幕上控件里的排列一致；
+ * **标准**是 `读行距` 的默认值，也是没有存过偏好时的样子。
+ */
+export const 行距档位: { 值: 行距; 标签: string }[] = [
+  { 值: "tight", 标签: "紧凑" },
+  { 值: "standard", 标签: "标准" },
+  { 值: "loose", 标签: "宽松" },
 ];
 
 /** AI 那四格草稿。与 `ai_save_config` 的四个参数一一对应 */
@@ -57,6 +68,6 @@ export function 判备份(info: 备份事实 | null): 备份状态 {
  */
 export const 配置归属: { 项: string; 落在哪: string; 随库走: boolean }[] = [
   { 项: "备份目录、AI 端点与模型名", 落在哪: ".note/config.toml", 随库走: true },
-  { 项: "主题", 落在哪: "本机设置", 随库走: false },
+  { 项: "主题、正文行高", 落在哪: "本机设置", 随库走: false },
   { 项: "API Key", 落在哪: "Windows 凭据管理器", 随库走: false },
 ];

@@ -182,6 +182,12 @@
     min-height: 60vh;
     cursor: text;
   }
+  /* 正文行高跟着本机偏好走（设置页 / 命令面板三档）。只落在**正文内容**上：
+     标题的 1.35 与代码的 1.7 各有各的道理，面板、闪现提示、速记窗也不该被一起拉高 */
+  .block-editor .ProseMirror p,
+  .block-editor .ProseMirror li {
+    line-height: var(--leading-note);
+  }
   /* 格式刷待命：正文上方换成十字。`data-md-paint` 由 FormatPainter 的插件 view
      写 / 删（只动 DOM，不发事务），界面靠它说"现在点哪都是刷格式"。 */
   .block-editor .ProseMirror[data-md-paint] {
@@ -226,7 +232,7 @@
     position: relative;
     margin: 0 0 var(--gap-list);
     padding-left: calc(1.5em + var(--md-indent, 0) * 1.5em);
-    line-height: var(--leading-body);
+    line-height: var(--leading-note);
   }
   .block-editor [data-md-item]::before {
     content: attr(data-marker);
@@ -273,7 +279,12 @@
     color: var(--text-secondary);
     font-family: var(--font-mono);
     font-size: var(--text-mono);
-    line-height: var(--leading-body);
+    line-height: var(--leading-note);
+  }
+  /* 代码的源文本形仍按代码行高：它是同一块"点进去"的那一面，跟着阅读偏好走
+     会在进出时抖一下，也会让行号与代码重新漂开 */
+  .block-editor .md-opaque[data-md-raw="code"] .md-src {
+    line-height: var(--leading-code);
   }
   .block-editor .md-view > :last-child,
   .block-editor .md-view blockquote > :last-child,
@@ -754,7 +765,7 @@
     padding: var(--space-2) var(--space-3);
     vertical-align: top;
     text-align: start;
-    line-height: var(--leading-body);
+    line-height: var(--leading-note);
   }
   .block-editor [data-md-cell][data-align="center"] {
     text-align: center;

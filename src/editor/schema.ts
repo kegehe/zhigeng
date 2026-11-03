@@ -31,6 +31,7 @@ import { 短写, 已识别, 语言清单, 语言of, 着色区间, 识别 } from 
 import { 引用高亮扩展 } from "./citeFocus";
 import { FormatPainter } from "./formatPainter";
 import { mightRender, renderOpaque } from "./render";
+import { 行距事件 } from "../ui/typography";
 
 /**
  * 与 md-kernel 块模型一一对应的节点集，加上十个行内标记
@@ -1460,10 +1461,33 @@ export const FocusIndicator = Extension.create({
             }
             paint(dom.offsetTop, dom.offsetHeight);
           };
+          /**
+           * 行高变了要重画。缓存键只有块序号，档位一变 `last` 还是旧值，
+           * 早退就会把竖线留在旧高度上。这里仍然**只写 DOM，不发事务**。
+           * 另听 focus/blur：设置页回来或命令面板归还焦点时，光标位置没变、
+           * 不一定有 update，不补这一下竖线就会停留在"关着"的样子。
+           */
+          const 重画 = () => {
+            last = "";
+            sync();
+          };
+          const 收线 = () => {
+            if (last === "off") return;
+            last = "off";
+            paint(0, 0);
+          };
           sync();
+          document.addEventListener(行距事件, 重画);
+          view.dom.addEventListener("focus", 重画);
+          view.dom.addEventListener("blur", 收线);
           return {
             update: sync,
-            destroy: () => paint(0, 0),
+            destroy: () => {
+              document.removeEventListener(行距事件, 重画);
+              view.dom.removeEventListener("focus", 重画);
+              view.dom.removeEventListener("blur", 收线);
+              paint(0, 0);
+            },
           };
         },
       }),

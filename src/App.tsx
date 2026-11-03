@@ -77,6 +77,7 @@ import type {
   TrashRow,
 } from "./ipc/types";
 import { 读主题, 套主题, 写主题, 盯主题变化, type Theme } from "./ui/theme";
+import { 读行距, 套行距, 写行距, 盯行距变化, type 行距 } from "./ui/typography";
 
 /**
  * 主区当前在干什么。同一时刻只能有一个，切换前必须先离开上一个。
@@ -180,6 +181,24 @@ function useTheme() {
     set档(t);
   };
   return { theme, setTheme };
+}
+
+function use行距() {
+  const [行距, set档] = useState<行距>(读行距);
+  useEffect(() => {
+    // 与主题同一条纪律：这里只套不存，存只发生在用户真的选了一档那条路
+    套行距(行距);
+    return 盯行距变化(() => {
+      const 新 = 读行距();
+      套行距(新);
+      set档(新);
+    });
+  }, [行距]);
+  const set行距 = (v: 行距) => {
+    写行距(v);
+    set档(v);
+  };
+  return { 行距, set行距 };
 }
 
 function relativeTime(ms: number): string {
@@ -349,6 +368,7 @@ export function App() {
   const 首字 = useRef(0);
   const [runs, setRuns] = useState<AiRun[]>([]);
   const { theme, setTheme } = useTheme();
+  const { 行距, set行距 } = use行距();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
   /** 行内模式的 Markdown 只在落盘那一刻取一次：整篇序列化是 O(块数) 的 */
@@ -1764,6 +1784,24 @@ export function App() {
         label: "主题：暗色",
         run: () => setTheme("dark"),
       },
+      {
+        id: "a-l1",
+        group: "动作",
+        label: "正文行高：紧凑",
+        run: () => set行距("tight"),
+      },
+      {
+        id: "a-l2",
+        group: "动作",
+        label: "正文行高：标准",
+        run: () => set行距("standard"),
+      },
+      {
+        id: "a-l3",
+        group: "动作",
+        label: "正文行高：宽松",
+        run: () => set行距("loose"),
+      },
     ];
     if (selected) {
       动作.unshift({
@@ -2504,7 +2542,7 @@ export function App() {
                   info={info}
                   flash={flash}
                   onBack={backToNote}
-                  外观={{ theme, setTheme }}
+                  外观={{ theme, setTheme, 行距, set行距 }}
                   备份={{
                     draft: backupDraft,
                     setDraft: setBackupDraft,
@@ -2820,7 +2858,7 @@ export function App() {
                           onChange={(e) => setDraft(e.target.value)}
                           onBlur={() => void persist()}
                           onKeyDown={bodyKeys}
-                          className="h-[60vh] w-full resize-y rounded-md border border-line bg-sunken p-4 font-mono text-mono leading-body text-fg"
+                          className="h-[60vh] w-full resize-y rounded-md border border-line bg-sunken p-4 font-mono text-mono leading-note text-fg"
                         />
                       ) : (
                         // 装载中：既不给上一篇留着，也不闪一个空框——骨架意味着"路上有东西"。

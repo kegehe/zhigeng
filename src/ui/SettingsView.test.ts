@@ -56,6 +56,7 @@ function 挂(over: {
   info?: AppInfo;
   setForm?: (f: AI表单) => void;
   setKey?: (k: string) => void;
+  set行距?: (v: "tight" | "standard" | "loose") => void;
 }) {
   const view = over.view === undefined ? 视图() : over.view;
   const form =
@@ -74,7 +75,12 @@ function 挂(over: {
         info: over.info ?? 信息,
         flash: over.flash ?? null,
         onBack: () => {},
-        外观: { theme: "system", setTheme: () => {} },
+        外观: {
+          theme: "system",
+          setTheme: () => {},
+          行距: "standard",
+          set行距: over.set行距 ?? (() => {}),
+        },
         备份: { draft: "", setDraft: () => {}, 忙: false, 应用: () => {} },
         模型: {
           view,
@@ -196,6 +202,27 @@ it("删除 Key 的忙态落在删除那枚上", () => {
   const { 根, 拆 } = 挂({ view: 视图({ keySet: true }), key: "", 忙: "key" });
   expect(按文字(根, "删除中…")).not.toBeNull();
   expect(按文字(根, "存 Key")).toBeNull();
+  拆();
+});
+
+it("正文行高三档可选，旁边那两行样例读的是同一个 token", () => {
+  // 打开设置会卸载编辑器：没有样例就等于让用户在黑框里凭名字猜"紧凑"有多紧
+  const set行距 = vi.fn();
+  const { 根, 拆 } = 挂({ set行距 });
+  const 选 = 根.querySelector('select[aria-label="正文行高"]') as HTMLSelectElement | null;
+  expect(选).not.toBeNull();
+  expect(Array.from(选!.options).map((o) => o.textContent)).toEqual([
+    "紧凑",
+    "标准",
+    "宽松",
+  ]);
+  act(() => {
+    选!.value = "loose";
+    选!.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(set行距).toHaveBeenCalledWith("loose");
+  const 样例 = 根.querySelector('span[style*="--leading-note"]');
+  expect(样例?.textContent).toContain("第二行紧挨着");
   拆();
 });
 

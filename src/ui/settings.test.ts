@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import type { AppInfo } from "../ipc/types";
-import { 主题档位, 判备份, 配置归属 } from "./settings";
+import { 主题档位, 行距档位, 判备份, 配置归属 } from "./settings";
 
 const 事实 = (过: Partial<AppInfo>): AppInfo => ({
   version: "0",
@@ -66,12 +66,24 @@ describe("主题档位", () => {
   });
 });
 
+describe("正文行高档位", () => {
+  it("三档齐全，顺序从紧到松，标准在中间", () => {
+    // 顺序即控件里的顺序；`读行距` 的默认值必须能在列表里找到
+    expect(行距档位.map((x) => x.值)).toEqual(["tight", "standard", "loose"]);
+  });
+
+  it("每一档都有中文标签，界面不许出现 tight/standard/loose", () => {
+    for (const 档 of 行距档位) expect(档.标签).toMatch(/^[一-龥]+$/);
+  });
+});
+
 describe("设置页说清哪些偏好跟着库走", () => {
   it("凭据管理器与本机存储两类都在，且标成不随库走", () => {
     // docs/03 §备份与迁移：换机要重输 Key 这个事实"要写在设置页，不要让用户以为拷完就全能用"
     const 不随库 = 配置归属.filter((x) => !x.随库走).map((x) => x.项);
     expect(不随库.join("")).toContain("API Key");
     expect(不随库.join("")).toContain("主题");
+    expect(不随库.join("")).toContain("行高");
     expect(配置归属.find((x) => x.随库走)?.落在哪).toContain(".note/config.toml");
   });
 });

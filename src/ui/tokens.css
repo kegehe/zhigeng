@@ -85,6 +85,10 @@
      行内码跟着段落走，只有整块代码用这一档。以前 `.prose-note pre` 写死 1.7、
      而块编辑器那三处写的是 `--leading-body`（1.75）——同一件事两个值，行号与代码会漂开 */
   --leading-code: 1.7;
+  /* 正文行高：**用户可调**的那一档，由 src/ui/typography.ts 写 `data-leading`。
+     与 `--leading-body` 分开：后者是排版基准（字阶表、面板正文、速记框都读它），
+     只有正文编辑区读这一档——代码块仍走 `--leading-code`，标题仍走 1.35 */
+  --leading-note: var(--leading-body);
   --font-ui: "Inter Variable", "Inter", "Noto Sans SC", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
 
@@ -136,6 +140,18 @@
   --dur-3: 240ms;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/*
+ * 正文行高三档。**「标准」故意不写规则**：1.75 就是 `:root` 的默认值，
+ * `data-leading="standard"` 只负责让另外两档有个可区分的落点，而不是再记一遍数字。
+ * 紧凑 1.6 仍高于 WCAG 1.4.12 的 1.5 行距下限；宽松 2.0 是中文长文常见的舒展档。
+ */
+html[data-leading="tight"] {
+  --leading-note: 1.6;
+}
+html[data-leading="loose"] {
+  --leading-note: 2;
 }
 
 [data-theme="dark"] {
@@ -248,6 +264,7 @@
   --leading-body: var(--leading-body);
   --leading-ui: var(--leading-ui);
   --leading-code: var(--leading-code);
+  --leading-note: var(--leading-note);
 
   --font-ui: var(--font-ui);
   --font-mono: var(--font-mono);
