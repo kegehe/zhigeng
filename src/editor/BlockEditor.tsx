@@ -3,8 +3,11 @@ import type { Editor } from "@tiptap/core";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
+  applyBlockAlign,
   applyBlockType,
+  BLOCK_ALIGNS,
   BLOCK_TYPES,
+  cellAt,
   docToMarkdown,
   docToJson,
   INSERTABLE,
@@ -12,8 +15,11 @@ import {
   moveBlock,
   replaceBlockWithSource,
   stampSignatures,
+  块对齐of,
   删块在,
+  有可对齐块,
   格坐标At,
+  type BlockAlign,
   type BlockTypeId,
   type EditDoc,
 } from "./blocks";
@@ -23,7 +29,7 @@ import { mdExtensions } from "./schema";
 import { 关格式刷, 开格式刷, 能开格式刷, 格式刷状态of } from "./formatPainter";
 import { 就绪后标出 } from "./citeFocus";
 import { 工具图标, type 图标名 } from "./icons";
-import { LinkEditor, Toolbar } from "./Toolbar";
+import { 对齐图, LinkEditor, Toolbar } from "./Toolbar";
 
 /** 气泡位置：相对外层容器算，滚动时重算，不让它跟着漂 */
 type Float = {
@@ -502,6 +508,13 @@ export function BlockEditor({
     noticeRef.current?.("已删掉这一块 · Ctrl+Z 撤销");
   };
 
+  /** 选区气泡上的块级对齐（与顶部工具栏共用 `applyBlockAlign`，一次一笔事务） */
+  const 做块对齐 = (对: BlockAlign) => {
+    const { tr, 跳过 } = applyBlockAlign(editor.state, 对);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+    if (跳过 > 0) noticeRef.current?.(`对齐只作用于正文与标题，已跳过 ${跳过} 个块`);
+  };
+
   /**
    * 手柄按下：挪动超过 5px 算拖拽，否则算点击开类型菜单。
    *
@@ -620,6 +633,29 @@ export function BlockEditor({
               </button>
             );
           })()}
+          {/* 块级对齐：选中的文字所在（或跨过的）正文 / 标题一起改。表格格子里有自己的
+              列对齐，列表 / 引用 / 代码 / 图片根本落不成包裹——这几种干脆不出现，
+              免得按下去只换来一句"没改成" */}
+          {cellAt(editor.state) === null && 有可对齐块(editor.state)
+            ? BLOCK_ALIGNS.map((a) => {
+                const Icon = 工具图标[对齐图[a.id]];
+                const 开着 =
+                  a.id !== "left" && 块对齐of(editor.state.selection.$from.parent) === a.id;
+                return (
+                  <button
+                    key={"ba-" + a.id}
+                    type="button"
+                    className={开着 ? "on" : ""}
+                    title={a.标签}
+                    aria-label={a.标签}
+                    aria-pressed={开着 || undefined}
+                    onClick={() => 做块对齐(a.id)}
+                  >
+                    <Icon />
+                  </button>
+                );
+              })
+            : null}
           {linking ? (
             // 输入框用工具栏那份实现：两处各写一份，早晚一处改了 `extendMarkRange`
             // 另一处没改，链接就会吃掉或漏掉半个词

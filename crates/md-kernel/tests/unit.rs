@@ -166,6 +166,84 @@ fn 松散列表的空行不丢() {
 }
 
 #[test]
+fn 对齐包裹被识别为正文块并原样回显() {
+    // docs/02 D40 的精确形状：开标签、空行、一块正文、空行、收尾标签。
+    for (src, kind, level, body) in [
+        (
+            "<div align=\"center\">\n\n居中的一段\n\n</div>\n",
+            "paragraph",
+            0,
+            "居中的一段",
+        ),
+        (
+            "<div align=\"right\">\n\n## 右对齐标题\n\n</div>\n",
+            "heading",
+            2,
+            "右对齐标题",
+        ),
+        (
+            "<div align=\"justify\">\n\n两端对齐\n\n</div>\n",
+            "paragraph",
+            0,
+            "两端对齐",
+        ),
+    ] {
+        let d = parse(src);
+        assert_eq!(d.blocks.len(), 1, "{src:?} 应是一块");
+        let b = &d.blocks[0];
+        assert_eq!(b.kind.as_str(), kind, "{src:?}");
+        if level > 0 {
+            assert!(
+                matches!(b.kind, Kind::Heading { level: l, .. } if l == level),
+                "{src:?} -> {:?}",
+                b.kind
+            );
+        }
+        assert_eq!(b.content, body);
+        assert_eq!(b.align.as_deref(), Some(src.split('"').nth(1).unwrap()));
+        assert!(!b.simple(), "对齐块必须回显 raw，不能按裸正文重建");
+        // 检索只吃正文，包裹标签不该进 FTS / 嵌入
+        assert_eq!(b.plain_text(), body);
+        assert_eq!(render_exact(&d), src);
+        assert_eq!(render_canonical(&d), src);
+    }
+}
+
+#[test]
+fn 对齐包裹的CRLF与前后空行不丢() {
+    let src = "上文\n\n<div align=\"center\">\r\n\r\n段落\r\n\r\n</div>\r\n\r\n下文\n";
+    let d = parse(src);
+    assert_eq!(d.blocks.len(), 3);
+    assert_eq!(d.blocks[1].align.as_deref(), Some("center"));
+    assert_eq!(d.blocks[1].content, "段落");
+    assert_eq!(render_exact(&d), src);
+    assert_eq!(render_canonical(&d), src);
+}
+
+#[test]
+fn 非精确对齐形状仍当不透明HTML块() {
+    // 多块、内部空行、别的 align 值、收尾前没有空行：都不是我们产出的形状，
+    // 一律留给 Html 块原样回显（宁可少识别，也不替用户改他手写的 HTML）。
+    for src in [
+        "<div align=\"center\">\n\n甲\n\n乙\n\n</div>\n",
+        "<div align=\"left\">\n\n段落\n\n</div>\n",
+        "<div align=\"center\">\n\n段落\n</div>\n",
+        "<div align=\"center\">\n\n- 列表项\n\n</div>\n",
+        "<div align=\"center\">\n\n</div>\n",
+        "<div align=\"center\">\n\n段落\n\n",
+    ] {
+        let d = parse(src);
+        assert_eq!(render_exact(&d), src, "exact {src:?}");
+        assert_eq!(render_canonical(&d), src, "canonical {src:?}");
+        assert!(
+            d.blocks.iter().any(|b| matches!(b.kind, Kind::Html)),
+            "{src:?} 不该被认成对齐块"
+        );
+        assert!(d.blocks.iter().all(|b| b.align.is_none()), "{src:?}");
+    }
+}
+
+#[test]
 fn 行号用于定位与高亮() {
     let s = "---\nid: n-1\n---\n\n# 标题\n\n正文\n";
     let d = parse(s);

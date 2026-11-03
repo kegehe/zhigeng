@@ -145,6 +145,8 @@ pub struct Block {
     pub children: Vec<Block>,
     /// 行内字段，只认 `due::` 与 `done::`（docs/02 §待办的到期约定）。
     pub fields: Vec<(String, String)>,
+    /// 块级对齐（`<div align="…">` 包裹，docs/02 D40）。`None` 即默认靠左。
+    pub align: Option<String>,
     pub line_start: usize,
     pub line_end: usize,
 }
@@ -153,7 +155,12 @@ impl Block {
     /// 该块是否可按规范重建。除了类型白名单，还要求源文本各行缩进齐整——
     /// **宁可回显原文，也不要在重建时悄悄改掉用户的前导空白**。
     pub fn simple(&self) -> bool {
-        self.kind.is_simple() && self.children.iter().all(Block::simple) && self.indent_uniform()
+        // 对齐块外面裹着 `<div align>`，重建只会吐出裸正文、把包裹丢掉，
+        // 所以一律回显 `raw`（docs/02 D40）。
+        self.align.is_none()
+            && self.kind.is_simple()
+            && self.children.iter().all(Block::simple)
+            && self.indent_uniform()
     }
 
     /// 除首行的 `indent` 外，其余非空行不得再有前导空白（Tab 也算）。
@@ -816,6 +823,77 @@ fn indent_of(text: &str) -> String {
     text[..n].to_string()
 }
 
+/// 对齐包裹的开标签：只认我们自己写的那三种值。`left` 不落包裹。
+fn wrapper_align(text: &str) -> Option<&'static str> {
+    match text {
+        "<div align=\"center\">" => Some("center"),
+        "<div align=\"right\">" => Some("right"),
+        "<div align=\"justify\">" => Some("justify"),
+        _ => None,
+    }
+}
+
+/// 识别对齐包裹（docs/02 D40）：开标签独占一行、紧跟一个空行，内部恰好一块正文
+/// （段落或 ATX 标题），再跟一个空行与 `</div>`。
+///
+/// 只吃这一种精确形状。内部有多块、含空行、嵌套包裹，或者外面的 `<div>` 不是我们
+/// 写的那几个 align 值，都留给 `Kind::Html` 照旧当不透明块原样回显——宁可少识别，
+/// 也不替用户改他手写的 HTML。
+fn take_wrapped(c: &mut Cursor) -> Option<Block> {
+    let align = wrapper_align(&c.cur()?.text)?;
+    // 我们自己写的空行是**真的空**（连空格都没有）。带空格的"空行"不认：
+    // 认了之后第一次编辑就会把它规整掉，等于悄悄改了用户文件里的几个字节。
+    if !matches!(c.peek(1), Some(l) if l.text.is_empty()) {
+        return None;
+    }
+    let mut close = None;
+    let mut i = 2;
+    while let Some(l) = c.peek(i) {
+        if l.text == "</div>" {
+            close = Some(i);
+            break;
+        }
+        i += 1;
+    }
+    let close = close?;
+    // 正文与收尾标签之间必须隔一个空行，否则那不是"包裹一段"的形状
+    if close < 3 || !matches!(c.peek(close - 1), Some(l) if l.text.is_empty()) {
+        return None;
+    }
+    // 正文内部不能再有空行：那会切出多块，属于 B 方案（容器）的领地
+    if (2..close - 1).any(|k| blank(c.peek(k))) {
+        return None;
+    }
+    let inner: Vec<Line> = (2..close - 1).filter_map(|k| c.peek(k).cloned()).collect();
+    let mut ic = Cursor::new(inner);
+    let mut blocks = parse_blocks(&mut ic);
+    if blocks.len() != 1 || !ic.gap.is_empty() {
+        return None;
+    }
+    let mut b = blocks.pop().unwrap();
+    let alignable = matches!(
+        b.kind,
+        Kind::Paragraph
+            | Kind::Heading {
+                style: HeadingStyle::Atx,
+                ..
+            }
+    );
+    if !alignable || !b.children.is_empty() || b.align.is_some() {
+        return None;
+    }
+    let slice: Vec<Line> = (0..=close).filter_map(|k| c.peek(k).cloned()).collect();
+    b.raw = raw_of(&slice);
+    b.gap_before = String::new();
+    b.align = Some(align.to_string());
+    b.line_start = 0;
+    b.line_end = 0;
+    for _ in 0..=close {
+        c.bump();
+    }
+    Some(b)
+}
+
 fn parse_blocks(c: &mut Cursor) -> Vec<Block> {
     let mut out = Vec::new();
     loop {
@@ -829,17 +907,23 @@ fn parse_blocks(c: &mut Cursor) -> Vec<Block> {
             continue;
         }
         let start = c.pos;
-        let mut batch: Vec<Block> = match classify(c) {
-            Start::Fence => take_code(c).into_iter().collect(),
-            Start::Math => take_math(c).into_iter().collect(),
-            Start::Atx(level) => take_atx(c, level).into_iter().collect(),
-            Start::Hr => take_hr(c).into_iter().collect(),
-            Start::Quote => take_quote(c).into_iter().collect(),
-            // 列表不产生容器块：条目本身就是可寻址块（docs/02 的 bullet/numbered）
-            Start::List { ordered, marker } => take_list_items(c, ordered, marker),
-            Start::Table => take_table(c).into_iter().collect(),
-            Start::Html => take_html(c).into_iter().collect(),
-            Start::Paragraph => take_paragraph(c).into_iter().collect(),
+        // 对齐包裹必须先于 HTML 块判定：`<div align="center">` 本身是 HTML 行，
+        // 认出来之后里面那一块才是可编辑正文。
+        let mut batch: Vec<Block> = if let Some(b) = take_wrapped(c) {
+            vec![b]
+        } else {
+            match classify(c) {
+                Start::Fence => take_code(c).into_iter().collect(),
+                Start::Math => take_math(c).into_iter().collect(),
+                Start::Atx(level) => take_atx(c, level).into_iter().collect(),
+                Start::Hr => take_hr(c).into_iter().collect(),
+                Start::Quote => take_quote(c).into_iter().collect(),
+                // 列表不产生容器块：条目本身就是可寻址块（docs/02 的 bullet/numbered）
+                Start::List { ordered, marker } => take_list_items(c, ordered, marker),
+                Start::Table => take_table(c).into_iter().collect(),
+                Start::Html => take_html(c).into_iter().collect(),
+                Start::Paragraph => take_paragraph(c).into_iter().collect(),
+            }
         };
         // 独占成行的块 ID 归属于它上面那个块（docs/02 §块 ID）。
         // 不在这里处理就会被解析成一个空段落，且该块的 ID 永久丢失。
@@ -1042,6 +1126,7 @@ fn mk(
         title,
         children,
         fields,
+        align: None,
         line_start: 0,
         line_end: 0,
     }
@@ -1475,6 +1560,7 @@ fn build_list_item(marker: String, orig: &[Line], body: &[Line], _col: usize) ->
         title: None,
         children,
         fields,
+        align: None,
         line_start: 0,
         line_end: 0,
     }

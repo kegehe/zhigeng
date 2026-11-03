@@ -19,6 +19,7 @@ function 块(
     content,
     level: kind === "heading" ? 1 : null,
     checked: null,
+    align: null,
     fields: [],
     children,
   };

@@ -188,6 +188,17 @@
   .block-editor .ProseMirror li {
     line-height: var(--leading-note);
   }
+  /* 块级对齐（docs/02 D40）：值由 viewAttrs 从 mdAlign 带成 data-md-align，
+     只落正文与标题。列表 / 图片 / 表格不在可对齐名单里，文件里也不会长成包裹形。 */
+  .block-editor .ProseMirror [data-md-align="center"] {
+    text-align: center;
+  }
+  .block-editor .ProseMirror [data-md-align="right"] {
+    text-align: right;
+  }
+  .block-editor .ProseMirror [data-md-align="justify"] {
+    text-align: justify;
+  }
   /* 格式刷待命：正文上方换成十字。`data-md-paint` 由 FormatPainter 的插件 view
      写 / 删（只动 DOM，不发事务），界面靠它说"现在点哪都是刷格式"。 */
   .block-editor .ProseMirror[data-md-paint] {

@@ -39,6 +39,7 @@ function 块(content: string, rest: Partial<EditBlock> = {}): EditBlock {
     content,
     level: kind === "heading" ? (rest.level ?? 1) : null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
     ...rest,

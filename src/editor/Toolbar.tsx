@@ -6,6 +6,7 @@ import { 是回车提交 } from "../ui/keys";
 import {
   addColumn,
   addRow,
+  applyBlockAlign,
   applyBlockType,
   cellAt,
   INSERTABLE,
@@ -14,13 +15,17 @@ import {
   removeColumn,
   removeRow,
   setAlign,
+  BLOCK_ALIGNS,
   BLOCK_TYPES,
   tableAt,
+  块对齐of,
+  有可对齐块,
   对所齐所选,
   填充所选,
   删所选列,
   删所选行,
   清场所选,
+  type BlockAlign,
   type BlockTypeId,
 } from "./blocks";
 import { 批量, 矩形of } from "./tableSelectPlugin";
@@ -28,6 +33,14 @@ import { 关格式刷, 开格式刷, 能开格式刷, 格式刷状态of } from "
 import type { Align } from "./table";
 import { 工具图标, type 图标名 } from "./icons";
 import { 调色板, 底色of } from "./colors";
+
+/** 块级对齐四档的图标。与表格的列对齐共用左 / 中 / 右三枚，另加一枚"两端"。 */
+export const 对齐图: Record<BlockAlign, 图标名> = {
+  left: "alignLeft",
+  center: "alignCenter",
+  right: "alignRight",
+  justify: "alignJustify",
+};
 
 /**
  * 常驻顶部工具栏。
@@ -118,6 +131,18 @@ export function Toolbar({ editor }: { editor: Editor }) {
         editor.state.doc.nodeAt(表起点 ?? -1)?.child(格.行)?.child(格.列)?.attrs.align ?? "",
       )
     : "";
+  /**
+   * 块级对齐：只有正文与 ATX 标题能落成 `<div align>` 包裹（docs/02 D40）。
+   * 列表 / 引用 / 代码 / 图片 / 表格一律不动——按下去也写不出能往返的字节。
+   */
+  const 对齐节点 = 整块 ?? node;
+  const 对齐档 = 块对齐of(
+    对齐节点 &&
+      (对齐节点.type.name === "mdParagraph" || 对齐节点.type.name === "mdHeading")
+      ? 对齐节点
+      : null,
+  );
+  const 可对齐 = 有可对齐块(editor.state);
 
   const 改表 = (做: (state: typeof editor.state, 起点: number) => ReturnType<typeof addRow>) => {
     if (表起点 === null) return;
@@ -140,6 +165,20 @@ export function Toolbar({ editor }: { editor: Editor }) {
     if (!$from.depth) return;
     const tr = applyBlockType(editor.state, $from.before(1), id);
     if (tr) editor.view.dispatch(tr.scrollIntoView());
+  };
+  const 做块对齐 = (对: BlockAlign) => {
+    const { tr, 跳过 } = applyBlockAlign(editor.state, 对);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+    // 选中的是一串混着的块时，只把正文 / 标题改了，剩下那几块原样——必须说出来，
+    // 否则用户会以为"全选居中"对列表也生效了
+    if (跳过 > 0) {
+      editor.view.dom.dispatchEvent(
+        new CustomEvent("md-notice", {
+          detail: `对齐只作用于正文与标题，已跳过 ${跳过} 个块`,
+          bubbles: true,
+        }),
+      );
+    }
   };
   const move = (delta: number) => {
     const tr = moveCurrentBlock(editor.state, delta);
@@ -215,6 +254,20 @@ export function Toolbar({ editor }: { editor: Editor }) {
           <option value="none">没有可改的块</option>
         </select>
       )}
+      {/* 块级对齐只在表格外出现（表里有自己的"本列靠左/居中/靠右"那一组）。
+          `left` 不亮：默认那档就是没有包裹，亮着它等于四个按钮里永远有一个是亮的。 */}
+      {表起点 === null
+        ? BLOCK_ALIGNS.map((a) =>
+            btn(
+              "ba-" + a.id,
+              a.标签 + (可对齐 ? "" : "（只作用于正文与标题）"),
+              对齐图[a.id],
+              () => 做块对齐(a.id),
+              a.id !== "left" && 对齐档 === a.id,
+              !可对齐,
+            ),
+          )
+        : null}
       <span className="sep" aria-hidden="true" />
       {btn("bold", "加粗 Ctrl+B", "bold", () => editor.chain().focus().toggleMark("bold").run(), editor.isActive("bold"))}
       {btn("italic", "斜体 Ctrl+I", "italic", () => editor.chain().focus().toggleMark("italic").run(), editor.isActive("italic"))}

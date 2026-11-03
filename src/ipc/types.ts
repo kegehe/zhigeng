@@ -120,6 +120,8 @@ export type EditBlock = {
   content: string;
   level: number | null;
   checked: boolean | null;
+  /** 块级对齐（`center` / `right` / `justify`）；`null` 为默认靠左 */
+  align: string | null;
   /** 行内字段（`due::` / `done::`）。`content` 里没有它们，重新产出时必须写回 */
   fields: [string, string][];
   children: EditBlock[];

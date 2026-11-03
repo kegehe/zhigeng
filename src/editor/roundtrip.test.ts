@@ -13,6 +13,7 @@ import { 单格, 归一, type 矩形 } from "./tableSelect";
 import { 改选区, 批量 } from "./tableSelectPlugin";
 import {
   addColumn,
+  applyBlockAlign,
   applyBlockType,
   cellAt,
   docToMarkdown,
@@ -68,6 +69,7 @@ const SAMPLES = [
   "05-未识别语法",
   "06-插入骨架", // 工具栏插入的三种结构块，内核必须按字节认回来
   "07-图片", // 图片引用：内核判成 image 的各种写法，接管与不接管各半
+  "08-对齐", // 块级对齐：`<div align>` 包裹一块正文 / 标题（docs/02 D40）
 ] as const;
 
 function load(name: string) {
@@ -151,6 +153,7 @@ describe("块编辑器字节级往返", () => {
         ") 和一点 **强调**。",
       level: i % 20 === 0 ? 2 : null,
       checked: null,
+      align: null,
       fields: [],
       children: [],
     }));
@@ -226,6 +229,7 @@ const 样本 = () => {
     content,
     level: null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
     ...extra,
@@ -344,10 +348,10 @@ describe("块类型切换的产出仍是字节级正确的 Markdown", () => {
 describe("拖拽重排：空白按 Markdown 的规矩重算，锚点跟着自己的块走", () => {
   const 重排样本 = () => {
     const blocks: EditDoc["blocks"] = [
-      { kind: "paragraph", id: "b-p1", raw: "第一段 ^b-p1\n", gapBefore: "", content: "第一段", level: null, checked: null, fields: [], children: [] },
-      { kind: "bullet", id: null, raw: "- 项甲\n", gapBefore: "\n", content: "项甲", level: null, checked: null, fields: [], children: [] },
-      { kind: "bullet", id: null, raw: "- 项乙\n", gapBefore: "", content: "项乙", level: null, checked: null, fields: [], children: [] },
-      { kind: "paragraph", id: "b-p4", raw: "第四段 ^b-p4\n", gapBefore: "\n", content: "第四段", level: null, checked: null, fields: [], children: [] },
+      { kind: "paragraph", id: "b-p1", raw: "第一段 ^b-p1\n", gapBefore: "", content: "第一段", level: null, checked: null, align: null, fields: [], children: [] },
+      { kind: "bullet", id: null, raw: "- 项甲\n", gapBefore: "\n", content: "项甲", level: null, checked: null, align: null, fields: [], children: [] },
+      { kind: "bullet", id: null, raw: "- 项乙\n", gapBefore: "", content: "项乙", level: null, checked: null, align: null, fields: [], children: [] },
+      { kind: "paragraph", id: "b-p4", raw: "第四段 ^b-p4\n", gapBefore: "\n", content: "第四段", level: null, checked: null, align: null, fields: [], children: [] },
     ];
     const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
     return { doc, src: reassemble(doc) };
@@ -421,6 +425,7 @@ describe("块操作的键盘快捷键", () => {
       content,
       level: null,
       checked: null,
+      align: null,
       fields: [],
       children: [],
     });
@@ -557,6 +562,7 @@ describe("工具栏的移动与分隔线", () => {
       content,
       level: null,
       checked: null,
+      align: null,
       fields: [],
       children: [],
     });
@@ -630,8 +636,8 @@ describe("工具栏的移动与分隔线", () => {
       frontMatter: "",
       trailingGap: "",
       blocks: [
-        { kind: "paragraph", id: null, raw: "/\n", gapBefore: "", content: "/", level: null, checked: null, fields: [], children: [] },
-        { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, fields: [], children: [] },
+        { kind: "paragraph", id: null, raw: "/\n", gapBefore: "", content: "/", level: null, checked: null, align: null, fields: [], children: [] },
+        { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, align: null, fields: [], children: [] },
       ],
     };
     const editor = createTestEditor(doc);
@@ -663,8 +669,8 @@ describe("工具栏的移动与分隔线", () => {
       frontMatter: "",
       trailingGap: "",
       blocks: [
-        { kind: "code", id: null, raw: "```\nlet a = 1\nlet b = 2\n```\n", gapBefore: "", content: "", level: null, checked: null, fields: [], children: [] },
-        { kind: "paragraph", id: null, raw: "后面一段\n", gapBefore: "\n", content: "后面一段", level: null, checked: null, fields: [], children: [] },
+        { kind: "code", id: null, raw: "```\nlet a = 1\nlet b = 2\n```\n", gapBefore: "", content: "", level: null, checked: null, align: null, fields: [], children: [] },
+        { kind: "paragraph", id: null, raw: "后面一段\n", gapBefore: "\n", content: "后面一段", level: null, checked: null, align: null, fields: [], children: [] },
       ],
     };
     const editor = createTestEditor(d);
@@ -717,7 +723,7 @@ describe("工具栏的移动与分隔线", () => {
       frontMatter: "",
       trailingGap: "",
       blocks: [
-        { kind: "code", id: null, raw: "```\ncode()\n```\n", gapBefore: "", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "code", id: null, raw: "```\ncode()\n```\n", gapBefore: "", content: "", level: null, checked: null, align: null, fields: [], children: [] },
       ],
     };
     const editor = createTestEditor(d);
@@ -742,8 +748,8 @@ describe("工具栏的移动与分隔线", () => {
       frontMatter: "",
       trailingGap: "",
       blocks: [
-        { kind: "paragraph", id: null, raw: "```\n", gapBefore: "", content: "```", level: null, checked: null, fields: [], children: [] },
-        { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, fields: [], children: [] },
+        { kind: "paragraph", id: null, raw: "```\n", gapBefore: "", content: "```", level: null, checked: null, align: null, fields: [], children: [] },
+        { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, align: null, fields: [], children: [] },
       ],
     };
     const editor = createTestEditor(doc);
@@ -762,8 +768,8 @@ describe("工具栏的移动与分隔线", () => {
 
   it("斜杠菜单选结构块是整块替换：不留下那个 /，也不留空段落", () => {
     const blocks: EditDoc["blocks"] = [
-      { kind: "paragraph", id: null, raw: "/\n", gapBefore: "", content: "/", level: null, checked: null, fields: [], children: [] },
-      { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, fields: [], children: [] },
+      { kind: "paragraph", id: null, raw: "/\n", gapBefore: "", content: "/", level: null, checked: null, align: null, fields: [], children: [] },
+      { kind: "paragraph", id: null, raw: "乙\n", gapBefore: "\n", content: "乙", level: null, checked: null, align: null, fields: [], children: [] },
     ];
     const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
     const editor = createTestEditor(doc);
@@ -804,6 +810,7 @@ describe("工具栏的移动与分隔线", () => {
       content,
       level: null,
       checked: null,
+      align: null,
       fields: [],
       children: [],
     });
@@ -830,8 +837,8 @@ describe("工具栏的移动与分隔线", () => {
 describe("编辑不透明块不许把整块写成空", () => {
   it("在引用块末尾加一个字：那块内容仍在，未动的代码块逐字节不变", () => {
     const blocks: EditDoc["blocks"] = [
-      { kind: "quote", id: null, raw: "> 引用的话\n", gapBefore: "", content: "引用的话", level: null, checked: null, fields: [], children: [] },
-      { kind: "code", id: null, raw: "```\nlet a = 1\n```\n", gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+      { kind: "quote", id: null, raw: "> 引用的话\n", gapBefore: "", content: "引用的话", level: null, checked: null, align: null, fields: [], children: [] },
+      { kind: "code", id: null, raw: "```\nlet a = 1\n```\n", gapBefore: "\n", content: "", level: null, checked: null, align: null, fields: [], children: [] },
     ];
     const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
     const editor = createTestEditor(doc);
@@ -863,6 +870,7 @@ describe("代码块的围栏账本：编辑代码不碰围栏", () => {
     content: "",
     level: null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
   });
@@ -874,6 +882,7 @@ describe("代码块的围栏账本：编辑代码不碰围栏", () => {
     content: raw.replace(/\n+$/, ""),
     level: null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
   });
@@ -993,6 +1002,7 @@ describe("回车拆段不许把原块的账本留给新块", () => {
     content,
     level: null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
   });
@@ -1136,7 +1146,8 @@ describe("显示形切换不许碰到字节", () => {
       const editor = createTestEditor(doc);
       const 装载后的文档 = editor.state.doc;
       const 块 = 不透明块(editor);
-      expect(块.length, name).toBeGreaterThan(0);
+      // 08-对齐 全是可编辑块，没有不透明块可进出；其余样本必须真有得测
+      if (name !== "08-对齐") expect(块.length, name).toBeGreaterThan(0);
       for (const b of 块) {
         放进(editor, b.pos);
         放到文末(editor);
@@ -1357,7 +1368,7 @@ describe("代码块单面：着色与语言牌跟着编辑面走", () => {
       frontMatter: "",
       trailingGap: "",
       blocks: [
-        { kind: "code", id: null, raw: "```go\nfunc main() {\n", gapBefore: "", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "code", id: null, raw: "```go\nfunc main() {\n", gapBefore: "", content: "", level: null, checked: null, align: null, fields: [], children: [] },
       ],
     };
     const editor = createTestEditor(d);
@@ -1385,6 +1396,7 @@ describe("自动识别语言：猜得出来，但不许偷改文件", () => {
     content: "",
     level: null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
   });
@@ -1492,6 +1504,7 @@ const 段 = (raw: string, gapBefore: string, content: string) => ({
   content,
   level: null,
   checked: null,
+  align: null,
   fields: [],
   children: [],
 });
@@ -1510,6 +1523,7 @@ function 表doc(表源: string): EditDoc {
         content: "",
         level: null,
         checked: null,
+        align: null,
         fields: [],
         children: [],
       },
@@ -1772,8 +1786,8 @@ describe("表格网格化的字节判据", () => {
       trailingGap: "",
       blocks: [
         段("前一段\n", "", "前一段"),
-        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
-        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, align: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, align: null, fields: [], children: [] },
       ],
     };
     for (const 做 of [
@@ -2067,8 +2081,8 @@ describe("表格网格化的字节判据", () => {
       trailingGap: "",
       blocks: [
         段("前一段\n", "", "前一段"),
-        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
-        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, align: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, align: null, fields: [], children: [] },
       ],
     };
     const 源 = "前一段\n\n" + 异形 + "\n" + 异形;
@@ -2273,8 +2287,8 @@ describe("矩形选区的批量动作：只动所选格，其余逐字节不动"
       trailingGap: "",
       blocks: [
         段("前一段\n", "", "前一段"),
-        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
-        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, align: null, fields: [], children: [] },
+        { kind: "table", id: null, raw: 异形, gapBefore: "\n", content: "", level: null, checked: null, align: null, fields: [], children: [] },
       ],
     };
     for (const 做 of [
@@ -2334,6 +2348,7 @@ const 一块 = (过: Partial<EditBlock>): EditDoc => ({
       content: "",
       level: null,
       checked: null,
+      align: null,
       fields: [],
       children: [],
       ...过,
@@ -2791,6 +2806,7 @@ describe("图片块的整块移动", () => {
           content: "上面一行",
           level: null,
           checked: null,
+          align: null,
           fields: [],
           children: [],
         },
@@ -2802,6 +2818,7 @@ describe("图片块的整块移动", () => {
           content: "",
           level: null,
           checked: null,
+          align: null,
           fields: [],
           children: [],
         },
@@ -2968,9 +2985,9 @@ describe("整块删除：点到卡片身上与手柄菜单那一项", () => {
     frontMatter: "",
     trailingGap: "",
     blocks: [
-      { kind: "paragraph", id: null, raw: "上面那句\n", gapBefore: "", content: "上面那句", level: null, checked: null, fields: [], children: [] },
-      { kind: "code", id: null, raw: "```py\nx = 1\n```\n", gapBefore: "\n", content: "x = 1", level: null, checked: null, fields: [], children: [] },
-      { kind: "paragraph", id: null, raw: "下面那句\n", gapBefore: "\n", content: "下面那句", level: null, checked: null, fields: [], children: [] },
+      { kind: "paragraph", id: null, raw: "上面那句\n", gapBefore: "", content: "上面那句", level: null, checked: null, align: null, fields: [], children: [] },
+      { kind: "code", id: null, raw: "```py\nx = 1\n```\n", gapBefore: "\n", content: "x = 1", level: null, checked: null, align: null, fields: [], children: [] },
+      { kind: "paragraph", id: null, raw: "下面那句\n", gapBefore: "\n", content: "下面那句", level: null, checked: null, align: null, fields: [], children: [] },
     ],
   });
 
@@ -3074,6 +3091,148 @@ describe("整块删除：点到卡片身上与手柄菜单那一项", () => {
     expect(editor.state.selection, "点正文不该变成整块选中").not.toBeInstanceOf(NodeSelection);
     expect(editor.state.selection.$from.depth).toBeGreaterThan(0);
     expect(壳.hasAttribute("data-md-sel"), "换回文字光标就得把标记摘掉，不然它永远亮着").toBe(false);
+    editor.destroy();
+  });
+});
+
+describe("块级对齐（docs/02 D40）", () => {
+  it("居中落成 div + 空行包裹；清掉时签名回到装载时的形状，逐字节回写", () => {
+    const { src, doc } = load("08-对齐");
+    const editor = createTestEditor(doc);
+    let pos = -1;
+    editor.state.doc.forEach((n, p) => {
+      if (n.textContent === "普通段落。") pos = p;
+    });
+    expect(pos).toBeGreaterThan(0);
+    editor.commands.setTextSelection(pos + 1);
+
+    const r1 = applyBlockAlign(editor.state, "center");
+    expect(r1.跳过).toBe(0);
+    expect(r1.tr).not.toBeNull();
+    editor.view.dispatch(r1.tr!);
+    const 产出 = docToMarkdown(editor.state.doc, doc);
+    // 空行是语法的一部分：没有它们，别家阅读器会把里面的 Markdown 当字面文字
+    expect(产出).toContain('<div align="center">\n\n普通段落。\n\n</div>');
+    // 屏幕上也得是这一档：data-md-align 是 CSS 的唯一入口。按块取 DOM——
+    // 样本里还有别的居中块，全篇 querySelector 分不出改的是不是这一块
+    const 这一块 = () => editor.view.nodeDOM(pos) as HTMLElement;
+    expect(这一块().getAttribute("data-md-align")).toBe("center");
+
+    // 连点两次居中不该产生事务（否则这篇被标成待保存）
+    expect(applyBlockAlign(editor.state, "center").tr).toBeNull();
+
+    const r2 = applyBlockAlign(editor.state, "left");
+    expect(r2.tr).not.toBeNull();
+    editor.view.dispatch(r2.tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    expect(这一块().hasAttribute("data-md-align")).toBe(false);
+    editor.destroy();
+  });
+
+  it("标题也能对齐：包裹里仍是 ATX 标题", () => {
+    const { doc } = load("08-对齐");
+    const editor = createTestEditor(doc);
+    let pos = -1;
+    editor.state.doc.forEach((n, p) => {
+      if (n.textContent === "右对齐标题") pos = p;
+    });
+    editor.commands.setTextSelection(pos + 1);
+    const { tr } = applyBlockAlign(editor.state, "justify");
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toContain(
+      '<div align="justify">\n\n## 右对齐标题\n\n</div>',
+    );
+    editor.destroy();
+  });
+
+  it("居中块转成列表时清掉对齐账本，转回正文不会复活", () => {
+    const { doc } = load("08-对齐");
+    const editor = createTestEditor(doc);
+    let pos = -1;
+    editor.state.doc.forEach((n, p) => {
+      if (n.textContent.startsWith("居中的一段")) pos = p;
+    });
+    expect(pos).toBeGreaterThan(0);
+    expect(editor.state.doc.nodeAt(pos)!.attrs.mdAlign).toBe("center");
+    editor.view.dispatch(applyBlockType(editor.state, pos, "bullet")!);
+    expect(editor.state.doc.nodeAt(pos)!.attrs.mdAlign).toBe("");
+    editor.view.dispatch(applyBlockType(editor.state, pos, "paragraph")!);
+    expect(editor.state.doc.nodeAt(pos)!.attrs.mdAlign).toBe("");
+    editor.destroy();
+  });
+
+  it("列表不参与：没有事务，跳过的块数报出来", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "bullet",
+          id: null,
+          raw: "- 列表项\n",
+          gapBefore: "",
+          content: "列表项",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    const r = applyBlockAlign(editor.state, "center");
+    expect(r.tr).toBeNull();
+    expect(r.跳过).toBe(1);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 列表项\n");
+    editor.destroy();
+  });
+
+  it("混选：只改正文与标题，列表原样，跳过的块数报出来", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "正文\n",
+          gapBefore: "",
+          content: "正文",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "bullet",
+          id: null,
+          raw: "- 列表项\n",
+          gapBefore: "",
+          content: "列表项",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.view.dispatch(
+      editor.state.tr.setSelection(
+        TextSelection.create(editor.state.doc, 1, editor.state.doc.content.size - 1),
+      ),
+    );
+    const r = applyBlockAlign(editor.state, "right");
+    expect(r.跳过).toBe(1);
+    expect(r.tr).not.toBeNull();
+    editor.view.dispatch(r.tr!);
+    const out = docToMarkdown(editor.state.doc, doc);
+    expect(out).toContain('<div align="right">\n\n正文\n\n</div>');
+    expect(out).toContain("- 列表项\n");
     editor.destroy();
   });
 });

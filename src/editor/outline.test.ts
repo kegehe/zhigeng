@@ -25,6 +25,7 @@ function 块(kind: EditBlock["kind"], content: string, level: number | null = nu
     content,
     level,
     checked: null,
+    align: null,
     fields: [],
     children: [],
   };

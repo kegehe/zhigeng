@@ -45,6 +45,7 @@ function 块(content: string): EditBlock {
     content,
     level: null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
   };

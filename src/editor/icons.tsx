@@ -1,5 +1,6 @@
 import {
   AlignCenter,
+  AlignJustify,
   AlignLeft,
   AlignRight,
   Ban,
@@ -59,6 +60,7 @@ export type 图标名 =
   | "alignLeft"
   | "alignCenter"
   | "alignRight"
+  | "alignJustify"
   | "alignNone"
   | "cellsClear"
   | "cellsFill"
@@ -173,6 +175,7 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   alignLeft: AlignLeft,
   alignCenter: AlignCenter,
   alignRight: AlignRight,
+  alignJustify: AlignJustify,
   // 「取消对齐」是"这一列不留 `:`"，不是"清除格式"，所以不复用那个图标：
   // 一条斜杠划过的形状说的是"这里没有设定"，两个语义各占一枚才不打架。
   alignNone: Ban,

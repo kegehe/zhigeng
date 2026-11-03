@@ -98,6 +98,7 @@ function attrsOf(b: EditBlock): Record<string, unknown> {
     mdDepth: 0,
     mdLevel: b.level,
     mdChecked: b.checked,
+    mdAlign: b.align ?? "",
     // `content` 里没有 due::/done::（与索引同口径），重新产出时得靠它写回去
     mdFields: b.fields,
     mdSig: "",
@@ -204,6 +205,7 @@ const EMPTY: EditBlock = {
   content: "",
   level: null,
   checked: null,
+  align: null,
   fields: [],
   children: [],
 };
@@ -268,18 +270,34 @@ function fieldSuffix(fields: unknown): string {
   return fields.map(([k, v]) => ` ${k}:: ${v}`).join("");
 }
 
+/**
+ * 块级对齐的落盘形状（docs/02 D40）：`<div align="…">` 独占一行、内部前后各留一个
+ * 空行，再裹住那一块正文。
+ *
+ * 空行不是排版，是语法的分界线：CommonMark 的 HTML 块（类型 6）到空行就结束，里面的
+ * Markdown 才会被别的阅读器当 Markdown 解析。少了它，`**粗体**` 在 Obsidian / GitHub
+ * 上会显示成字面的星号。`left` 不落包裹——默认就是靠左。
+ */
+function 包裹对齐(align: unknown, body: string): string {
+  const 值 = String(align ?? "");
+  if (值 !== "center" && 值 !== "right" && 值 !== "justify") return body;
+  if (!body.trim()) return "";
+  return `<div align="${值}">\n\n${body}\n\n</div>`;
+}
+
 function serializeNode(node: PmNode): string {
   const a = node.attrs as Record<string, unknown>;
   const indent = "  ".repeat(Number(a.mdDepth ?? 0));
   switch (node.type.name) {
     case "mdHeading": {
       const level = Math.min(6, Math.max(1, Number(a.mdLevel ?? 1)));
-      return (
+      return 包裹对齐(
+        a.mdAlign,
         "#".repeat(level) +
-        " " +
-        serializeInline(node) +
-        fieldSuffix(a.mdFields) +
-        anchorSuffix(a.mdId)
+          " " +
+          serializeInline(node) +
+          fieldSuffix(a.mdFields) +
+          anchorSuffix(a.mdId),
       );
     }
     case "mdItem": {
@@ -345,7 +363,10 @@ function serializeNode(node: PmNode): string {
       return serializeTable({ rows: 行们, aligns: (a.mdAligns as Align[]) ?? [] });
     }
     default:
-      return serializeInline(node) + fieldSuffix(a.mdFields) + anchorSuffix(a.mdId);
+      return 包裹对齐(
+        a.mdAlign,
+        serializeInline(node) + fieldSuffix(a.mdFields) + anchorSuffix(a.mdId),
+      );
   }
 }
 
@@ -537,7 +558,9 @@ export function blockTypePatch(
     case "numbered":
     case "todo": {
       if (node.type.name === "mdItem" && String(node.attrs.mdKind) === id) return null;
-      const attrs: Record<string, unknown> = { ...清场, mdKind: id };
+      // 列表项写不出对齐包裹（serializeNode 的 mdItem 分支不读 mdAlign），所以转过去时
+      // 把对齐清掉。留着的话，将来再转回正文会突然又居中——文件里从来没记过这一笔。
+      const attrs: Record<string, unknown> = { ...清场, mdKind: id, mdAlign: "" };
       if (id === "todo") attrs.mdChecked = false;
       return { typeName: "mdItem", attrs };
     }
@@ -563,6 +586,81 @@ export function applyBlockType(
     ...node.attrs,
     ...patch.attrs,
   });
+}
+
+/**
+ * 块级对齐（docs/02 D40）。`left` 是默认，文件里不落任何包裹。
+ *
+ * 能对齐的只有**正文与 ATX 标题**：列表项的符号是绝对定位的画法，居中后正文与符号会
+ * 分家；图片 / 表格 / 代码 / 引用在文件里是另一种块，包裹起来内核不会认——与其给一个
+ * 一点就丢的按钮，不如只对真能往返的那两类开放。
+ */
+export type BlockAlign = "left" | "center" | "right" | "justify";
+
+export const BLOCK_ALIGNS: { id: BlockAlign; 标签: string }[] = [
+  { id: "left", 标签: "左对齐" },
+  { id: "center", 标签: "居中对齐" },
+  { id: "right", 标签: "右对齐" },
+  { id: "justify", 标签: "两端对齐" },
+];
+
+/** 这一块当前的对齐档；认不出的值按默认靠左算。 */
+export function 块对齐of(node: PmNode | null): BlockAlign {
+  const 值 = String(node?.attrs.mdAlign ?? "");
+  return 值 === "center" || 值 === "right" || 值 === "justify" ? 值 : "left";
+}
+
+function 能对齐(node: PmNode): boolean {
+  return node.type.name === "mdParagraph" || node.type.name === "mdHeading";
+}
+
+/**
+ * 选区覆盖到的顶层块。光标（空选区）只算它所在的那一块。
+ *
+ * 走 `nodesBetween` 而不是 `doc.forEach`：工具栏每次重渲染都会问一次"能不能对齐"，
+ * 全篇扫一遍等于在 3000 块的文档上给每一次击键再加 3000 次回调（G6 的预算）。
+ * 只走进选区、且不往块里面下钻，代价与选中的块数成正比。
+ */
+function 所选顶层块(state: EditorState): { pos: number; node: PmNode }[] {
+  const { from, to, empty } = state.selection;
+  const 止 = Math.min(empty ? from + 1 : to, state.doc.content.size);
+  const out: { pos: number; node: PmNode }[] = [];
+  if (止 <= from) return out;
+  state.doc.nodesBetween(from, 止, (node, pos, parent) => {
+    if (parent === state.doc) out.push({ pos, node });
+    return false;
+  });
+  return out;
+}
+
+/** 选区里有没有能对齐的块。工具栏拿它决定按钮禁用态——纯函数，不碰 DOM。 */
+export function 有可对齐块(state: EditorState): boolean {
+  return 所选顶层块(state).some((b) => 能对齐(b.node));
+}
+
+/**
+ * 把选区覆盖到的正文 / 标题设成同一档对齐，**一笔事务**（一次 `Ctrl+Z` 回退整批）。
+ *
+ * `跳过` 是选区里不参与对齐的块数（列表、引用、代码、图片、表格……）。调用方拿它决定
+ * 要不要告诉用户"这一步只作用于正文与标题"——纯函数不碰界面。
+ *
+ * 全部已经是这一档时返回 `tr: null`：连点两次"居中"不该把这篇标成待保存。
+ */
+export function applyBlockAlign(
+  state: EditorState,
+  align: BlockAlign,
+): { tr: Transaction | null; 跳过: number } {
+  const 块们 = 所选顶层块(state);
+  const 可 = 块们.filter((b) => 能对齐(b.node));
+  const 目标 = align === "left" ? "" : align;
+  if (!可.length || 可.every((b) => String(b.node.attrs.mdAlign ?? "") === 目标)) {
+    return { tr: null, 跳过: 块们.length - 可.length };
+  }
+  const tr = state.tr;
+  for (const b of 可) {
+    tr.setNodeMarkup(b.pos, undefined, { ...b.node.attrs, mdAlign: 目标 });
+  }
+  return { tr, 跳过: 块们.length - 可.length };
 }
 
 const LIST_KINDS = new Set(["bullet", "numbered", "todo"]);

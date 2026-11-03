@@ -242,6 +242,8 @@ pub struct EditBlock {
     pub content: String,
     pub level: Option<i64>,
     pub checked: Option<bool>,
+    /// `center` / `right` / `justify`；`None` 为默认靠左（docs/02 D40）。
+    pub align: Option<String>,
     pub fields: Vec<(String, String)>,
     pub children: Vec<EditBlock>,
 }
@@ -261,6 +263,7 @@ impl From<&md_kernel::Block> for EditBlock {
             content: b.content.clone(),
             level,
             checked,
+            align: b.align.clone(),
             fields: b.fields.clone(),
             children: b.children.iter().map(EditBlock::from).collect(),
         }

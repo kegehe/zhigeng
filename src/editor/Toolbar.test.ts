@@ -26,6 +26,7 @@ function 块(content: string, gapBefore: string): EditBlock {
     content,
     level: null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
   };
@@ -179,4 +180,55 @@ it("底色面板第一格是高亮，套的是 ==…== 那一档", async () => {
   );
   拆();
   editor.destroy();
+});
+
+it("块级对齐常驻在工具栏：正文可点、列表里灰着，点了改的是块的 mdAlign", async () => {
+  const editor = createTestEditor(篇("第一段文字"));
+  editor.commands.setTextSelection(2);
+  const { 根, 拆 } = await 挂(editor);
+  for (const 标签 of ["左对齐", "居中对齐", "右对齐", "两端对齐"]) {
+    const b = 根.querySelector(`button[aria-label^="${标签}"]`) as HTMLButtonElement | null;
+    expect(b, 标签).not.toBeNull();
+    expect(b!.disabled, 标签).toBe(false);
+  }
+  const 中 = 根.querySelector('button[aria-label="居中对齐"]') as HTMLButtonElement;
+  await act(async () => {
+    中.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.attrs!.mdAlign).toBe("center");
+  // 左对齐 = 默认那档：把 mdAlign 清回空串，文件里不留包裹
+  const 左 = 根.querySelector('button[aria-label^="左对齐"]') as HTMLButtonElement;
+  await act(async () => {
+    左.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.attrs!.mdAlign).toBe("");
+
+  const 列表: EditDoc = {
+    frontMatter: "",
+    trailingGap: "",
+    blocks: [
+      {
+        kind: "bullet",
+        id: null,
+        raw: "- 列表项\n",
+        gapBefore: "",
+        content: "列表项",
+        level: null,
+        checked: null,
+        align: null,
+        fields: [],
+        children: [],
+      },
+    ],
+  };
+  const 列表编辑器 = createTestEditor(列表);
+  列表编辑器.commands.setTextSelection(2);
+  const 二 = await 挂(列表编辑器);
+  const 灰 = 二.根.querySelector('button[aria-label^="居中对齐"]') as HTMLButtonElement;
+  expect(灰.disabled).toBe(true);
+
+  拆();
+  editor.destroy();
+  二.拆();
+  列表编辑器.destroy();
 });

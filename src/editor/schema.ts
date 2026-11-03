@@ -53,6 +53,8 @@ const mdAttributes: Attributes = {
   mdDepth: { default: 0 },
   mdLevel: { default: null },
   mdChecked: { default: null },
+  // 块级对齐：center / right / justify；空串是默认靠左（不落包裹，docs/02 D40）
+  mdAlign: { default: "" },
   // 行内字段（due::/done::）。`content` 里没有它们，重新产出这一块时靠它写回
   mdFields: { default: [] as [string, string][] },
   // 载入之后由 stampSignatures 打上去。空串意味着"新块"，必定被重新序列化
@@ -90,6 +92,9 @@ function viewAttrs(attrs: Record<string, unknown>): Record<string, unknown> {
   const out = domAttrs(attrs);
   const fields = attrs.mdFields as [string, string][] | undefined;
   if (fields?.length) out["data-fields"] = fields.map(([k, v]) => `${k}:: ${v}`).join(" ");
+  // 对齐是 CSS 的事，但值从 attrs 来——`md*` 不能漏进 DOM，只带一个语义化的出口
+  const align = String(attrs.mdAlign ?? "");
+  if (align === "center" || align === "right" || align === "justify") out["data-md-align"] = align;
   return out;
 }
 

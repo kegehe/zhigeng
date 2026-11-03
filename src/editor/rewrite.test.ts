@@ -15,6 +15,7 @@ function 块(content: string, gapBefore: string): EditBlock {
     content,
     level: null,
     checked: null,
+    align: null,
     fields: [],
     children: [],
   };
