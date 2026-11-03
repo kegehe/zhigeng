@@ -594,6 +594,10 @@ export function applyBlockType(
  * 能对齐的只有**正文与 ATX 标题**：列表项的符号是绝对定位的画法，居中后正文与符号会
  * 分家；图片 / 表格 / 代码 / 引用在文件里是另一种块，包裹起来内核不会认——与其给一个
  * 一点就丢的按钮，不如只对真能往返的那两类开放。
+ *
+ * **setext 标题（`标题\n===`）不开放对齐**：内核只认包裹里的 ATX 标题，而前端没有把
+ * 标题写法带到 attrs 里——点一下对齐就会把 `标题\n===` 落成 `# 标题`，这不是用户点的
+ * 那件事。判据看 `mdRaw` 的第二行，带包裹的块不看（内核已保证里面是 ATX）。
  */
 export type BlockAlign = "left" | "center" | "right" | "justify";
 
@@ -610,8 +614,20 @@ export function 块对齐of(node: PmNode | null): BlockAlign {
   return 值 === "center" || 值 === "right" || 值 === "justify" ? 值 : "left";
 }
 
+/**
+ * 从文件装载的标题是不是 setext 写法。只看没有 `mdAlign` 的块：带包裹的块内核已经
+ * 保证里面是 ATX。`mdRaw` 的第二行是 `===` / `---` 下划线才算；改过文字的标题也照此
+ * 判——它落盘时本来就要重建成 ATX，再给它一个"只改对齐"的按钮只会把两件事混在一起。
+ */
+function 是setext标题(node: PmNode): boolean {
+  if (node.type.name !== "mdHeading" || String(node.attrs.mdAlign ?? "")) return false;
+  const 行 = String(node.attrs.mdRaw ?? "").replace(/\r\n/g, "\n").split("\n");
+  return 行.length > 1 && /^ {0,3}(?:=+|-+)[ \t]*$/.test(行[1] ?? "");
+}
+
 function 能对齐(node: PmNode): boolean {
-  return node.type.name === "mdParagraph" || node.type.name === "mdHeading";
+  if (node.type.name === "mdParagraph") return true;
+  return node.type.name === "mdHeading" && !是setext标题(node);
 }
 
 /**
@@ -636,6 +652,19 @@ function 所选顶层块(state: EditorState): { pos: number; node: PmNode }[] {
 /** 选区里有没有能对齐的块。工具栏拿它决定按钮禁用态——纯函数，不碰 DOM。 */
 export function 有可对齐块(state: EditorState): boolean {
   return 所选顶层块(state).some((b) => 能对齐(b.node));
+}
+
+/**
+ * 选区里可对齐块的**共同**对齐档；多块不同档、或者一块都没有时给 null。
+ *
+ * 按钮亮不亮必须按动作真正的作用域算：多块混选时只读第一块，会出现"亮着居中、
+ * 按下去却把另一段也改成居中"的错觉。不同档时一盏都不亮，比撒谎诚实。
+ */
+export function 共同对齐(state: EditorState): BlockAlign | null {
+  const 可 = 所选顶层块(state).filter((b) => 能对齐(b.node));
+  if (!可.length) return null;
+  const 首 = 块对齐of(可[0]!.node);
+  return 可.every((b) => 块对齐of(b.node) === 首) ? 首 : null;
 }
 
 /**

@@ -18,7 +18,7 @@ import {
   BLOCK_ALIGNS,
   BLOCK_TYPES,
   tableAt,
-  块对齐of,
+  共同对齐,
   有可对齐块,
   对所齐所选,
   填充所选,
@@ -46,8 +46,10 @@ export const 对齐图: Record<BlockAlign, 图标名> = {
  * 常驻顶部工具栏。
  *
  * **只放序列化器真能产出的操作**——这条限制不是偷懒，是产品的命根子：Markdown 是唯一
- * 真相（G1），编辑器与文件必须字节级往返（G5）。所以这里没有字号、居中、缩进：Markdown
- * 里没有语法，给了按钮就是给用户一个"点了会丢"的陷阱。
+ * 真相（G1），编辑器与文件必须字节级往返（G5）。所以这里没有字号与缩进：它们连一种
+ * 可逆的写法都还没有，给了按钮就是给用户一个"点了会丢"的陷阱。居中 / 右对齐 / 两端
+ * 是 2026-11-03 才开的（`<div align>` 包裹，见 docs/02 D40）——先有可往返的字节，再有
+ * 按钮，顺序不能反。
  *
  * 颜色与高亮是 2026-10-28 才放进来的一档，**不是因为"Markdown 有了语法"，是因为我们先
  * 定了一种能原样往返的写法**：高亮 `==文字==`，颜色 `<span style="color:#e5534b">文字</span>`
@@ -133,15 +135,12 @@ export function Toolbar({ editor }: { editor: Editor }) {
     : "";
   /**
    * 块级对齐：只有正文与 ATX 标题能落成 `<div align>` 包裹（docs/02 D40）。
-   * 列表 / 引用 / 代码 / 图片 / 表格一律不动——按下去也写不出能往返的字节。
+   * 列表 / 引用 / 代码 / 图片 / 表格 / setext 标题一律不动——按下去也写不出能往返的字节。
+   *
+   * 亮哪一盏按**选区里可对齐块的共同档**算，不按光标所在块：多块混选时动作改的是整批，
+   * 只读第一块会亮出与结果不符的按钮。
    */
-  const 对齐节点 = 整块 ?? node;
-  const 对齐档 = 块对齐of(
-    对齐节点 &&
-      (对齐节点.type.name === "mdParagraph" || 对齐节点.type.name === "mdHeading")
-      ? 对齐节点
-      : null,
-  );
+  const 共同档 = 共同对齐(editor.state);
   const 可对齐 = 有可对齐块(editor.state);
 
   const 改表 = (做: (state: typeof editor.state, 起点: number) => ReturnType<typeof addRow>) => {
@@ -263,7 +262,7 @@ export function Toolbar({ editor }: { editor: Editor }) {
               a.标签 + (可对齐 ? "" : "（只作用于正文与标题）"),
               对齐图[a.id],
               () => 做块对齐(a.id),
-              a.id !== "left" && 对齐档 === a.id,
+              a.id !== "left" && 共同档 === a.id,
               !可对齐,
             ),
           )

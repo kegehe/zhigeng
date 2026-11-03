@@ -232,3 +232,27 @@ it("块级对齐常驻在工具栏：正文可点、列表里灰着，点了改�
   二.拆();
   列表编辑器.destroy();
 });
+
+it("跨块混选时按共同档亮灯：不同档一盏不亮，点了整批改成同一档", async () => {
+  const 混选: EditDoc = {
+    frontMatter: "",
+    trailingGap: "",
+    blocks: [{ ...块("甲", ""), align: "center" }, { ...块("乙", "\n"), align: null }],
+  };
+  const editor = createTestEditor(混选);
+  editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size - 1 });
+  const { 根, 拆 } = await 挂(editor);
+  const 中 = 根.querySelector('button[aria-label^="居中对齐"]') as HTMLButtonElement;
+  // 两块档位不同：动作会把整批拉成同一档，这时亮"居中"就是撒谎
+  expect(中.getAttribute("aria-pressed")).toBeNull();
+
+  await act(async () => {
+    中.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const 段们 = editor.getJSON().content!;
+  expect(段们[0]!.attrs!.mdAlign).toBe("center");
+  expect(段们[1]!.attrs!.mdAlign).toBe("center");
+  expect(中.getAttribute("aria-pressed")).toBe("true");
+  拆();
+  editor.destroy();
+});

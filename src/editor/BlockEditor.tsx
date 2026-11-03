@@ -15,7 +15,7 @@ import {
   moveBlock,
   replaceBlockWithSource,
   stampSignatures,
-  块对齐of,
+  共同对齐,
   删块在,
   有可对齐块,
   格坐标At,
@@ -508,6 +508,9 @@ export function BlockEditor({
     noticeRef.current?.("已删掉这一块 · Ctrl+Z 撤销");
   };
 
+  /** 气泡上亮哪一盏：与工具栏共用同一条"可对齐块共同档"判据 */
+  const 选区对齐 = 共同对齐(editor.state);
+
   /** 选区气泡上的块级对齐（与顶部工具栏共用 `applyBlockAlign`，一次一笔事务） */
   const 做块对齐 = (对: BlockAlign) => {
     const { tr, 跳过 } = applyBlockAlign(editor.state, 对);
@@ -639,8 +642,8 @@ export function BlockEditor({
           {cellAt(editor.state) === null && 有可对齐块(editor.state)
             ? BLOCK_ALIGNS.map((a) => {
                 const Icon = 工具图标[对齐图[a.id]];
-                const 开着 =
-                  a.id !== "left" && 块对齐of(editor.state.selection.$from.parent) === a.id;
+                // 与工具栏同一条判据：多块混选不同档时一盏都不亮
+                const 开着 = a.id !== "left" && 选区对齐 === a.id;
                 return (
                   <button
                     key={"ba-" + a.id}

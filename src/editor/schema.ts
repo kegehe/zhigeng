@@ -99,6 +99,17 @@ function viewAttrs(attrs: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
+ * 粘贴时把 `data-md-align` 读回 `mdAlign`（docs/02 D40）。
+ *
+ * 编辑器的剪贴板 HTML 由 `renderHTML` 产出，本来就带着这个属性；不读回来，同篇里
+ * 剪切再贴一次就把居中丢了。只认三档白名单——外面的 HTML 写什么值都不能直接进账本。
+ */
+function 对齐attrs(el: HTMLElement): Record<string, unknown> {
+  const 值 = el.getAttribute("data-md-align");
+  return 值 === "center" || 值 === "right" || 值 === "justify" ? { mdAlign: 值 } : {};
+}
+
+/**
  * 文档根与文本节点。TipTap 不带这两个就没有 schema（原来它们由 StarterKit 顺带提供），
  * 而 `doc` 这个名字是 ProseMirror 硬编码要求的。自己声明，不引第三方包。
  */
@@ -122,7 +133,7 @@ export const MdParagraph = Node.create({
     return mdAttributes;
   },
   parseHTML() {
-    return [{ tag: "p" }];
+    return [{ tag: "p", getAttrs: (el) => 对齐attrs(el as HTMLElement) }];
   },
   renderHTML({ HTMLAttributes }) {
     return ["p", viewAttrs(HTMLAttributes), 0];
@@ -137,7 +148,7 @@ export const MdHeading = Node.create({
     return mdAttributes;
   },
   parseHTML() {
-    return [{ tag: "h1 h2 h3 h4 h5 h6" }];
+    return [{ tag: "h1 h2 h3 h4 h5 h6", getAttrs: (el) => 对齐attrs(el as HTMLElement) }];
   },
   renderHTML({ node, HTMLAttributes }) {
     const level = Math.min(6, Math.max(1, Number(node.attrs.mdLevel ?? 1)));

@@ -37,6 +37,8 @@ import {
   reassemble,
   removeColumn,
   removeRow,
+  共同对齐,
+  有可对齐块,
   对所齐所选,
   填充所选,
   删块在,
@@ -3233,6 +3235,246 @@ describe("块级对齐（docs/02 D40）", () => {
     const out = docToMarkdown(editor.state.doc, doc);
     expect(out).toContain('<div align="right">\n\n正文\n\n</div>');
     expect(out).toContain("- 列表项\n");
+    editor.destroy();
+  });
+
+  it("setext 标题不开放对齐：判据为假，调用也不发事务", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "heading",
+          id: null,
+          raw: "标题\n===\n",
+          gapBefore: "",
+          content: "标题",
+          level: 1,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    // 点一下对齐不该把 `标题\n===` 悄悄落成 `# 标题`（D40 只认包裹里的 ATX）
+    expect(有可对齐块(editor.state)).toBe(false);
+    const r = applyBlockAlign(editor.state, "center");
+    expect(r.tr).toBeNull();
+    expect(r.跳过).toBe(1);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("标题\n===\n");
+    editor.destroy();
+  });
+
+  it("混选里的 setext 标题与列表一样跳过，正文照改", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "heading",
+          id: null,
+          raw: "标题\n===\n",
+          gapBefore: "",
+          content: "标题",
+          level: 1,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "正文\n",
+          gapBefore: "\n",
+          content: "正文",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.view.dispatch(
+      editor.state.tr.setSelection(
+        TextSelection.create(editor.state.doc, 1, editor.state.doc.content.size - 1),
+      ),
+    );
+    const r = applyBlockAlign(editor.state, "center");
+    expect(r.跳过).toBe(1);
+    expect(r.tr).not.toBeNull();
+    editor.view.dispatch(r.tr!);
+    const out = docToMarkdown(editor.state.doc, doc);
+    expect(out).toContain("标题\n===\n");
+    expect(out).toContain('<div align="center">\n\n正文\n\n</div>');
+    editor.destroy();
+  });
+
+  it("空段落设对齐不落字节：mdAlign 记住，等用户真打字才写出包裹", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "甲\n",
+          gapBefore: "",
+          content: "甲",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "",
+          gapBefore: "\n",
+          content: "",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(editor.state.doc.content.size - 1);
+    const r = applyBlockAlign(editor.state, "center");
+    expect(r.tr).not.toBeNull();
+    editor.view.dispatch(r.tr!);
+    expect(editor.state.doc.lastChild!.attrs.mdAlign).toBe("center");
+    // Markdown 没有"空段落"：这一笔在盘上不占字节，下一次打字才变成包裹
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n");
+    editor.destroy();
+  });
+
+  it("多块共同档：不同档时给 null，统一后跟着变；列表不参与", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "paragraph",
+          id: null,
+          raw: '<div align="center">\n\n甲\n\n</div>\n',
+          gapBefore: "",
+          content: "甲",
+          level: null,
+          checked: null,
+          align: "center",
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "乙\n",
+          gapBefore: "\n",
+          content: "乙",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "bullet",
+          id: null,
+          raw: "- 丙\n",
+          gapBefore: "\n",
+          content: "丙",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    const 全选 = () =>
+      editor.view.dispatch(
+        editor.state.tr.setSelection(
+          TextSelection.create(editor.state.doc, 1, editor.state.doc.content.size - 1),
+        ),
+      );
+    全选();
+    // 甲居中、乙靠左：按钮一盏都不该亮
+    expect(共同对齐(editor.state)).toBeNull();
+    const r = applyBlockAlign(editor.state, "center");
+    expect(r.跳过).toBe(1);
+    editor.view.dispatch(r.tr!);
+    全选();
+    // 列表不在可对齐名单里，不把共同档拉成 null
+    expect(共同对齐(editor.state)).toBe("center");
+    editor.destroy();
+  });
+
+  it("剪贴板 HTML 里的 data-md-align 能读回，非法值不接", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "甲\n",
+          gapBefore: "",
+          content: "甲",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    // 粘贴走的也是 schema 的 parseHTML，直接喂同一份解析器，省得在 jsdom 里造 ClipboardEvent
+    const 解析 = (html: string) => {
+      const 壳 = document.createElement("div");
+      壳.innerHTML = html;
+      return DOMParser.fromSchema(editor.schema).parse(壳);
+    };
+    expect(解析('<p data-md-align="center">粘</p>').firstChild?.attrs.mdAlign).toBe("center");
+    expect(解析('<p data-md-align="middle">歪</p>').firstChild?.attrs.mdAlign).toBe("");
+    editor.destroy();
+  });
+
+  it("对齐块带独占锚点行：编辑后锚点仍在，只是挪进包裹", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "paragraph",
+          id: "b-abc",
+          raw: '<div align="center">\n\n正文\n\n</div>\n^b-abc\n',
+          gapBefore: "",
+          content: "正文",
+          level: null,
+          checked: null,
+          align: "center",
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(3);
+    editor.commands.insertContent("新");
+    expect(docToMarkdown(editor.state.doc, doc)).toContain(
+      '<div align="center">\n\n正文新 ^b-abc\n\n</div>',
+    );
     editor.destroy();
   });
 });
