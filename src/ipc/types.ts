@@ -271,6 +271,36 @@ export type RewriteResult = {
   ctxChars: number;
 };
 
+/** 整篇编辑送给模型的一块。`id` 是文档里的块 id，模型只能引用它 */
+export type DocEditBlock = { id: string; kind: string; text: string };
+
+/** 整篇编辑的一种操作。模型只提议，界面校验/预览后由用户确认才落笔 */
+export type DocEditOp =
+  | {
+      op: "replace";
+      id: string;
+      text: string;
+      /** 换块类型（heading2 / bullet / quote…）；缺省保持原类型 */
+      kind?: string;
+    }
+  | { op: "delete"; id: string }
+  | { op: "insert_after"; after: string | null; kind: string; text: string };
+
+/** 已经发生的一轮对话，只带说话内容，用于理解"再改改"这类指代 */
+export type DocEditTurn = { role: "user" | "assistant"; text: string };
+
+/** 整篇编辑计划。`edits` 为空时看 `note`：模型说"不用改/改不了" */
+export type DocEditPlan = {
+  edits: DocEditOp[];
+  note: string | null;
+  inTokens: number;
+  outTokens: number;
+  ms: number;
+  model: string;
+  /** 这一趟送进去的块数 */
+  blocks: number;
+};
+
 /** 审计页的一行（含未采纳的那几次） */
 export type AiRun = {
   id: string;

@@ -244,6 +244,69 @@ fn 非精确对齐形状仍当不透明HTML块() {
 }
 
 #[test]
+fn 段落开头的全角空格留在正文里() {
+    let s = "\u{3000}\u{3000}甲\n";
+    let d = parse(s);
+    assert_eq!(d.blocks.len(), 1);
+    assert_eq!(d.blocks[0].kind.as_str(), "paragraph");
+    assert_eq!(d.blocks[0].indent, "");
+    assert_eq!(d.blocks[0].content, "\u{3000}\u{3000}甲");
+    assert_eq!(render_exact(&d), s);
+    assert_eq!(render_canonical(&d), s);
+    // 检索文本仍按原有 trim 丢掉一段开头的空白；字本身留在 content 里
+    assert_eq!(d.blocks[0].plain_text(), "甲");
+}
+
+#[test]
+fn 半角缩进后面的全角空格仍留在正文() {
+    let s = "  \u{3000}\u{3000}甲\n";
+    let d = parse(s);
+    assert_eq!(d.blocks[0].indent, "  ");
+    assert_eq!(d.blocks[0].content, "\u{3000}\u{3000}甲");
+    assert_eq!(render_exact(&d), s);
+    assert_eq!(render_canonical(&d), s);
+}
+
+#[test]
+fn 多行段落只在整段开头留全角空格() {
+    let s = "\u{3000}\u{3000}甲\n乙\n";
+    let d = parse(s);
+    assert_eq!(d.blocks.len(), 1);
+    assert_eq!(d.blocks[0].content, "\u{3000}\u{3000}甲\n乙");
+    assert_eq!(render_canonical(&d), s);
+}
+
+#[test]
+fn 带全角空格的段落行尾字段仍能剥出() {
+    let s = "\u{3000}\u{3000}甲 due:: 2026-11-04\n";
+    let d = parse(s);
+    assert_eq!(d.blocks[0].content, "\u{3000}\u{3000}甲");
+    assert_eq!(
+        d.blocks[0].fields,
+        vec![("due".to_string(), "2026-11-04".to_string())]
+    );
+    assert_eq!(render_canonical(&d), s);
+}
+
+#[test]
+fn 普通段落不变_标题开头的全角空格仍被剪掉() {
+    let d = parse("甲\n");
+    assert_eq!(d.blocks[0].content, "甲");
+    assert_eq!(render_canonical(&d), "甲\n");
+
+    let indented = parse("  甲\n");
+    assert_eq!(indented.blocks[0].indent, "  ");
+    assert_eq!(indented.blocks[0].content, "甲");
+    assert_eq!(render_canonical(&indented), "  甲\n");
+
+    // 标题仍整段 trim。全角空格不进标题正文，精确回写也不改源字节。
+    let src = "# \u{3000}\u{3000}题\n";
+    let h = parse(src);
+    assert_eq!(h.blocks[0].content, "题");
+    assert_eq!(render_exact(&h), src);
+}
+
+#[test]
 fn 行号用于定位与高亮() {
     let s = "---\nid: n-1\n---\n\n# 标题\n\n正文\n";
     let d = parse(s);

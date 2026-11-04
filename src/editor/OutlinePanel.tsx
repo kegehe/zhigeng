@@ -4,19 +4,30 @@ import { TextSelection } from "@tiptap/pm/state";
 import { activeHeadingOf, outlineKey, outlineOf, type OutlineItem } from "./outline";
 
 /**
- * 大纲栏（布局三）：贴着正文右侧的一条长文导航，列出前三级标题，当前节高亮，
- * 点一条跳过去。**只在有标题时渲染**——一篇没有标题的短笔记挂一条空栏，
- * 是"为了布局而布局"，直接不出现。
+ * 大纲栏（布局三）：列出前三级标题，当前节高亮，点一条跳过去。**只在有标题时渲染**——
+ * 一篇没有标题的短笔记挂一条空栏，是"为了布局而布局"，直接不出现。
  *
- * 与 `Toolbar` 同一条纪律：**自己订阅编辑器事件、自己 bump**。大纲挂在 App 的
- * 主区里，要是把选区变化往上传，每次击键都会连带重渲染整棵 main 子树——
- * 打字路径上凭空多一次整页协调，这条预算花不起（[06] G6）。
+ * 两种形态（2026-10-30 起，方案 G）：
+ * - `edge`（默认不传则是旧的侧栏形态，测试与既有样式都走它）：贴着正文**左缘**的悬停
+ *   浮层，由 `OutlineEdge` 包着外壳与把手；本组件只管列表与跳转，宽度和边框交给
+ *   外壳的 CSS 改写（`.outline-as-flyout`）。
+ *
+ * 与 `Toolbar` 同一条纪律：**自己订阅编辑器事件、自己 bump**。要是把选区变化往上传，
+ * 每次击键都会连带重渲染整棵 main 子树——打字路径上凭空多一次整页协调，这条预算
+ * 花不起（[06] G6）。
  *
  * 活动节跟着**光标**走而不是跟着滚动走：滚动是浏览，光标是"我在哪儿"，
  * 两者不一致时以光标为准，和命令面板 / 目录树的当前项是同一套语义。
  * 顺带的好处是不用在滚动路径上做 IntersectionObserver——那又是一份每帧的几何账。
  */
-export function OutlinePanel({ editor }: { editor: Editor }) {
+export function OutlinePanel({
+  editor,
+  variant,
+}: {
+  editor: Editor;
+  /** 不传 = 旧的右缘侧栏形态（宽 200px 的常驻列）；`"edge"` = 左缘浮层里的列表 */
+  variant?: "edge";
+}) {
   const [items, setItems] = useState<OutlineItem[]>([]);
   const [active, setActive] = useState(-1);
   /** 订阅闭包里读的"最新条目"：setState 是异步的，直接读 state 会停在上一帧 */
@@ -74,8 +85,14 @@ export function OutlinePanel({ editor }: { editor: Editor }) {
 
   return (
     // w-50 = 200px（--spacing: 4px × 50，4px 栅格上）：栏宽是布局契约，必须钉死——
-    // 不给宽度的话它会被最长的那条标题撑开，正文列宽就跟着标题长度抖
-    <nav className="outline-panel w-50 shrink-0" aria-label="大纲">
+    // 不给宽度的话它会被最长的那条标题撑开，正文列宽就跟着标题长度抖。
+    // edge 形态不带这份契约：宽度与边框由浮层外壳给，这里只铺满
+    <nav
+      className={
+        variant === "edge" ? "outline-panel outline-as-flyout" : "outline-panel w-50 shrink-0"
+      }
+      aria-label="大纲"
+    >
       <div className="outline-title">大纲</div>
       {items.map((item, i) => (
         <button

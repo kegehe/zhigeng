@@ -256,3 +256,88 @@ it("跨块混选时按共同档亮灯：不同档一盏不亮，点了整批改�
   拆();
   editor.destroy();
 });
+
+it("无序、有序按钮常驻：点了改这一块，再点同一种回到正文", async () => {
+  const editor = createTestEditor(篇("第一段文字"));
+  editor.commands.setTextSelection(2);
+  const { 根, 拆 } = await 挂(editor);
+  const 无序 = 根.querySelector('button[aria-label^="无序列表"]') as HTMLButtonElement;
+  const 有序 = 根.querySelector('button[aria-label^="有序列表"]') as HTMLButtonElement;
+  expect(无序.disabled).toBe(false);
+  expect(有序.disabled).toBe(false);
+  await act(async () => {
+    无序.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.type).toBe("mdItem");
+  expect(editor.getJSON().content![0]!.attrs!.mdKind).toBe("bullet");
+  expect(无序.getAttribute("aria-pressed")).toBe("true");
+  await act(async () => {
+    有序.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.attrs!.mdKind).toBe("numbered");
+  expect(有序.getAttribute("aria-pressed")).toBe("true");
+  expect(无序.getAttribute("aria-pressed")).toBeNull();
+  await act(async () => {
+    有序.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.type).toBe("mdParagraph");
+  拆();
+  editor.destroy();
+});
+
+it("待办按钮常驻：点了改成待办，再点回到正文", async () => {
+  const editor = createTestEditor(篇("第一段文字"));
+  editor.commands.setTextSelection(2);
+  const { 根, 拆 } = await 挂(editor);
+  const 钮 = 根.querySelector('button[aria-label^="待办"]') as HTMLButtonElement;
+  expect(钮.disabled).toBe(false);
+  expect(钮.getAttribute("aria-pressed")).toBeNull();
+  await act(async () => {
+    钮.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.attrs!.mdKind).toBe("todo");
+  expect(editor.getJSON().content![0]!.attrs!.mdChecked).toBe(false);
+  expect(钮.getAttribute("aria-pressed")).toBe("true");
+  await act(async () => {
+    钮.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.getJSON().content![0]!.type).toBe("mdParagraph");
+  拆();
+  editor.destroy();
+});
+
+it("首行缩进按钮常驻：点一次加上两个全角空格，再点去掉", async () => {
+  const editor = createTestEditor(篇("第一段文字"));
+  editor.commands.setTextSelection(2);
+  const { 根, 拆 } = await 挂(editor);
+  const 钮 = 根.querySelector('button[aria-label^="首行缩进"]') as HTMLButtonElement;
+  expect(钮.disabled).toBe(false);
+  expect(钮.getAttribute("aria-pressed")).toBeNull();
+  await act(async () => {
+    钮.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.state.doc.textContent.startsWith("\u3000\u3000")).toBe(true);
+  expect(钮.getAttribute("aria-pressed")).toBe("true");
+  await act(async () => {
+    钮.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  expect(editor.state.doc.textContent).toBe("第一段文字");
+  expect(钮.getAttribute("aria-pressed")).toBeNull();
+  拆();
+  editor.destroy();
+});
+
+it("标题上的首行缩进按钮是禁用的", async () => {
+  const editor = createTestEditor({
+    frontMatter: "",
+    trailingGap: "",
+    blocks: [{ ...块("题", ""), kind: "heading", level: 1, raw: "# 题\n" }],
+  });
+  editor.commands.setTextSelection(2);
+  const { 根, 拆 } = await 挂(editor);
+  const 钮 = 根.querySelector('button[aria-label^="首行缩进"]') as HTMLButtonElement;
+  expect(钮.disabled).toBe(true);
+  expect(钮.getAttribute("aria-label")).toContain("只作用于有文字的正文");
+  拆();
+  editor.destroy();
+});

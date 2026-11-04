@@ -1,6 +1,6 @@
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { Editor } from "@tiptap/core";
-import { NodeSelection, TextSelection } from "@tiptap/pm/state";
+import { NodeSelection, TextSelection, type Transaction } from "@tiptap/pm/state";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   applyBlockAlign,
@@ -16,7 +16,15 @@ import {
   replaceBlockWithSource,
   stampSignatures,
   共同对齐,
+  共同列表,
+  共同首行缩进,
+  列表跳过说明,
   删块在,
+  设列表,
+  设首行缩进,
+  能设列表,
+  能设首行缩进,
+  缩进跳过说明,
   有可对齐块,
   格坐标At,
   type BlockAlign,
@@ -28,6 +36,19 @@ import { 改选区, 定锚点, 矩形of, 选区of } from "./tableSelectPlugin";
 import { mdExtensions } from "./schema";
 import { 关格式刷, 开格式刷, 能开格式刷, 格式刷状态of } from "./formatPainter";
 import { 就绪后标出 } from "./citeFocus";
+import {
+  查找,
+  查找键,
+  查找快捷键,
+  全部替换,
+  含换行,
+  就近命中,
+  替换一处,
+  替换之后,
+  选区种子,
+  装查找,
+  type 查找状态,
+} from "./findReplace";
 import { 工具图标, type 图标名 } from "./icons";
 import { 对齐图, LinkEditor, Toolbar } from "./Toolbar";
 
@@ -129,6 +150,22 @@ export function BlockEditor({
   // 格式刷开关走只带 meta 的事务，既不触发 selectionUpdate 也不触发 update；
   // 这个 tick 只用来让气泡上的按扣跟着重渲染（比较引用，见下面的 onTr）
   const [, set刷Tick] = useState(0);
+  const [查找开, set查找开] = useState(false);
+  const [要替换, set要替换] = useState(false);
+  const [查询, set查询] = useState("");
+  const [替换文, set替换文] = useState("");
+  const [区分大小写, set区分大小写] = useState(false);
+  const [查找态, set查找态] = useState<查找状态 | null>(null);
+  const 查询框 = useRef<HTMLInputElement>(null);
+  const 替换框 = useRef<HTMLTextAreaElement>(null);
+  const 组字 = useRef(false);
+  const 待焦点 = useRef<{ 框: "查询" | "替换"; 全选: boolean } | null>(null);
+  const [焦点拍, set焦点拍] = useState(0);
+  const 查询Ref = useRef(查询);
+  const 区分Ref = useRef(区分大小写);
+  const 打开查找Ref = useRef<(替换行: boolean) => void>(() => {});
+  查询Ref.current = 查询;
+  区分Ref.current = 区分大小写;
 
   const editor = useEditor({
     extensions: mdExtensions,
@@ -331,6 +368,11 @@ export function BlockEditor({
       return r.width || r.height ? r : null;
     };
     const syncSel = () => {
+      // 查找栏拿着焦点时，选区气泡会量到输入框上，挂错地方
+      if (查找键.getState(editor.state)) {
+        setSel(null);
+        return;
+      }
       const { from, empty } = editor.state.selection;
       const host = wrap.current?.getBoundingClientRect();
       /**
@@ -381,8 +423,13 @@ export function BlockEditor({
      * （读 window 选区 + 量矩形），那条是花在打字路径上的。
      */
     let 键刷 = 格式刷状态of(editor.state);
+    let 找 = 查找键.getState(editor.state);
     const onTr = () => {
-      if (矩形of(editor.state)) syncSel();
+      const 下找 = 查找键.getState(editor.state);
+      if (矩形of(editor.state) || 下找 !== 找) {
+        找 = 下找;
+        syncSel();
+      }
       const 刷 = 格式刷状态of(editor.state);
       if (刷 !== 键刷) {
         键刷 = 刷;
@@ -421,6 +468,202 @@ export function BlockEditor({
       editApi.current = null;
     };
   }, [editor, doc, editApi]);
+
+  const 发布查找 = (tr: Transaction, 滚动: boolean) => {
+    if (!editor) return;
+    const 原来 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const 在栏 = !!原来?.closest(".find-bar");
+    const 可复原 = 原来 instanceof HTMLInputElement || 原来 instanceof HTMLTextAreaElement;
+    const 起 = 可复原 ? 原来.selectionStart : null;
+    const 止 = 可复原 ? 原来.selectionEnd : null;
+    // 输入框拿着焦点时，ProseMirror 的 scrollIntoView 发现选区不在编辑器里，直接什么都不滚
+    editor.view.dispatch(滚动 && !在栏 ? tr.scrollIntoView() : tr);
+    if (滚动) {
+      const 当前 = editor.view.dom.querySelector(".find-hit.current");
+      if (当前 && typeof 当前.scrollIntoView === "function") {
+        当前.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    }
+    if (在栏 && 原来 && document.activeElement !== 原来) {
+      原来.focus();
+      if (
+        (原来 instanceof HTMLInputElement || 原来 instanceof HTMLTextAreaElement) &&
+        起 != null &&
+        止 != null
+      ) {
+        原来.setSelectionRange(起, 止);
+      }
+    }
+  };
+
+  const 应用查询 = (q: string, 区分 = 区分Ref.current, 滚动 = false) => {
+    if (!editor) return;
+    if (!q) {
+      editor.view.dispatch(editor.state.tr.setMeta(查找键, null));
+      return;
+    }
+    const 命中 = 查找(editor.state.doc, q, 区分);
+    发布查找(
+      装查找(editor.state.tr, {
+        查询: q,
+        区分大小写: 区分,
+        命中,
+        当前: 就近命中(命中, editor.state.selection.from),
+      }),
+      滚动,
+    );
+  };
+
+  const 打开查找 = (替换行: boolean) => {
+    if (!editor) return;
+    const seed = 选区种子(editor.state);
+    const q = seed ?? 查询Ref.current;
+    if (seed !== null) {
+      set查询(seed);
+      查询Ref.current = seed;
+    }
+    set要替换((v) => 替换行 || v);
+    set查找开(true);
+    const 进替换 = 替换行 && !!q;
+    待焦点.current = { 框: 进替换 ? "替换" : "查询", 全选: !进替换 };
+    set焦点拍((n) => n + 1);
+    应用查询(q, 区分Ref.current, true);
+  };
+  打开查找Ref.current = 打开查找;
+
+  const 关闭查找 = () => {
+    set查找开(false);
+    if (!editor) return;
+    // 先交回焦点，清查找态那笔事务里的选区气泡才能量到正文。
+    // 反过来的话，事务发生时焦点还在查找框，量到的是输入框，气泡就回不来。
+    if (editor.isEditable) editor.view.focus();
+    else editor.view.dom.focus({ preventScroll: true });
+    editor.view.dispatch(editor.state.tr.setMeta(查找键, null));
+  };
+
+  const 跳查找 = (步: number, 回: "查询" | "替换" = "查询") => {
+    if (!editor) return;
+    const 态 = 查找键.getState(editor.state);
+    if (!态?.命中.length) return;
+    const 当前 = 态.当前 < 0 ? 0 : (态.当前 + 步 + 态.命中.length) % 态.命中.length;
+    发布查找(装查找(editor.state.tr, { ...态, 当前 }), true);
+    待焦点.current = { 框: 回, 全选: false };
+    set焦点拍((n) => n + 1);
+  };
+
+  const 换当前 = () => {
+    if (!editor?.isEditable) {
+      noticeRef.current?.("现在是浏览，不能替换");
+      return;
+    }
+    if (含换行(替换文)) {
+      noticeRef.current?.("替换内容里不能有换行");
+      return;
+    }
+    const 态 = 查找键.getState(editor.state);
+    const h = 态 && 态.当前 >= 0 ? 态.命中[态.当前] : undefined;
+    if (!态 || !h) {
+      noticeRef.current?.("没有匹配");
+      return;
+    }
+    const tr = 替换一处(editor.state, h.from, h.to, 替换文);
+    if (!tr) return;
+    const 命中 = 查找(tr.doc, 态.查询, 态.区分大小写);
+    发布查找(
+      装查找(tr, { ...态, 命中, 当前: 替换之后(命中, h.from + 替换文.length) }),
+      true,
+    );
+    待焦点.current = { 框: "替换", 全选: false };
+    set焦点拍((n) => n + 1);
+  };
+
+  const 换全部 = () => {
+    if (!editor?.isEditable) {
+      noticeRef.current?.("现在是浏览，不能替换");
+      return;
+    }
+    if (含换行(替换文)) {
+      noticeRef.current?.("替换内容里不能有换行");
+      return;
+    }
+    const 态 = 查找键.getState(editor.state);
+    if (!态?.命中.length) {
+      noticeRef.current?.("没有匹配");
+      return;
+    }
+    const n = 态.命中.length;
+    const tr = 全部替换(editor.state, 态.命中, 替换文);
+    if (!tr) return;
+    const 改了 = tr.docChanged;
+    const 命中 = 查找(tr.doc, 态.查询, 态.区分大小写);
+    发布查找(装查找(tr, { ...态, 命中, 当前: 命中.length ? 0 : -1 }), true);
+    if (改了) noticeRef.current?.(`已替换 ${n} 处`);
+    待焦点.current = { 框: "替换", 全选: false };
+    set焦点拍((n) => n + 1);
+  };
+
+  useEffect(() => {
+    if (!editor) return;
+    const 同步 = () => set查找态(查找键.getState(editor.state) ?? null);
+    editor.on("transaction", 同步);
+    return () => {
+      editor.off("transaction", 同步);
+    };
+  }, [editor]);
+
+  useEffect(() => {
+    if (!查找开) return;
+    const 哪 = 待焦点.current;
+    if (!哪) return;
+    待焦点.current = null;
+    const el = 哪.框 === "替换" ? 替换框.current : 查询框.current;
+    el?.focus();
+    if (哪.全选) el?.select();
+  }, [焦点拍, 查找开, 要替换]);
+
+  useEffect(() => {
+    if (!editor) return;
+    const on键 = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      const el = e.target instanceof HTMLElement ? e.target : null;
+      const 在查找栏 = !!el?.closest(".find-bar");
+      const 在别的输入 =
+        !在查找栏 &&
+        !!el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.tagName === "SELECT" ||
+          (el.isContentEditable && !editor.view.dom.contains(el)));
+      const 做 = 查找快捷键({
+        key: e.key,
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        isComposing: e.isComposing,
+        keyCode: e.keyCode,
+        在查找栏,
+        在别的输入,
+      });
+      if (!做) return;
+      e.preventDefault();
+      if (做 === "选中查询") {
+        查询框.current?.focus();
+        查询框.current?.select();
+        return;
+      }
+      if (做 === "展开替换") {
+        set要替换(true);
+        const 有查询 = !!查询Ref.current;
+        待焦点.current = { 框: 有查询 ? "替换" : "查询", 全选: !有查询 };
+        set焦点拍((n) => n + 1);
+        return;
+      }
+      打开查找Ref.current(做 === "替换");
+    };
+    window.addEventListener("keydown", on键);
+    return () => window.removeEventListener("keydown", on键);
+  }, [editor]);
 
   if (!editor) return null;
 
@@ -517,6 +760,20 @@ export function BlockEditor({
     if (tr) editor.view.dispatch(tr.scrollIntoView());
     if (跳过 > 0) noticeRef.current?.(`对齐只作用于正文与标题，已跳过 ${跳过} 个块`);
   };
+  const 列表档 = 共同列表(editor.state);
+  const 做列表 = (id: "bullet" | "numbered" | "todo") => {
+    const { tr, 跳过 } = 设列表(editor.state, id);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+    const 说明 = tr ? 列表跳过说明(跳过) : null;
+    if (说明) noticeRef.current?.(说明);
+  };
+  const 缩进开着 = 共同首行缩进(editor.state);
+  const 做缩进 = () => {
+    const { tr, 跳过 } = 设首行缩进(editor.state);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+    const 说明 = tr ? 缩进跳过说明(跳过) : null;
+    if (说明) noticeRef.current?.(说明);
+  };
 
   /**
    * 手柄按下：挪动超过 5px 算拖拽，否则算点击开类型菜单。
@@ -571,7 +828,124 @@ export function BlockEditor({
 
   return (
     <div className="editor-wrap" ref={wrap}>
-      <Toolbar editor={editor} />
+      <div className="editor-tools">
+        <Toolbar editor={editor} />
+        {查找开 ? (
+          <div
+            className="find-bar"
+            role="search"
+            aria-label="在本文查找"
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                关闭查找();
+                return;
+              }
+              if (e.key !== "Enter") return;
+              const 在查询 = e.target === 查询框.current;
+              const 在替换 = e.target === 替换框.current;
+              // 按钮上的 Enter 留给按钮自己的 click。这里再跳一次，就会连走两处。
+              if (!在查询 && !在替换) return;
+              e.preventDefault();
+              if (在替换 && !e.shiftKey) 换当前();
+              else 跳查找(e.shiftKey ? -1 : 1, 在替换 ? "替换" : "查询");
+            }}
+          >
+            <input
+              ref={查询框}
+              value={查询}
+              spellCheck={false}
+              autoComplete="off"
+              aria-label="查找"
+              placeholder="查找"
+              onCompositionStart={() => {
+                组字.current = true;
+              }}
+              onCompositionEnd={(e) => {
+                组字.current = false;
+                const v = e.currentTarget.value;
+                set查询(v);
+                查询Ref.current = v;
+                应用查询(v);
+              }}
+              onChange={(e) => {
+                const v = e.target.value;
+                set查询(v);
+                查询Ref.current = v;
+                if (!组字.current) 应用查询(v);
+              }}
+            />
+            <span className="find-count" aria-live="polite">
+              {!查询 || !查找态 || 查找态.查询 !== 查询
+                ? ""
+                : 查找态.命中.length === 0
+                  ? "无匹配"
+                  : `${查找态.当前 + 1}/${查找态.命中.length}`}
+            </span>
+            <button type="button" aria-label="上一处" title="上一处（Shift+Enter）" onClick={() => 跳查找(-1)}>
+              <工具图标.chevronUp />
+            </button>
+            <button type="button" aria-label="下一处" title="下一处（Enter）" onClick={() => 跳查找(1)}>
+              <工具图标.chevronDown />
+            </button>
+            <button
+              type="button"
+              className={区分大小写 ? "on" : undefined}
+              aria-pressed={区分大小写}
+              aria-label="区分大小写"
+              title="区分大小写"
+              onClick={() => {
+                const 下 = !区分Ref.current;
+                set区分大小写(下);
+                区分Ref.current = 下;
+                应用查询(查询Ref.current, 下);
+                待焦点.current = { 框: "查询", 全选: false };
+                set焦点拍((n) => n + 1);
+              }}
+            >
+              Aa
+            </button>
+            {要替换 ? (
+              <>
+                <textarea
+                  ref={替换框}
+                  value={替换文}
+                  rows={1}
+                  spellCheck={false}
+                  autoComplete="off"
+                  aria-label="替换为"
+                  placeholder="替换为"
+                  onChange={(e) => set替换文(e.target.value)}
+                />
+                <button type="button" disabled={!editor.isEditable} onClick={换当前}>
+                  替换
+                </button>
+                <button type="button" disabled={!editor.isEditable} onClick={换全部}>
+                  全部替换
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                aria-expanded={false}
+                title="替换（Ctrl+H）"
+                onClick={() => {
+                  set要替换(true);
+                  待焦点.current = { 框: 查询 ? "替换" : "查询", 全选: !查询 };
+                  set焦点拍((n) => n + 1);
+                }}
+              >
+                替换
+              </button>
+            )}
+            <button type="button" aria-label="关闭查找" title="关闭（Esc）" onClick={关闭查找}>
+              ×
+            </button>
+          </div>
+        ) : null}
+      </div>
       <EditorContent editor={editor} />
       {sel ? (
         <div
@@ -636,6 +1010,43 @@ export function BlockEditor({
               </button>
             );
           })()}
+          {cellAt(editor.state) === null && 能设列表(editor.state)
+            ? (
+                [
+                  ["bullet", "无序列表", "list"],
+                  ["numbered", "有序列表", "listOrdered"],
+                  ["todo", "待办", "listTodo"],
+                ] as const
+              ).map(([id, 标签, 图]) => {
+                const Icon = 工具图标[图];
+                const 开着 = 列表档 === id;
+                return (
+                  <button
+                    key={"list-" + id}
+                    type="button"
+                    className={开着 ? "on" : ""}
+                    title={标签}
+                    aria-label={标签}
+                    aria-pressed={开着 || undefined}
+                    onClick={() => 做列表(id)}
+                  >
+                    <Icon />
+                  </button>
+                );
+              })
+            : null}
+          {cellAt(editor.state) === null && 能设首行缩进(editor.state) ? (
+            <button
+              type="button"
+              className={缩进开着 ? "on" : ""}
+              title="首行缩进"
+              aria-label="首行缩进"
+              aria-pressed={缩进开着 || undefined}
+              onClick={做缩进}
+            >
+              <工具图标.firstIndent />
+            </button>
+          ) : null}
           {/* 块级对齐：选中的文字所在（或跨过的）正文 / 标题一起改。表格格子里有自己的
               列对齐，列表 / 引用 / 代码 / 图片根本落不成包裹——这几种干脆不出现，
               免得按下去只换来一句"没改成" */}

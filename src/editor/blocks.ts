@@ -8,6 +8,8 @@ import {
 } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { NodeSelection, TextSelection } from "@tiptap/pm/state";
+import { canSplit } from "@tiptap/pm/transform";
+import type { EditorView } from "@tiptap/pm/view";
 import type { EditBlock, EditDoc } from "../ipc/types";
 import { 拼资产引用, 是库内资产, 拆资产引用, 拆自attrs, type 资产引用 } from "./asset";
 import { 拼开栏, 拼围栏, 拆围栏, 拆开栏 } from "./fence";
@@ -253,15 +255,60 @@ function anchorSuffix(id: unknown): string {
 }
 
 /**
+ * 正文若以块级记号开头，落盘时会被内核读成另一种块：`# x` 变标题、`- x` 变列表、
+ * `> x` 变引用、`1. x` 变有序项、``` 开围栏、`---` 变分隔线、四格缩进变缩进码、
+ * `![[x]]` 变图片。段落与列表项都没有自带前缀能挡住它——标题有 `## `，所以标题不受这条约束。
+ *
+ * 行首 1–3 个空格仍算块首（ATX 与列表都允许），所以先按原样测一次，再削掉这几个空格测一次；
+ * 四格缩进那条是缩进码，不能被削掉。
+ */
+const 块级记号 =
+  /^(?:#{1,6}(?:\s|$)|>|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|```|~~~|(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$|!\[\[| {4,}|\t)/;
+
+export function 以块级记号开头(text: string): boolean {
+  return 块级记号.test(text) || (/^ {1,3}/.test(text) && 块级记号.test(text.replace(/^ {1,3}/, "")));
+}
+
+/**
  * 有序项的记号（`3.` / `2)` 这一整串）。md-kernel 把它存成 `Kind::Ordered { marker }`
  * 并原样写回，而 `EditBlock` 没有把 marker 带过来——序号与记号只活在 `raw` 的前缀里。
  * 于是"界面上显示什么"与"落盘写什么"必须由同一个函数从同一份 `raw` 上算：
  * 否则改一个字就把 `3.` 落回 `1.`（屏幕上还写着 3），或把用户写的 `2)` 悄悄改成 `2.`。
- * 新建的块没有历史 `raw`，退回 `1.`：CommonMark 按位置重编号，源码写几不影响语义。
+ *
+ * 没有历史前缀时退回 `1.`。回车续出来的新项不走这条退路，序号记在 `mdMarker` 上，
+ * 由 `这项有序记号` 统一读——屏幕和落盘仍是同一个函数。
  */
 export function numberedMarker(raw: string): string {
   const m = /^\s*(\d+[.)])/.exec(raw);
   return m?.[1] ?? "1.";
+}
+
+const 有序记号形 = /^(\d+)([.)])$/;
+
+/**
+ * 这一项现在该显示、也该写下的有序记号。
+ *
+ * 有源文件前缀就用它，后面的项不跟着重排。没有前缀的新项用创建时算好的 `mdMarker`
+ * （上一项序号加一、分隔符照抄）。两边都没有才是 `1.`。
+ */
+export function 这项有序记号(node: PmNode): string {
+  const raw = String(node.attrs.mdRaw ?? "");
+  if (/^\s*\d+[.)]/.test(raw)) return numberedMarker(raw);
+  const 存 = String(node.attrs.mdMarker ?? "");
+  if (有序记号形.test(存)) return 存;
+  return "1.";
+}
+
+/** 紧挨着的下一项有序记号。上一项不是同层级的有序项时，从 `1.` 起 */
+export function 下一项有序记号(prev: PmNode | null, depth: number): string {
+  if (!prev || prev.type.name !== "mdItem") return "1.";
+  if (String(prev.attrs.mdKind ?? "") !== "numbered") return "1.";
+  if (Number(prev.attrs.mdDepth ?? 0) !== depth) return "1.";
+  const m = 有序记号形.exec(这项有序记号(prev));
+  if (!m?.[1] || !m[2]) return "1.";
+  const n = Number(m[1]);
+  if (!Number.isSafeInteger(n)) return "1.";
+  return String(n + 1) + m[2];
 }
 
 /** 行内字段：与 md-kernel `render_block` 同一写法（` key:: value`，跟在正文后、锚点前） */
@@ -304,7 +351,7 @@ function serializeNode(node: PmNode): string {
       const kind = String(a.mdKind ?? "bullet");
       const marker =
         kind === "numbered"
-          ? `${numberedMarker(String(a.mdRaw ?? ""))} `
+          ? `${这项有序记号(node)} `
           : kind === "todo"
             ? `- [${a.mdChecked ? "x" : " "}] `
             : "- ";
@@ -335,7 +382,14 @@ function serializeNode(node: PmNode): string {
       // `?? ""` 会把整块吃成空字符串——用户编辑一次代码块 / 表格 / 引用，那块就没了。
       const 开 = 有效开栏(node);
       const 闭 = String(a.mdFenceClose ?? "");
-      if (!开 || !闭) return node.textContent;
+      if (!开 || !闭) {
+        const 文 = node.textContent;
+        const id = typeof a.mdId === "string" ? a.mdId : "";
+        // 装载来的源正文里带着锚点；新写 / 替换出来的没有，补回末行末尾。
+        // 不补的话，整篇替换一次 callout / 引用就把它的 `^b-…` 从文件里抹掉。
+        if (!id || 文.trimEnd().endsWith(`^${id}`)) return 文;
+        return 文.trimEnd() + anchorSuffix(id);
+      }
       // 围栏账本这条路：正文只装代码，两道围栏按原样拼回去。空正文要按 `mdFenceBody`
       // 分成 `[]` 与 `[""]` 两种——` ``` 紧挨 ``` ` 与"中间一个空行"是两种字节。
       const 身 = node.textContent
@@ -567,6 +621,45 @@ export function blockTypePatch(
   }
 }
 
+function 是可转块(node: PmNode): boolean {
+  const 名 = node.type.name;
+  return 名 === "mdParagraph" || 名 === "mdHeading" || 名 === "mdItem";
+}
+
+/** 顶层块起点的前一块。`pos` 必须是那一块自己的起点 */
+function 前驱于(doc: PmNode, pos: number): PmNode | null {
+  const i = doc.resolve(Math.max(0, pos)).index(0);
+  return i > 0 ? (doc.child(i - 1) ?? null) : null;
+}
+
+/**
+ * 类型补丁再加上有序记号。记号不写进 `mdRaw`：那份非空且签名对得上时，保存会把旧切片
+ * 原样写回去，新打的字就没了。已有源文件前缀的项保持空 `mdMarker`，显示仍读前缀。
+ */
+function 套上类型(
+  node: PmNode,
+  patch: { attrs: Record<string, unknown> },
+  id: BlockTypeId,
+  prev: PmNode | null,
+): Record<string, unknown> {
+  const attrs: Record<string, unknown> = { ...node.attrs, ...patch.attrs, mdMarker: "" };
+  if (id === "numbered" && !/^\s*\d+[.)]/.test(String(node.attrs.mdRaw ?? ""))) {
+    attrs.mdMarker = 下一项有序记号(prev, Number(node.attrs.mdDepth ?? 0));
+  }
+  return attrs;
+}
+
+function 改块类型(tr: Transaction, pos: number, id: BlockTypeId): boolean {
+  const node = tr.doc.nodeAt(pos);
+  if (!node) return false;
+  const patch = blockTypePatch(node, id);
+  if (!patch) return false;
+  const 型 = tr.doc.type.schema.nodes[patch.typeName];
+  if (!型) return false;
+  tr.setNodeMarkup(pos, 型, 套上类型(node, patch, id, 前驱于(tr.doc, pos)));
+  return true;
+}
+
 /**
  * 把光标所在的块改成目标类型，返回那笔事务（不改就不返回事务）。
  *
@@ -578,14 +671,250 @@ export function applyBlockType(
   start: number,
   id: BlockTypeId,
 ): Transaction | null {
-  const node = state.doc.nodeAt(start);
-  if (!node) return null;
-  const patch = blockTypePatch(node, id);
-  if (!patch) return null;
-  return state.tr.setNodeMarkup(start, state.schema.nodes[patch.typeName], {
+  const tr = state.tr;
+  return 改块类型(tr, start, id) ? tr : null;
+}
+
+/** 选区里有没有能改成列表的块（正文、标题、列表项）。代码 / 引用 / 表格 / 图片不算 */
+export function 能设列表(state: EditorState): boolean {
+  return 所选顶层块(state).some((b) => 是可转块(b.node));
+}
+
+export type 列表种类 = "bullet" | "numbered" | "todo";
+
+/**
+ * 选区里可转块的共同列表类型。不全是同一种时给 null——
+ * 按钮按这个亮，混选时一枚都不亮。
+ */
+export function 共同列表(state: EditorState): 列表种类 | null {
+  const 可 = 所选顶层块(state).filter((b) => 是可转块(b.node));
+  if (!可.length) return null;
+  const 首 = 块类型of(可[0]!.node);
+  if (首 !== "bullet" && 首 !== "numbered" && 首 !== "todo") return null;
+  return 可.every((b) => 块类型of(b.node) === 首) ? 首 : null;
+}
+
+export function 列表跳过说明(跳过: number): string | null {
+  return 跳过 > 0 ? `列表只作用于正文、标题和列表项，已跳过 ${跳过} 个块` : null;
+}
+
+/**
+ * 把选区里的正文 / 标题 / 列表项设成无序、有序或待办，**一笔事务**。
+ *
+ * 可转的块已经全是这一类型时，再设一次回到正文（和加粗一样，按第二次是取消）。
+ * 从无序改有序、改待办都是换类型，不是取消。已经写在文件里的 `3.` / `2)` 不重排；
+ * 新转成的有序项只给自己记下一个序号。新转成的待办不勾选；本来就是待办的，勾留在原处。
+ */
+export function 设列表(
+  state: EditorState,
+  id: 列表种类,
+): { tr: Transaction | null; 跳过: number } {
+  const 块们 = 所选顶层块(state);
+  const 可 = 块们.filter((b) => 是可转块(b.node));
+  const 跳过 = 块们.length - 可.length;
+  if (!可.length) return { tr: null, 跳过 };
+  const 目标: BlockTypeId = 可.every((b) => 块类型of(b.node) === id) ? "paragraph" : id;
+  const tr = state.tr;
+  let 改了 = false;
+  for (const b of 可) {
+    if (改块类型(tr, b.pos, 目标)) 改了 = true;
+  }
+  return { tr: 改了 ? tr : null, 跳过 };
+}
+
+/** 这一项在屏幕上的边框。前缀列用它量，不用事件目标自己的 offsetX。 */
+export type 待办前缀盒 = {
+  left: number;
+  top: number;
+  bottom: number;
+  borderLeft: number;
+  paddingLeft: number;
+};
+
+/**
+ * 点击落在待办左缘的前缀列里。
+ *
+ * 文字从 `left + border + padding` 才开始。用这一项自己的边框，是因为点在行首
+ * 加粗的字上时，事件目标是里面那个元素，它的 offsetX 会小到像点在方框上。
+ */
+export function 点在待办前缀(clientX: number, clientY: number, 盒: 待办前缀盒): boolean {
+  if (clientY < 盒.top || clientY >= 盒.bottom) return false;
+  const 右缘 = 盒.left + 盒.borderLeft + 盒.paddingLeft;
+  return clientX >= 盒.left && clientX < 右缘;
+}
+
+function 读像素(值: string): number {
+  const n = Number.parseFloat(值);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function 量待办前缀(项: HTMLElement): 待办前缀盒 {
+  const 盒 = 项.getBoundingClientRect();
+  const 样式 = getComputedStyle(项);
+  return {
+    left: 盒.left,
+    top: 盒.top,
+    bottom: 盒.bottom,
+    borderLeft: 读像素(样式.borderLeftWidth),
+    paddingLeft: 读像素(样式.paddingLeft),
+  };
+}
+
+function 待办项元素(target: EventTarget | null): HTMLElement | null {
+  const 元素 =
+    target instanceof Element ? target : target instanceof Text ? target.parentElement : null;
+  const 项 = 元素?.closest("[data-md-item]");
+  if (!(项 instanceof HTMLElement) || 项.getAttribute("data-md-item") !== "todo") return null;
+  return 项;
+}
+
+/** 只切换这一项的勾。方框字符不进正文，落盘仍是 `- [ ]` / `- [x]`。 */
+export function 切换待办勾选(state: EditorState, pos: number): Transaction | null {
+  const node = state.doc.nodeAt(pos);
+  if (!node || node.type.name !== "mdItem" || String(node.attrs.mdKind ?? "") !== "todo") return null;
+  return state.tr.setNodeMarkup(pos, undefined, {
     ...node.attrs,
-    ...patch.attrs,
+    mdChecked: node.attrs.mdChecked !== true,
   });
+}
+
+/**
+ * 点在待办前缀上就勾选或取消。带修饰键的点击交回选区（Shift 扩选）。
+ * 点在文字上返回 false，光标照常落下。
+ */
+export function 点待办前缀(view: EditorView, event: MouseEvent): boolean {
+  if (!view.editable || event.button !== 0) return false;
+  if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
+  const 项 = 待办项元素(event.target);
+  if (!项 || !点在待办前缀(event.clientX, event.clientY, 量待办前缀(项))) return false;
+  let 内 = -1;
+  try {
+    内 = view.posAtDOM(项, 0);
+  } catch {
+    return false;
+  }
+  if (内 < 0) return false;
+  const $ = view.state.doc.resolve(内);
+  if ($.depth < 1 || $.node(1).type.name !== "mdItem") return false;
+  const tr = 切换待办勾选(view.state, $.before(1));
+  if (!tr) return false;
+  event.preventDefault();
+  view.dispatch(tr);
+  return true;
+}
+
+/** 正文开头的两个全角空格。这就是首行缩进：屏幕和文件读的是同一份字。 */
+export const 首行缩进字 = "\u3000\u3000";
+
+/** 有文字的正文才缩。空段落、只剩这两个空格的段落，保存时会被当成空白行丢掉。 */
+function 能缩进这段(node: PmNode): boolean {
+  return node.type.name === "mdParagraph" && node.textContent.trim() !== "";
+}
+
+function 已有首行缩进(node: PmNode): boolean {
+  return node.textContent.startsWith(首行缩进字);
+}
+
+/** 选区里有没有能缩进的正文。标题、列表、引用、代码、表格、图片、空段落都不算。 */
+export function 能设首行缩进(state: EditorState): boolean {
+  return 所选顶层块(state).some((b) => 能缩进这段(b.node));
+}
+
+/**
+ * 选区里每一段有字的正文都已经以这两个全角空格开头。
+ * 有的有、有的没有，或者一段都没有时，按钮不亮。
+ */
+export function 共同首行缩进(state: EditorState): boolean {
+  const 可 = 所选顶层块(state).filter((b) => 能缩进这段(b.node));
+  return 可.length > 0 && 可.every((b) => 已有首行缩进(b.node));
+}
+
+export function 缩进跳过说明(跳过: number): string | null {
+  return 跳过 > 0 ? `首行缩进只作用于有文字的正文，已跳过 ${跳过} 个块` : null;
+}
+
+/**
+ * 给选区里的正文加上或去掉首行缩进，**一笔事务**。
+ *
+ * 能缩的段已经全部以这两个字开头时，再设一次就从开头删掉。否则只给还没有的那些
+ * 加上，已经有的不动。这两个字是无标记的正文，不跟着旁边的加粗走。
+ * 插字会把后面的位置往后推，所以从文档末尾往前改。
+ */
+export function 设首行缩进(state: EditorState): { tr: Transaction | null; 跳过: number } {
+  const 块们 = 所选顶层块(state);
+  const 可 = 块们.filter((b) => 能缩进这段(b.node));
+  const 跳过 = 块们.length - 可.length;
+  if (!可.length) return { tr: null, 跳过 };
+  const 去掉 = 可.every((b) => 已有首行缩进(b.node));
+  const tr = state.tr;
+  for (const b of [...可].reverse()) {
+    const 起点 = b.pos + 1;
+    if (去掉) tr.delete(起点, 起点 + 首行缩进字.length);
+    else if (!已有首行缩进(b.node)) tr.insert(起点, state.schema.text(首行缩进字));
+  }
+  return { tr, 跳过 };
+}
+
+/**
+ * 列表项里的回车。有字就拆成下一项（类型、层级照抄，新项的账本由 `LedgerGuard` 清）；
+ * 项里一个字都没有，再按一次就退回正文。跨块选区交回默认。
+ */
+export function 列表回车(state: EditorState): Transaction | null {
+  const sel = state.selection;
+  if (!(sel instanceof TextSelection)) return null;
+  const { $from, $to } = sel;
+  if ($from.depth < 1 || $to.depth < 1 || $from.before(1) !== $to.before(1)) return null;
+  if ($from.parent.type.name !== "mdItem") return null;
+
+  const tr = state.tr;
+  if (!sel.empty) tr.deleteSelection();
+  const $ = tr.selection.$from;
+  if ($.parent.type.name !== "mdItem") return null;
+  const node = $.parent;
+  const 块起点 = $.before(1);
+
+  if (node.textContent.length === 0) {
+    if (!改块类型(tr, 块起点, "paragraph")) return null;
+    const 落 = Math.min(块起点 + 1, tr.doc.content.size);
+    tr.setSelection(TextSelection.near(tr.doc.resolve(落)));
+    return tr;
+  }
+
+  const at = $.pos;
+  const 规格 = [{ type: node.type, attrs: node.attrs }];
+  if (!canSplit(tr.doc, at, 1, 规格)) return null;
+  tr.split(at, 1, 规格);
+  // 拆点之前的位置不动：左半仍从原来的起点开始，右半紧跟在它后面
+  const 左 = tr.doc.nodeAt(块起点);
+  if (!左) return tr;
+  const 右起点 = 块起点 + 左.nodeSize;
+  const 右 = tr.doc.nodeAt(右起点);
+  if (!右 || 右.type.name !== "mdItem") return tr;
+  if (String(右.attrs.mdKind) === "numbered") {
+    tr.setNodeMarkup(右起点, undefined, {
+      ...右.attrs,
+      mdMarker: 下一项有序记号(左, Number(右.attrs.mdDepth ?? 0)),
+    });
+  } else if (String(右.attrs.mdKind) === "todo") {
+    // 续出来的是新的一项，不把上一项的勾选带过去
+    tr.setNodeMarkup(右起点, undefined, { ...右.attrs, mdChecked: false });
+  }
+  tr.setSelection(TextSelection.create(tr.doc, Math.min(右起点 + 1, tr.doc.content.size)));
+  return tr;
+}
+
+/**
+ * 光标在列表项开头时，退格只摘掉记号，字留在原地，不并进上一块。
+ * 项中间的退格仍是删字符，这里返回 null。
+ */
+export function 列表退格(state: EditorState): Transaction | null {
+  const sel = state.selection;
+  if (!sel.empty || !(sel instanceof TextSelection)) return null;
+  const { $from } = sel;
+  if ($from.parent.type.name !== "mdItem" || $from.parentOffset !== 0) return null;
+  const tr = state.tr;
+  if (!改块类型(tr, $from.before(1), "paragraph")) return null;
+  return tr;
 }
 
 /**
@@ -981,6 +1310,24 @@ function sourceBlock(state: EditorState, kind: string, source: string, gap: stri
 }
 
 /**
+ * 整篇编辑用：把一段 Markdown 源文本变成可插入的节点。与工具栏插入走同一个
+ * `sourceBlock`——两处各拼一次，表/代码块插进来的形状早晚会分叉。
+ */
+export function 源块节点(
+  state: EditorState,
+  kind: string,
+  source: string,
+  gap = "\n",
+): PmNode[] {
+  return sourceBlock(state, kind, source, gap);
+}
+
+/** 整篇编辑用：给模型看这一块的完整源码（代码块含围栏、表格含管道） */
+export function 块源码(node: PmNode): string {
+  return serializeNode(node);
+}
+
+/**
  * 剪贴板里是表格时，把**当前这个空段落**换成网格。
  *
  * 只在空段落上接管：光标在写着字的段落里、或在别人的格子里，默认粘贴才是用户预期的
@@ -1083,7 +1430,7 @@ export function 判粘贴(state: EditorState, text: string): 粘贴判 {
  */
 export function docToMarkdown(doc: PmNode, head: EditDoc): string {
   let out = head.frontMatter;
-  let prev: { kind: string; depth: number } | null = null;
+  let prev: { kind: string; depth: number; 换过: boolean } | null = null;
   // 空文件装载时会被补一个空段落（ProseMirror 的 doc 要 ≥1 个子节点）。
   // 不特殊处理的话"打开空笔记、一个字没碰、保存"就多出一个换行。
   if (!head.blocks.length && doc.childCount === 1) {
@@ -1137,11 +1484,51 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     // 个落笔的块，按 index 判就会给它补出前导空行。
     let gap =
       raw.length > 0 ? String(a.mdGap ?? "") : continuesList || !out ? "" : "\n";
+    /**
+     * **文件开头不许带前导空行**（与 D28「挪到文档开头的块不能带着 `gap=""` 以外的空白」同一条）。
+     * 删掉原第一块后，新首块继承的 gap 原本是"与前任之间的一整行"；前面已经没有块了，
+     * 留着就是文件开头凭空多一行。只有**原首块自己**（源切片与 gap 都对得上）才保留——
+     * 文件本来就以空行开头时，那是文件的字节，不是排版产物。
+     */
+    if (
+      !out &&
+      raw.length > 0 &&
+      !(head.blocks[0] && raw === head.blocks[0].raw && String(a.mdGap ?? "") === head.blocks[0].gapBefore)
+    ) {
+      gap = "";
+    }
+    /**
+     * **从文件继承的空行只对原来的前驱成立**：在文首插一块、把列表项改成段落之后，
+     * 上一块的末尾换行不再能替这一段收尾——段落、表格、图片贴着上一段写会被内核读成
+     * 上一段的续行（表格则并进上一张表），保存一次就等于把两块合成一块（真机口径：
+     * `- 第一项\n- 第二项` 把第二项改成正文，落盘成 `- 第一项\n第二项`）。
+     *
+     * 只补"真会并块"的那一类边界：标题 / 列表 / 引用 / 围栏 / 分隔线本来就能打断
+     * 上一段，不用加；而且**只在边界上有一块被改过时才补**——没碰过的块（`# 标题\n段落`
+     * 这种合法紧排）连一个空行都不动。
+     */
+    const 能起新块 =
+      kind === "heading" ||
+      kind === "quote" ||
+      kind === "code" ||
+      kind === "divider" ||
+      kind === "bullet" ||
+      kind === "numbered" ||
+      kind === "todo";
+    const 前驱已收尾 =
+      prev !== null && (prev.kind === "heading" || prev.kind === "code" || prev.kind === "divider");
+    if (gap === "" && prev !== null && !能起新块 && !前驱已收尾 && (prev.换过 || !unchanged)) {
+      gap = "\n";
+    }
     // **新块的 gap 语义是"与上一块之间空一整行"**，而"上一块写完了"隐含着一件事：它得先
     // 把自己的行终止。文件最后一行的 `raw` 本来不带换行（未改动的块原样回写、不补 eol），
     // 在它后面插一块时只给一个 "\n" 就变成 `末段\n---` —— 内核把它读成 setext 二级标题，
     // 插一张表则整张表被吞进上一段（2026-09-29 复查实测）。所以这里按 `out` 实际结尾补。
     if (gap === "\n" && out && !out.endsWith("\n")) gap = "\n\n";
+    // 紧排列表的新项 gap 是 ""，分隔只靠上一块 raw 自带的换行。末行本来不带换行时，
+    // 这个 "" 会把两项粘成 `- 甲- 乙`。只补一个换行：补两个就会在中间空一行，紧排被拆开。
+    // 放在上一条之后，避免刚补上的 "\n" 又被升级成 "\n\n"。没改过的块不碰。
+    if (gap === "" && out && !out.endsWith("\n") && !unchanged) gap = "\n";
     const eol = index === 最后写出 && !srcEndsNewline ? "" : "\n";
     const 正文 = unchanged ? raw : serializeNode(node) + eol;
     // **重新产出后是空白的块不落任何字节**：Markdown 里没有"空段落"这个东西，写出来就是
@@ -1151,7 +1538,7 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     // 时的形状一致。
     if (!unchanged && !正文.trim()) return;
     out += gap + 正文;
-    prev = { kind, depth };
+    prev = { kind, depth, 换过: !unchanged };
   });
   return out + head.trailingGap;
 }

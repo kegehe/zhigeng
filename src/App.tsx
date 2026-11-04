@@ -26,7 +26,7 @@ import { FirstRun } from "./FirstRun";
 import { AiDock } from "./editor/AiDock";
 import { BlockEditor } from "./editor/BlockEditor";
 import { docToMarkdown } from "./editor/blocks";
-import { OutlinePanel } from "./editor/OutlinePanel";
+import { OutlineEdge } from "./editor/OutlineEdge";
 import type { Editor } from "@tiptap/core";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
 import { 可对话 } from "./ui/ai";
@@ -1584,6 +1584,59 @@ export function App() {
   };
 
   /**
+   * 托盘菜单的「打开设置」。菜单长在 Rust 壳里，界面只接住这一下并走同一个入口。
+   *
+   * 用 ref 取最新的 `openSettings`：它依赖 `editing` / `persist`，每次渲染都是新闭包，
+   * 直接写进依赖会让监听器每渲染一次就重订一次；撑不住的是"点菜单那一刻拿到旧闭包"，
+   * 所以 ref 每次渲染后更新，监听器只注册一次。
+   */
+  const 设置入口 = useRef<() => void>(() => {});
+  useEffect(() => {
+    设置入口.current = () => {
+      void openSettings();
+    };
+  });
+  useEffect(() => {
+    if (!inTauri()) return;
+    let alive = true;
+    let 拆: (() => void) | undefined;
+    void (async () => {
+      const a = await listen("tray://open-settings", () => {
+        if (alive) 设置入口.current();
+      });
+      // 备份是壳在后台跑完才回话：成功走 flash，失败走普通错误横幅。
+      // **不要在这里跑 `refresh`**：它会重读 AI 配置，把设置页里正在改的表单冲掉，
+      // 而且它成功时会 `setError(null)`，把刚写上去的失败横幅抹掉。
+      // 这里只需要补一下 `app_info`（备份时间那条状态）；按钮的忙碌态归备份面板自己管。
+      const b = await listen<{ ok: boolean; message: string }>("tray://backup", (e) => {
+        if (!alive) return;
+        if (e.payload.ok) {
+          void api
+            .appInfo()
+            .then((v) => {
+              if (alive) setInfo(v);
+            })
+            .catch(() => {});
+          setFlash(e.payload.message);
+        } else {
+          setError(e.payload.message);
+        }
+      });
+      return () => {
+        a();
+        b();
+      };
+    })().then((f) => {
+      if (alive) 拆 = f;
+      else f();
+    });
+    return () => {
+      alive = false;
+      拆?.();
+    };
+  }, []);
+
+  /**
    * 换库。设置页里唯一会把**整个界面**换掉的动作，所以它自己清旧库的编辑态：
    * `apply` 只管 info 与列表，`selected` / `draft` / `links` 揣的还是上一篇，
    * 不清就是"在新库里显示旧库那一篇"——标题对不上路径，一保存还会写回旧目录。
@@ -2355,9 +2408,9 @@ export function App() {
             </div>
           </aside>
 
-          {/* 布局三：主区分成「正文列 + 大纲栏」。大纲栏是独立的一列（不是 main 里的
-              sticky 侧条），滚动行为与侧栏同款——main 滚正文的，大纲滚自己的，
-              互不拖累。liveEditor 为 null（其它面板 / 源码态 / 装载中）时这一列整个不渲染 */}
+          {/* 布局三（2026-10-30 起，方案 G）：主区只剩正文列。大纲不再是右侧常驻栏，
+              改成正文列**左缘**的把手 + 悬停浮层（OutlineEdge，也挂在 editor-pane 里）；
+              空文档没有大纲。liveEditor 为 null（其它面板 / 源码态 / 装载中）时正文列整个不渲染 */}
           <div className="flex min-w-0 flex-1">
             {/* 正文列自己夹一层：底部 AI 对话框要挂在**滚动容器之外**，否则它跟着正文一起滚走 */}
             <div className="editor-pane relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2571,7 +2624,7 @@ export function App() {
                   <p className="mt-2 max-w-2xl text-sm text-fg-2">
                     答案只根据你的笔记生成，并标出来自哪一篇；找不到依据时会直接说没有。
                     发给模型的只有检索到的片段，不是整篇笔记。
-                    要改正文：回到文档里，用底部那条 AI 对话框——选中一段它就改那一段，不选就改光标所在的那一段。
+                    要改正文：回到文档里，用底部那条 AI 对话框——选中一段它就改那一段，不选就对整篇提问或编辑。
                   </p>
                   <div className="mt-4 flex max-w-2xl gap-2">
                     <input
@@ -2835,7 +2888,13 @@ export function App() {
                       {mode !== "source" && editDoc ? (
                         <div
                           className="block-editor"
-                          onBlur={() => void persist()}
+                          onBlur={(e) => {
+                            // 焦点在查找栏、图注之间挪动也会冒泡到这里。那不是离开这篇。
+                            // 真去存的话，保存完成时会把 inlineRev 清零，这期间的替换就不再标脏。
+                            const 下一 = e.relatedTarget;
+                            if (下一 instanceof Node && e.currentTarget.contains(下一)) return;
+                            void persist();
+                          }}
                           onKeyDown={bodyKeys}
                         >
                           <BlockEditor
@@ -2939,8 +2998,12 @@ export function App() {
                 onNotice={aiNotice}
               />
             ) : null}
+            {/* 方案 G（2026-10-30）：大纲不再是右侧常驻栏，改挂在正文列**左缘**——
+                一条把手 + 悬停滑出的浮层。**必须在 editor-pane 里面**：`.outline-edge`
+                的 `100%` 要按这个定位祖先算，落到别的祖先上就成了视口宽度（缩放时跟着漂、
+                窄窗时贴到整个窗口最左）。仍在 main 外面，所以不随正文滚动。 */}
+            {liveEditor ? <OutlineEdge editor={liveEditor} /> : null}
             </div>
-            {liveEditor ? <OutlinePanel editor={liveEditor} /> : null}
           </div>
         </div>
       )}

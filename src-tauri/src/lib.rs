@@ -11,6 +11,8 @@ use note_core::service::{
     TrashRow,
 };
 use note_core::vault::Vault;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
@@ -77,12 +79,13 @@ struct WriteErr {
 }
 
 fn werr(e: note_core::Error) -> WriteErr {
-    // `kind` 是**类型**不是文案：界面要能把三种失败分开说——
+    // `kind` 是**类型**不是文案：界面要能把几种失败分开说——
     // 冲突（让用户选保留哪份）、生成侧不可用（网络那头没反应，本地那两路照常）、
-    // 其余（配置写错了之类）。
+    // 空回稿（模型答完了但没给回稿，界面要另给删除确认）、其余（配置写错了之类）。
     let kind = match &e {
         note_core::Error::Conflict(_) => "conflict",
         note_core::Error::Unavailable(_) => "unavailable",
+        note_core::Error::EmptyAnswer(_) => "empty-answer",
         _ => "error",
     };
     WriteErr {
@@ -295,6 +298,15 @@ async fn import_apply(app: AppHandle, src: String) -> Result<ImportReport, Strin
     Ok(report)
 }
 
+/// 唤起主窗口。托盘左键、单实例二次启动、菜单里的「打开知更」共用这一处。
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
 /// 唤起速记窗。已存在就复用——不重复建窗口，也不打断用户已经输入的内容。
 fn show_capture(app: &AppHandle) -> tauri::Result<()> {
     if let Some(w) = app.get_webview_window(CAPTURE_LABEL) {
@@ -313,6 +325,179 @@ fn show_capture(app: &AppHandle) -> tauri::Result<()> {
         .resizable(false)
         .center()
         .build()?;
+    Ok(())
+}
+
+/// 托盘菜单点「立即备份」后的界面反馈。字段名保持英文：
+/// 护栏里那条"中文字段名 + `rename_all` 会 panic"对事件负载同样成立。
+#[derive(Clone, serde::Serialize)]
+struct 托盘提示 {
+    ok: bool,
+    message: String,
+}
+
+fn 发托盘提示(app: &AppHandle, ok: bool, message: impl Into<String>) {
+    let _ = app.emit(
+        "tray://backup",
+        托盘提示 {
+            ok,
+            message: message.into(),
+        },
+    );
+}
+
+/// 托盘里的「立即备份」。与每日快照同一条纪律：只克隆 `Vault`，整库遍历不进主锁。
+fn 托盘备份(app: &AppHandle) {
+    let vault = app
+        .state::<Shared>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|h| h.vault().clone()));
+    let Some(vault) = vault else {
+        发托盘提示(app, false, "尚未选择 Vault");
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || match snapshot_vault(&vault, true) {
+        Ok(Some(s)) => {
+            log::info!("托盘立即备份完成 {}，收了 {} 个文件", s.id, s.copied_files);
+            发托盘提示(
+                &app,
+                true,
+                format!("已备份 {}（{} 个文件）", s.id, s.copied_files),
+            )
+        }
+        // 关掉备份和没配目录在这里是同一个结果（`target()` 都是 None），文案别二选一。
+        // 这不是失败，只是没开：走中性 flash，不把配置状态画成红字。
+        Ok(None) => {
+            log::debug!("托盘立即备份跳过：备份未开启");
+            发托盘提示(&app, true, "备份未开启：去设置页 → 备份选一个目录")
+        }
+        Err(e) => {
+            log::warn!("托盘立即备份失败：{e}");
+            发托盘提示(&app, false, format!("备份失败：{e}"))
+        }
+    });
+}
+
+/// 打开库根目录。路径作为一个独立参数交给资源管理器，不经过 shell 解释。
+fn 托盘打开库目录(app: &AppHandle) {
+    let root = app
+        .state::<Shared>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|h| h.vault().root().to_path_buf()));
+    match root {
+        Some(root) => {
+            if let Err(e) = 打开文件夹(&root) {
+                log::warn!("打开库文件夹失败 {}：{e}", root.display());
+                show_main(app);
+            }
+        }
+        // 还没选库时没有"库文件夹"可开，把首启界面叫出来
+        None => show_main(app),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn 打开文件夹(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn 打开文件夹(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn 打开文件夹(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
+/// 托盘右键菜单。左键仍然只做"唤起主窗口"（`show_menu_on_left_click(false)`），
+/// 右键才展开菜单——与 Windows 托盘的习惯一致，也与加菜单之前的行为一致。
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let Some(icon) = app.default_window_icon().cloned() else {
+        log::warn!("没有默认窗口图标，托盘菜单没建起来");
+        return Ok(());
+    };
+
+    let open = MenuItem::with_id(app, "tray-open", "打开知更", true, None::<&str>)?;
+    let capture = MenuItem::with_id(
+        app,
+        "tray-capture",
+        "快速速记（Alt+Shift+N）",
+        true,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(app, "tray-settings", "打开设置", true, None::<&str>)?;
+    let backup = MenuItem::with_id(app, "tray-backup", "立即备份", true, None::<&str>)?;
+    let vault_dir = MenuItem::with_id(app, "tray-vault-dir", "打开库文件夹", true, None::<&str>)?;
+    let hide = MenuItem::with_id(app, "tray-hide", "隐藏窗口到托盘", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", "退出知更", true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open, &capture, &settings, &sep1, &backup, &vault_dir, &sep2, &hide, &quit,
+        ],
+    )?;
+
+    TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .tooltip("知更")
+        .menu(&menu)
+        // 左键仍旧是"唤起窗口"：开着这一项的话左键会先弹菜单。
+        // 双击时系统会再补一次 Click，落到同一个处理上，没有副作用。
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray-open" => show_main(app),
+            "tray-capture" => {
+                if let Err(e) = show_capture(app) {
+                    log::error!("打开速记窗失败：{e}");
+                }
+            }
+            "tray-settings" => {
+                // 设置页在 WebView 里，壳只负责把窗口叫出来并递一句话过去
+                show_main(app);
+                if let Err(e) = app.emit("tray://open-settings", ()) {
+                    log::warn!("通知界面打开设置失败：{e}");
+                }
+            }
+            "tray-backup" => 托盘备份(app),
+            "tray-vault-dir" => 托盘打开库目录(app),
+            "tray-hide" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // 只认左键抬起：右键归菜单
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
     Ok(())
 }
 
@@ -650,8 +835,10 @@ fn backup_set(
 }
 
 /// "立即备份"。整库遍历在库里跑，所以只在取 `Vault` 克隆的那一瞬锁主锁。
+/// 与每日快照、托盘备份一样丢进阻塞线程池：同步 command 跑在主线程上，
+/// 两万篇的整库遍历会把窗口冻住——尤其在等另一份备份释放快照锁的时候。
 #[tauri::command]
-fn backup_run(state: State<'_, Shared>) -> Result<Option<SnapshotRow>, String> {
+async fn backup_run(state: State<'_, Shared>) -> Result<Option<SnapshotRow>, String> {
     let vault = {
         let guard = state.0.lock().map_err(|e| e.to_string())?;
         guard
@@ -660,7 +847,10 @@ fn backup_run(state: State<'_, Shared>) -> Result<Option<SnapshotRow>, String> {
             .vault()
             .clone()
     };
-    snapshot_vault(&vault, true).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || snapshot_vault(&vault, true))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -965,6 +1155,50 @@ async fn ai_rewrite(
     })?
 }
 
+/// 整篇文档编辑：块清单 + 一句话 → 块级补丁计划。**含一次网络往返，锁外跑。**
+/// 与改写同一条纪律：私密篇的整篇内容在 `note_core::doc_edit::编辑计划` 里挡掉，
+/// `ai_runs` 由 note-core 落（失败那趟也落），UI 在用户确认前不写正文。
+#[tauri::command]
+async fn ai_doc_edit(
+    state: State<'_, Shared>,
+    blocks: Vec<note_core::doc_edit::块>,
+    instruction: String,
+    history: Option<Vec<note_core::doc_edit::对话轮>>,
+    rel: Option<String>,
+) -> Result<note_core::doc_edit::计划, WriteErr> {
+    let (vault, 派生) = {
+        let guard = state.0.lock().map_err(werr_io)?;
+        let hub = guard.as_ref().ok_or_else(|| WriteErr {
+            kind: "error",
+            message: "尚未选择 Vault".into(),
+        })?;
+        (hub.vault().clone(), hub.indexer())
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let 专 = {
+            let 写锁 = 派生.lock().map_err(|_| WriteErr {
+                kind: "error",
+                message: "索引那条连接被毒化，改不了".into(),
+            })?;
+            写锁.fork().map_err(werr)?
+        };
+        note_core::doc_edit::编辑计划(
+            &vault,
+            专.conn(),
+            &blocks,
+            &instruction,
+            &history.unwrap_or_default(),
+            rel.as_deref(),
+        )
+        .map_err(werr)
+    })
+    .await
+    .map_err(|e| WriteErr {
+        kind: "error",
+        message: e.to_string(),
+    })?
+}
+
 /// 审计页：最近的生成记录（含未采纳的那几次）。
 #[tauri::command]
 fn ai_runs(
@@ -980,10 +1214,7 @@ pub fn run() {
 
     // 单实例：二次启动唤起已有窗口，而不是开第二个库（SQLite 写锁只有一个 owner）
     builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.unminimize();
-            let _ = w.set_focus();
-        }
+        show_main(app);
     }));
 
     builder = builder.plugin(
@@ -1050,6 +1281,7 @@ pub fn run() {
             search_hybrid,
             chat_ask,
             ai_rewrite,
+            ai_doc_edit,
             ai_runs
         ])
         .setup(|app| {
@@ -1086,21 +1318,9 @@ pub fn run() {
                 log::warn!("注册全局热键 {CAPTURE_SHORTCUT} 失败：{e}");
             }
 
-            if let Some(icon) = app.default_window_icon() {
-                let w = app.get_webview_window("main");
-                let _ = tauri::tray::TrayIconBuilder::with_id("main")
-                    .icon(icon.clone())
-                    .tooltip("note")
-                    .on_tray_icon_event(move |_tray, ev| {
-                        if let tauri::tray::TrayIconEvent::Click { .. } = ev {
-                            if let Some(ref w) = w {
-                                let _ = w.unminimize();
-                                let _ = w.show();
-                                let _ = w.set_focus();
-                            }
-                        }
-                    })
-                    .build(app);
+            // 托盘是非必需界面：建不起来（系统不让加图标之类）只记一条，绝不让应用起不来
+            if let Err(e) = setup_tray(app) {
+                log::warn!("托盘没建起来（应用照常运行）：{e}");
             }
             Ok(())
         })

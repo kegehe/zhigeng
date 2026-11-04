@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,9 @@ use crate::{Error, Result};
 
 /// 保留多少份快照（docs/03 §备份：默认 30 份）。
 pub const KEEP: usize = 30;
+
+/// 快照的 manifest 读改写必须串行（见 [`run`] 开头的说明）。
+static 快照串行: Mutex<()> = Mutex::new(());
 
 /// `<Vault>/.note/config.toml` 里的 `[backup]` 段。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +216,10 @@ fn inventory(vault: &Vault) -> Result<BTreeMap<String, (String, u64)>> {
 ///
 /// `force = true` 给"立即备份"按钮用：不等第二天。
 pub fn run(vault: &Vault, force: bool) -> Result<Option<Snapshot>> {
+    // manifest 是「读全量 → 追加 → 超限整文件重写」的读改写。托盘、面板、每日三个入口
+    // 同时跑时，后一次 `prune` 的重写会吞掉另一次刚追加的行——清单从此少一份，
+    // 目录还留在盘上。进程内串行化；毒化后照常跑，上一次 panic 不该让备份从此瘫痪。
+    let _串行 = 快照串行.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = load_config(vault)?;
     let Some(dir) = cfg.target() else {
         return Ok(None);
@@ -340,7 +348,13 @@ fn prune(dir: &Path) -> Result<()> {
         text.push_str(&serde_json::to_string(s).unwrap_or_default());
         text.push('\n');
     }
-    fs::write(manifest_path(dir), text).map_err(|e| Error::Io {
+    // 同目录写临时文件再改名：`list` 可能正被面板读着，直接截断重写会让它读到空清单。
+    let tmp = dir.join("manifest.jsonl.tmp");
+    fs::write(&tmp, text).map_err(|e| Error::Io {
+        path: tmp.display().to_string(),
+        source: e,
+    })?;
+    fs::rename(&tmp, manifest_path(dir)).map_err(|e| Error::Io {
         path: manifest_path(dir).display().to_string(),
         source: e,
     })
@@ -550,6 +564,38 @@ mod tests {
             last.files["notes/甲.md"],
             content_hash(format!("第 {} 版\n", KEEP + 2).as_bytes())
         );
+    }
+
+    #[test]
+    fn 同时跑两份立即备份不会丢清单行() {
+        let d = tempfile::tempdir().unwrap();
+        let (v, dir) = configured(d.path());
+        write(&v, "notes/甲.md", "初版\n");
+        // 先堆过保留上限，让两次并发都走到 prune 的整文件重写
+        for i in 0..KEEP {
+            write(&v, "notes/甲.md", format!("第 {i} 版\n"));
+            run(&v, true).unwrap().unwrap();
+        }
+        let a = v.clone();
+        let b = v.clone();
+        let h1 = std::thread::spawn(move || run(&a, true).unwrap().unwrap());
+        let h2 = std::thread::spawn(move || run(&b, true).unwrap().unwrap());
+        let id1 = h1.join().unwrap().id;
+        let id2 = h2.join().unwrap().id;
+        assert_ne!(id1, id2, "两次立即备份应当是两份");
+
+        let snaps = list(&dir).unwrap();
+        assert_eq!(snaps.len(), KEEP, "并发之后清单没裁到 {KEEP} 份");
+        // 有变化文件的快照才有实体目录；空增量那份只登记清单，不建空目录
+        for s in &snaps {
+            if !s.copied.is_empty() {
+                assert!(dir.join(&s.id).exists(), "清单里的 {} 在盘上没有目录", s.id);
+            }
+        }
+        // 两份新的都在清单里；少一行就说明被对方的 prune 吞了
+        for id in [&id1, &id2] {
+            assert!(snaps.iter().any(|s| &s.id == id), "{id} 从清单里消失了");
+        }
     }
 
     #[test]

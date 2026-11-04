@@ -587,7 +587,7 @@ fn 客户端() -> std::result::Result<reqwest::blocking::Client, reqwest::Error>
         .build()
 }
 
-/// 流式专用的客户端。**总超时比非流式那条放宽到 180 秒**：`timeout` 管的是"整个响应
+/// 放宽超时的客户端（流式与整篇编辑共用）。**总超时比普通那条放宽到 180 秒**：`timeout` 管的是"整个响应
 /// 多久之内要读完"，而思考型模型光想就要几十秒——拿 20 秒去流它必然读到一半断掉
 /// （真机照出来的第一条：报"一个字都没有"，实际是它还在想）。
 /// 为什么不用 `read_timeout`：`reqwest::blocking` 的 builder 没有这个方法（只有 async 侧有），
@@ -716,10 +716,30 @@ pub struct 用量 {
 /// 打一次 `<base>/chat/completions`。**只发系统提示 + 组装好的上下文**，
 /// 上下文里装的是检索出来的片段摘录（不是整篇笔记），所以送出去的量是可控的。
 pub fn chat(cfg: &AiConfig, 系统: &str, 内容: &str) -> Result<(String, 用量)> {
+    chat等(cfg, 系统, 内容, 超时::普通)
+}
+
+/// 整篇编辑那一档：**不流式、但要等 180 秒**。
+///
+/// 不流式是因为计划 JSON 不往界面流（没有"边收边显示"的需求），而这条网关的 SSE
+/// 会偶发吞掉第一块——真机取证到的回包直接从 `"its":[],"note":` 开始，`{` 连同
+/// `"ed` 一起没了，解析必然失败。整包回包没有这个形状。
+/// 180 秒是因为思考型模型光是"想"就能超过 20 秒，而 `chat` 那条总超时是 20 秒。
+pub fn chat长(cfg: &AiConfig, 系统: &str, 内容: &str) -> Result<(String, 用量)> {
+    chat等(cfg, 系统, 内容, 超时::放宽)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum 超时 {
+    普通,
+    放宽,
+}
+
+fn chat等(cfg: &AiConfig, 系统: &str, 内容: &str, 等: 超时) -> Result<(String, 用量)> {
     let mut 体 = 请求体(cfg, 系统, 内容);
     体["stream"] = serde_json::Value::Bool(false);
     let 基 = 基址(cfg)?;
-    let 答 = 认状态(发一次(cfg, &体, false)?, &基)?;
+    let 答 = 认状态(发一次(cfg, &体, 等)?, &基)?;
     解chat回包(&答.text().unwrap_or_default())
 }
 
@@ -737,7 +757,7 @@ pub fn chat流(
     每块: &mut dyn FnMut(流),
 ) -> Result<(String, 用量)> {
     let 基 = 基址(cfg)?;
-    let 答 = 认状态(发一次(cfg, &流式请求体(cfg, 系统, 内容), true)?, &基)?;
+    let 答 = 认状态(发一次(cfg, &流式请求体(cfg, 系统, 内容), 超时::放宽)?, &基)?;
     let 流 = 答
         .headers()
         .get("content-type")
@@ -1007,15 +1027,15 @@ fn 流式请求体(cfg: &AiConfig, 系统: &str, 内容: &str) -> serde_json::Va
     体
 }
 
-/// 建请求、带上 Key、发出去。**chat 与 chat流 共用这一份**——两条路各写一遍请求头，
+/// 建请求、带上 Key、发出去。**chat / chat长 与 chat流 共用这一份**——各写一遍请求头，
 /// 早晚一条改了另一条没改（Key 那条尤其：漏了就是"配了却 401"）。
 ///
-/// `流式` 只决定超时口径：180 秒那条只给真正的 SSE；非流式的问答与重排必须回到 20 秒，
+/// `等` 只决定超时口径：放宽那条给真正的 SSE 与整篇编辑；普通问答与重排必须回到 20 秒，
 /// 否则一次挂住的重排能让搜索干等三分钟（docs/03 §后端调用纪律）。
 fn 发一次(
     cfg: &AiConfig,
     体: &serde_json::Value,
-    流式: bool,
+    等: 超时,
 ) -> Result<reqwest::blocking::Response> {
     // 没填模型名就别发：这条原先在 `chat` 里，挪到这里是因为 `chat流` 也得有同样的拦截
     cfg.chat_model
@@ -1026,10 +1046,9 @@ fn 发一次(
     let url = 地址(cfg)?;
     // 提示要看的是用户填的 base，不是拼完的 url
     let 基 = 基址(cfg)?;
-    let 客 = if 流式 {
-        流式客户端()
-    } else {
-        客户端()
+    let 客 = match 等 {
+        超时::普通 => 客户端(),
+        超时::放宽 => 流式客户端(),
     }
     .map_err(|e| Error::Invalid(format!("建不出 HTTP 客户端：{e}")))?;
     let 请 = 客.post(&url).json(体);

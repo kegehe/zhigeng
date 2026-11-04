@@ -107,6 +107,27 @@ function 找闭高亮(src: string, from: number): number {
   }
 }
 
+/** 词字符。`_` 夹在字母 / 数字中间时是字面量（CommonMark 的 intraword 规则） */
+function 词字符(ch: string | undefined): boolean {
+  return ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+}
+
+/** 链接目标的收口。目标里成对的括号属于 URL：`u_(b)` 不能停在第一个 `)` */
+function 找闭圆括号(src: string, from: number): number {
+  let depth = 1;
+  for (let i = from; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "\\") {
+      i += 1;
+    } else if (ch === "(") {
+      depth += 1;
+    } else if (ch === ")" && --depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 export function parseInline(src: string, 层 = 0): Inline[] {
   const out: Inline[] = [];
   let buf = "";
@@ -175,7 +196,7 @@ export function parseInline(src: string, 层 = 0): Inline[] {
     if (src[i] === "[") {
       const close = src.indexOf("]", i);
       if (close > i && src[close + 1] === "(") {
-        const end = src.indexOf(")", close + 2);
+        const end = 找闭圆括号(src, close + 2);
         if (end > close) {
           收(src.slice(i + 1, close), { name: "link", href: src.slice(close + 2, end) });
           i = end + 1;
@@ -187,9 +208,16 @@ export function parseInline(src: string, 层 = 0): Inline[] {
     let hit = false;
     for (const [token, mark] of SPANS) {
       if (!src.startsWith(token, i)) continue;
-      const close = src.indexOf(token, i + token.length);
+      // 下划线只在词边界上开标记；`a_b_c`、`notes/a_b_c.md` 里的下划线是字面量
+      const 下划线 = token === "_" || token === "__";
+      if (下划线 && 词字符(src[i - 1])) continue;
+      let close = src.indexOf(token, i + token.length);
+      // 收口也不能贴着字母 / 数字：`_a_b_` 里中间那个 `_` 后面是 `b`，跳过它继续找词尾
+      while (close > 0 && 下划线 && 词字符(src[close + token.length])) {
+        close = src.indexOf(token, close + token.length);
+      }
       const body = close > 0 ? src.slice(i + token.length, close) : "";
-      // 空内容或含空白的内容不当标记：`** 粗 **`、路径里的 `a_b_c` 都不该被误认
+      // 空内容或含空白的内容不当标记：`** 粗 **` 不该被误认
       if (close > 0 && body.length > 0 && !/\s/.test(body)) {
         收(body, { name: mark }, token !== "`");
         i = close + token.length;
@@ -279,9 +307,22 @@ function 包上下标(inner: string, tag: "sup" | "sub"): string {
   return `<${tag}>${inner}</${tag}>`;
 }
 
+/** 带行内子节点的容器：块节点与 `Fragment` 都满足这个形状（选区切片就是后者） */
+type 可行内容器 = {
+  forEach: (f: (node: PmNode, offset: number, index: number) => void) => void;
+};
+
 export function serializeInline(node: PmNode): string {
+  return 序列化行内(node);
+}
+
+/**
+ * 选区切片没有块节点可传：`doc.slice(from, to).content` 是一个 `Fragment`，
+ * 但序列化要的只是"逐个子节点走一遍"这件事，所以这里不要求一定是 `Node`。
+ */
+export function 序列化行内(节点: 可行内容器): string {
   let out = "";
-  node.forEach((child) => {
+  节点.forEach((child) => {
     let text = child.text ?? "";
     const marks = [...child.marks].sort(
       (a, b) => (层序[a.type.name] ?? 99) - (层序[b.type.name] ?? 99),

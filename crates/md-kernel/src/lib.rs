@@ -1566,6 +1566,17 @@ fn build_list_item(marker: String, orig: &[Line], body: &[Line], _col: usize) ->
     }
 }
 
+/// 普通段落交给 `extract_fields` 之前的正文。
+///
+/// 行首半角空格记在 `indent` 里，这里剥掉，规范化时再补回去。开头的全角空格
+/// （U+3000）是首行缩进，必须留在 `content` 里：编辑器只看见 `content`，按
+/// `trim()` 剪掉的话，改一个字再保存，文件里的缩进就没了。标题和列表项不走这里。
+fn paragraph_body(body: &str) -> &str {
+    let body = body.trim_end();
+    let body = body.trim_start_matches(' ');
+    body.trim_start_matches(|c: char| c != '\u{3000}' && c.is_whitespace())
+}
+
 fn take_paragraph(c: &mut Cursor) -> Option<Block> {
     let mut lines: Vec<Line> = Vec::new();
     while let Some(l) = c.cur().cloned() {
@@ -1611,7 +1622,7 @@ fn take_paragraph(c: &mut Cursor) -> Option<Block> {
         .collect::<Vec<_>>()
         .join("\n");
     let (id, body) = trailing_id(&joined);
-    let (fields, content) = extract_fields(body.trim());
+    let (fields, content) = extract_fields(paragraph_body(&body));
     let kind = media_kind(&content);
     let mut b = mk(kind, &lines, content, None, Vec::new(), fields);
     b.id = id;

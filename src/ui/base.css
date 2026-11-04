@@ -211,6 +211,20 @@
     background: var(--accent-soft);
     box-shadow: 0 0 0 2px var(--accent-soft);
   }
+  /* 查找命中。当前这一处必须自己画：焦点在查找框里时，浏览器不绘制编辑器选区。 */
+  .block-editor .find-hit {
+    border-radius: 2px;
+    background: var(--accent-soft);
+  }
+  .block-editor .find-hit.current {
+    background: var(--md-mark);
+    box-shadow: 0 0 0 1px var(--accent);
+    /* 工具栏和查找栏粘在滚动容器顶上，不留这截，命中会滚到它们后面。 */
+    scroll-margin-top: calc(
+      2 * (var(--text-sm) * var(--leading-ui) + var(--space-2)) + var(--space-1) + 3.5rem
+    );
+    scroll-margin-bottom: 2rem;
+  }
   /* 焦点指示画在**当前块**的左页边，不给整篇文章套圈。
      两个理由：① Chrome 对可编辑的 contenteditable 连鼠标聚焦都判 `:focus-visible`
      （真机量过，去掉 preventDefault / 程序化 focus() 都没用），所以任何 `:focus-visible`
@@ -869,7 +883,8 @@
   }
   .block-editor .bubble button,
   .block-editor .slash button,
-  .block-editor .toolbar button {
+  .block-editor .toolbar button,
+  .block-editor .find-bar button {
     border: none;
     border-radius: var(--radius-sm);
     padding: var(--space-1) var(--space-2);
@@ -883,20 +898,22 @@
   /* 尺寸那条挪到 base 层的 `button svg` 去了（同一条规则不该在两处各写一份） */
   .block-editor .bubble button:hover,
   .block-editor .slash button:hover,
-  .block-editor .toolbar button:hover:not(:disabled) {
+  .block-editor .toolbar button:hover:not(:disabled),
+  .block-editor .find-bar button:hover:not(:disabled) {
     background: var(--bg-hover);
     color: var(--text-primary);
   }
   /* 已经套上的标记要看着是"开着的"，否则用户会连点两下把它关掉 */
   .block-editor .bubble button.on,
-  .block-editor .toolbar button.on {
+  .block-editor .toolbar button.on,
+  .block-editor .find-bar button.on {
     background: var(--bg-active);
     color: var(--text-primary);
   }
-  /* 底部 AI 对话框：挂在正文列里、**滚动容器之外**（App.tsx 的 .editor-pane），
-     所以正文怎么滚它都不动。收起时只露一条把手，鼠标靠近就展开——这是用户
-     2026-10-28 定的交互。pointer-events 分两层：外壳不吃事件（不挡下面的字），
-     里面的把手与面板才吃。 */
+  /* 底部 AI 对话框（2026-10-30 起为方案 G 的气泡形态）：挂在正文列里、**滚动容器之外**
+     （App.tsx 的 .editor-pane），所以正文怎么滚它都不动。收起时是**右下角一枚圆形气泡**，
+     鼠标靠近 / 点一下展开；面板在气泡上方、右对齐浮起。pointer-events 分两层：外壳不吃
+     事件（不挡下面的字），里面的气泡与面板才吃。 */
   .ai-dock {
     position: absolute;
     inset-inline: 0;
@@ -904,7 +921,7 @@
     z-index: var(--z-sticky);
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: flex-end;
     gap: var(--space-1);
     padding-inline: var(--space-6);
     pointer-events: none;
@@ -912,15 +929,17 @@
   .ai-dock > * {
     pointer-events: auto;
   }
-  /* 收起条：一枚**只有图标的**药丸（标题与目标状态都是噪音，2026-10-28 撤掉） */
+  /* 气泡（方案 G·气泡态）：一枚 52px 的圆，中间只有星火。未读红点挂在右上角——
+     收起期间有结果没替换、或有错误没处理时亮着 */
   .ai-dock-bar {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    max-width: min(var(--measure-ui), 100%);
-    padding: 6px 10px;
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 3.25rem;
+    height: 3.25rem;
+    padding: 0;
     border: 1px solid var(--border-subtle);
-    border-radius: 999px;
+    border-radius: var(--radius-full);
     background: var(--bg-raised);
     box-shadow: var(--shadow-2);
     color: var(--text-secondary);
@@ -937,12 +956,26 @@
     transform: translateY(-1px);
   }
   .ai-dock-bar svg {
-    width: 0.875rem;
-    height: 0.875rem;
+    width: 1.125rem;
+    height: 1.125rem;
+  }
+  /* 气泡上只留星火：点气泡就是展开，chevron 的第二重暗示是噪音（设计稿 G4） */
+  .ai-dock-bar svg:last-child {
+    display: none;
   }
   /* 中间那枚星火是入口的脸：与正文里的 AI 动作同一枚，缩小后也不会被看成一个普通图标 */
   .ai-dock-bar svg:first-child {
     color: var(--accent);
+  }
+  .ai-dock-dot {
+    position: absolute;
+    top: -2px;
+    inset-inline-end: -2px;
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: var(--radius-full);
+    background: var(--danger);
+    border: 2px solid var(--bg-raised);
   }
   /* 面板：与气泡 / 工具栏同一材质，宽度跟 UI 测度（56rem）走、居中。**只动 opacity /
      transform**（[06] 的动效规则），120ms 从下方 4px 浮上来——不做高度动画，那是布局动画 */
@@ -960,8 +993,9 @@
     animation: ai-dock-in var(--dur-1) ease-out;
     display: flex;
     flex-direction: column;
-    /* 对话面板不必跟正文一样宽：56rem 已经够放一条长句，再宽读起来就是扫视 */
-    width: min(var(--measure-ui), 100%);
+    /* 方案 G：面板在右下角气泡上方浮起，**不必跟正文一样宽**——27.5rem 放得下一条
+       长句与历史记录，再宽就是又一条横在正文上的大坝 */
+    width: min(27.5rem, 100%);
     max-height: min(46vh, 26rem);
     overflow: hidden;
     border: 1px solid var(--border-subtle);
@@ -969,7 +1003,22 @@
     background: var(--bg-raised);
     box-shadow: var(--shadow-2);
   }
-  /* 钉住 / 收起两枚图标挂在面板右上角（收起只在这里——展开时下面不再挂一颗把手） */
+  /* 标题行（方案 G）：左「AI 编辑」右两枚图标。标题让面板"有个名字"，
+     悬浮在正文上时不至于像一块来路不明的浮灰 */
+  .ai-dock-head {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-1) var(--space-2) 0 var(--space-3);
+  }
+  .ai-dock-title {
+    padding-inline-start: var(--space-1);
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+  /* 钉住 / 收起两枚图标挂在标题行右端（收起只在这里——展开时下面不再挂一颗把手） */
   .ai-dock-tools {
     display: flex;
     flex: none;
@@ -1055,6 +1104,31 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  /* 回稿的样式预览：与正文用同一套语义色，只是字号跟着对话走。
+     不加这几条的话，`<strong>` / `<mark>` 只能吃浏览器默认样式——两套主题都对不上 */
+  .ai-turn-a strong { font-weight: 600; }
+  .ai-turn-a em { font-style: italic; }
+  .ai-turn-a del { text-decoration: line-through; color: var(--text-secondary); }
+  .ai-turn-a code {
+    padding: 0 0.2em;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--bg-active);
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+  }
+  .ai-turn-a mark {
+    padding: 0 0.1em;
+    border-radius: 2px;
+    background: var(--md-mark);
+    color: inherit;
+  }
+  /* 预览里的链接不可点（只显示目标）：它是回稿的一部分，不是导航入口 */
+  .ai-inline-link {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
   .ai-turn-meta {
     margin: var(--space-1) 0 0;
     color: var(--text-secondary);
@@ -1075,6 +1149,82 @@
     color: var(--danger);
     font-size: var(--text-xs);
     line-height: var(--leading-ui);
+  }
+  /* 整篇清空确认：破坏性操作单独一块，底色用 danger-soft，正文仍是正文色——
+     红色只做"危险"的信号，不把整段话染成报警文字 */
+  .ai-doc-danger {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-md);
+    background: var(--danger-soft);
+  }
+  .ai-doc-danger p {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--text-xs);
+    line-height: var(--leading-ui);
+  }
+  /* 整篇编辑方案：不是破坏性操作，材质走普通的沉底一块；旧/新各一行，列表自己滚 */
+  .ai-doc-plan {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-sunken);
+  }
+  .ai-doc-plan-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--text-xs);
+    font-weight: 600;
+  }
+  .ai-doc-plan-note {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    line-height: var(--leading-ui);
+  }
+  .ai-doc-plan-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    max-height: 12rem;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+  }
+  .ai-doc-plan-list li {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: var(--text-xs);
+    line-height: var(--leading-ui);
+  }
+  .ai-doc-plan-item {
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .ai-doc-plan-list del,
+  .ai-doc-plan-list ins {
+    display: block;
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    overflow-wrap: anywhere;
+    text-decoration: none;
+  }
+  .ai-doc-plan-list del {
+    background: var(--danger-soft);
+    color: var(--text-secondary);
+  }
+  .ai-doc-plan-list ins {
+    background: var(--accent-soft);
+    color: var(--text-primary);
   }
   /* 流式里那根竖线：与旧浮层同一条记号，用户不用重新学"它还在写" */
   .ai-caret {
@@ -1138,10 +1288,51 @@
   .ai-dock-panel > .ai-turn-err {
     padding: var(--space-2) var(--space-3) 0;
   }
+  /* 选中原文的预览：贴在输入框上沿，左侧一条主色竖线把它与输入框分开。
+     原文可能选得很长，封顶后在内部滚——不让一块预览把整个面板顶掉 */
+  .ai-dock-sel {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 5.5rem;
+    margin-bottom: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    overflow-y: auto;
+    border-inline-start: 2px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--bg-sunken);
+  }
+  /* 选区不满足改写判据时只换竖线颜色：原文照常显示，原因写在标签里 */
+  .ai-dock-sel.is-warn {
+    border-inline-start-color: var(--danger);
+  }
+  .ai-dock-sel-label {
+    flex: none;
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    line-height: var(--leading-ui);
+  }
+  .ai-dock-sel-text {
+    color: var(--text-primary);
+    font-size: var(--text-sm);
+    line-height: var(--leading-ui);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
   /* 常驻工具栏（布局三·悬浮胶囊）：不用先选中文本也知道有什么可用。sticky 跟着正文
      这一列走，真机验过滚动之后仍在屏内（不验就不知道滚动容器是不是它的祖先）。
      宽度收成 fit-content 并居中——工具条是"浮在正文上的一件东西"，不再是一条通栏的带子；
      影子必须与边框同用（暗色下阴影几乎不可见，边界靠边框承担）。 */
+  /* 工具栏和查找栏粘在一起。查找栏单独再 sticky 一次会和工具栏叠在同一个 top。 */
+  .block-editor .editor-tools {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-sticky);
+  }
+  .block-editor .editor-tools .toolbar {
+    position: static;
+    z-index: auto;
+  }
   .block-editor .toolbar {
     position: sticky;
     top: 0;
@@ -1178,9 +1369,47 @@
     font: inherit;
     font-size: var(--text-sm);
   }
-  .block-editor .toolbar button:disabled {
+  .block-editor .toolbar button:disabled,
+  .block-editor .find-bar button:disabled {
     color: var(--text-disabled);
     cursor: default;
+  }
+  .block-editor .find-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    width: fit-content;
+    max-width: 100%;
+    margin-inline: auto;
+    margin-bottom: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow-2);
+  }
+  .block-editor .find-bar input,
+  .block-editor .find-bar textarea {
+    width: 12rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 2px var(--space-2);
+    background: var(--bg-base);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--text-sm);
+  }
+  .block-editor .find-bar textarea {
+    resize: none;
+    max-height: 4.5rem;
+    overflow: auto;
+  }
+  .block-editor .find-bar .find-count {
+    min-width: 4.5rem;
+    color: var(--text-secondary);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
   }
   .block-editor .toolbar .sep {
     width: 1px;
@@ -1338,6 +1567,84 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* 大纲左缘（2026-10-30 起，方案 G；2026-11-02 改挂正文列）：大纲从右侧常驻栏
+     改为把手 + 悬停浮层。外壳原本贴面板最左（inset-inline-start: 0），宽窗时离正文
+     隔着一整片空白，看着像另一栏；现在按 `.measure` 的居中算到**正文列左缘**，
+     把手落在正文那 24px 页边里（与行首手柄同一块地方）。
+     外壳结构与 .ai-dock 同款——外壳 pointer-events:none 不挡正文，把手与浮层才吃。
+     没有标题的短笔记连把手都不渲染（OutlinePanel 的老纪律，OutlineEdge 只负责壳） */
+  .outline-edge {
+    position: absolute;
+    /* 正文列左缘 = 面板宽度减去 measure 后的那一半外边；窄窗时 measure 被 100% 夹住，结果是 0。
+       百分比按 `.editor-pane`（本元素的定位祖先，也是 main 的父层）的宽度算，与
+       `.measure { margin-inline: auto }` 同一道算式——所以 OutlineEdge 必须留在
+       editor-pane 里面：挂到没有定位的祖先上，100% 就变成视口宽度，缩放时把手会离开正文列。
+       与 main 差一条滚动条（10px，正文列因此左移 5px）；把手落在 24px 页边里，这点偏差看不出来 */
+    inset-inline-start: max(0px, calc((100% - var(--measure)) / 2));
+    inset-block: 0;
+    z-index: var(--z-sticky);
+    pointer-events: none;
+  }
+  .outline-edge > * {
+    pointer-events: auto;
+  }
+  /* 把手：14px 宽、120px 高的墨色圆角条，落在正文列左侧页边里、垂直居中。
+     页边 = `.prose-note` 的 px-6（--space-6，24px）；把手右侧留 --space-2 给正文，
+     滚动条占掉正文区十来个像素时最多把这条缝吃到 1–3px，不会压到字上。
+     全圆角（浮在页边里的一枚墨条，不再贴边），箭头朝右暗示"往外滑"。
+     用 --text-primary 反色当底：亮色主题下是墨条，暗色主题下自然翻成亮条 */
+  .outline-edge-handle {
+    position: absolute;
+    top: 50%;
+    inset-inline-start: calc(var(--space-6) - 0.875rem - var(--space-2));
+    transform: translateY(-50%);
+    display: grid;
+    place-items: center;
+    width: 0.875rem;
+    height: 7.5rem;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-full);
+    background: var(--text-primary);
+    color: var(--bg-raised);
+    opacity: 0.88;
+    cursor: pointer;
+    transition:
+      opacity var(--dur-1) var(--ease-out),
+      transform var(--dur-1) var(--ease-out);
+  }
+  .outline-edge-handle:hover {
+    opacity: 1;
+    transform: translateY(-50%) translateX(1px);
+  }
+  .outline-edge-handle svg {
+    width: 0.75rem;
+    height: 0.75rem;
+  }
+  /* 浮层：从把手右缘滑出、压在正文列上（宽窗与窄窗都放得下），垂直与把手对齐；
+     高度封顶 70vh，列表自己滚（OutlinePanel 本来就带 overflow-y）。
+     只动 opacity / transform 进场，与 ai-dock 同一条动效规则 */
+  .outline-flyout {
+    position: absolute;
+    top: 50%;
+    /* 把手右缘：页边 24px 减 --space-2 的留白，与把手左侧那 2px 合起来正好 16px */
+    inset-inline-start: calc(var(--space-6) - var(--space-2));
+    transform: translateY(-50%);
+    width: min(15.5rem, 80vw);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow-2);
+    animation: ai-dock-in var(--dur-1) ease-out;
+  }
+  /* 列表在浮层里的改写：不带侧栏那份"宽 200px 常驻列"的契约——宽度归外壳管，
+     左缘分隔线与底色也归外壳（浮层自带边框与 raised 底），列表自己只管滚 */
+  .outline-flyout .outline-panel {
+    width: 100%;
+    max-height: min(70vh, 42rem);
+    border-left: none;
+    background: transparent;
   }
   /*
    * 矩形选中的格子：底色 + inset 描边。只给底色在暗色下分不出边界（与 [06] §阴影那条

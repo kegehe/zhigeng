@@ -8,6 +8,7 @@ pub mod answer;
 pub mod assets;
 pub mod capture;
 pub mod config;
+pub mod doc_edit;
 pub mod embed;
 pub mod hash;
 pub mod import;

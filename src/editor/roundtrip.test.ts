@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Editor } from "@tiptap/core";
-import { DOMParser, DOMSerializer } from "@tiptap/pm/model";
+import { DOMParser, DOMSerializer, Fragment, Slice } from "@tiptap/pm/model";
 import { NodeSelection, TextSelection, type EditorState } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
@@ -18,6 +18,14 @@ import {
   cellAt,
   docToMarkdown,
   enterCell,
+  共同列表,
+  共同首行缩进,
+  能设首行缩进,
+  点在待办前缀,
+  点待办前缀,
+  切换待办勾选,
+  设列表,
+  设首行缩进,
   exitTableDown,
   exitOpaqueDown,
   insertSourceBlock,
@@ -992,7 +1000,8 @@ describe("代码块的围栏账本：编辑代码不碰围栏", () => {
  * 由这组测试钉住）：新块沿用原块的 gap → 没有 front-matter 的文件里第一块的 gap 是
  * `""`，拆出来的两块之间没有空行，重新解析并回一段（"回车等于没按"）；锚点落在文档序
  * 靠前那一半 → 段首回车时 ` ^b-xxx` 挂到新产生的空块上，正文那块反而没了 ID，反向
- * 链接指向空；`mdKind` 与实际节点类型不一致 → 拆列表项会把两行粘回一个列表项；
+ * 链接指向空；`mdKind` 与实际节点类型不一致 → 拆列表项会把两行粘回一个列表项。
+ * 列表项里的回车现在改由 `列表回车` 续下一项，守卫仍要挡住别的路径拆出来的错账本。
  * 空块还多挤出一个空行。守卫是 `schema.ts` 的 `LedgerGuard`。
  */
 describe("回车拆段不许把原块的账本留给新块", () => {
@@ -1055,21 +1064,177 @@ describe("回车拆段不许把原块的账本留给新块", () => {
     editor.destroy();
   });
 
-  it("拆列表项：新块不许顶着上一项的 kind，否则两行粘回一个列表项", () => {
+  it("列表项末尾回车：续一个同类型项，空项再按才退回正文", () => {
     const blocks: EditDoc["blocks"] = [
       { ...段("- 项甲\n", "", "项甲"), kind: "bullet" },
       { ...段("乙\n", "\n", "乙"), kind: "paragraph" },
+    ];
+    const { doc, src } = 装(blocks);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, -1);
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("项乙"));
+    // 续出来的项和上一项之间没有空行，后面的正文仍隔开，不会被读进列表
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 项甲\n- 项乙\n\n乙\n");
+    editor.destroy();
+
+    const 再 = createTestEditor(doc);
+    块端(再, 0, -1);
+    expect(按Enter(再)).toBe(true);
+    expect(docToMarkdown(再.state.doc, doc)).toBe("- 项甲\n- \n\n乙\n");
+    expect(按Enter(再)).toBe(true);
+    expect(再.state.selection.$from.parent.type.name).toBe("mdParagraph");
+    expect(docToMarkdown(再.state.doc, doc)).toBe(src);
+    再.destroy();
+  });
+
+  it("项首退格只摘掉记号，不把这一项并进上一块", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("- 甲\n", "", "甲"), kind: "bullet" },
+      { ...段("- 乙\n", "", "乙"), kind: "bullet" },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    块端(editor, 1, 0);
+    const ev = new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "keyCode", { value: 8 });
+    editor.view.dom.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 甲\n\n乙\n");
+    editor.destroy();
+  });
+
+  it("末行不带换行的列表：回车续项另起一行，文件仍不以换行结尾", () => {
+    const blocks: EditDoc["blocks"] = [{ ...段("- 甲", "", "甲"), kind: "bullet" }];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, -1);
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("乙"));
+    // 上一块原样回写、不补换行。新项若沿用紧排的空 gap，就会粘成 `- 甲- 乙`
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 甲\n- 乙");
+    editor.destroy();
+
+    const 有序 = 装([{ ...段("3. 甲", "", "甲"), kind: "numbered" }]);
+    const 再 = createTestEditor(有序.doc);
+    块端(再, 0, -1);
+    expect(按Enter(再)).toBe(true);
+    再.view.dispatch(再.state.tr.insertText("乙"));
+    expect(docToMarkdown(再.state.doc, 有序.doc)).toBe("3. 甲\n4. 乙");
+    再.destroy();
+  });
+
+  it("有序项回车：新项序号加一、分隔符照抄，后面已有的记号不动", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("3. 甲\n", "", "甲"), kind: "numbered" },
+      { ...段("9. 尾\n", "", "尾"), kind: "numbered" },
     ];
     const { doc } = 装(blocks);
     const editor = createTestEditor(doc);
     块端(editor, 0, -1);
     expect(按Enter(editor)).toBe(true);
-    editor.view.dispatch(editor.state.tr.insertText("项乙"));
-    // PM 拆 mdItem 产出的是 mdParagraph，而复制来的 mdKind 还写着 bullet。序列化器照
-    // mdKind 判断"是不是同一个列表的延续"，于是 gap 给成 ""——`- 项甲\n项乙\n` 会被
-    // 内核读成**一个**列表项。守卫把 kind 与实际节点类型对齐，两块之间才有那行空行。
-    // （"回车在列表项里应该续一个项"是另一回事，见 docs/05 的未决条目）
-    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 项甲\n\n项乙\n\n乙\n");
+    const 新 = editor.state.selection.$from.before(1);
+    expect((editor.view.nodeDOM(新) as HTMLElement).getAttribute("data-marker")).toBe("4.");
+    editor.view.dispatch(editor.state.tr.insertText("新"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("3. 甲\n4. 新\n9. 尾\n");
+    editor.destroy();
+  });
+
+  it("右括号记号的有序项，续出来的下一项仍用右括号", () => {
+    const blocks: EditDoc["blocks"] = [{ ...段("2) 乙\n", "", "乙"), kind: "numbered" }];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, -1);
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("丙"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("2) 乙\n3) 丙\n");
+    editor.destroy();
+  });
+
+  it("续出来的有序项再按回车，序号接着加", () => {
+    const blocks: EditDoc["blocks"] = [{ ...段("3. 甲\n", "", "甲"), kind: "numbered" }];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, -1);
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("乙"));
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("丙"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("3. 甲\n4. 乙\n5. 丙\n");
+    editor.destroy();
+  });
+
+  it("选中项开头的字再按回车：选区删掉，剩下的字落到下一项", () => {
+    const blocks: EditDoc["blocks"] = [{ ...段("- 项甲\n", "", "项甲"), kind: "bullet" }];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1, 2)));
+    expect(按Enter(editor)).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- \n- 甲\n");
+    editor.destroy();
+  });
+
+  it("列表项从中间拆开：左半留着原来的序号，右半是下一项", () => {
+    const blocks: EditDoc["blocks"] = [{ ...段("3. 项甲\n", "", "项甲"), kind: "numbered" }];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    // 正文是「项甲」，位置 2 在「项」和「甲」之间
+    editor.commands.setTextSelection(2);
+    expect(按Enter(editor)).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("3. 项\n4. 甲\n");
+    editor.destroy();
+  });
+
+  it("选中多段设成有序列表：从 1 往下数；再按一次无序是换类型，再按同类型回到正文", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("甲\n", "", "甲"), kind: "paragraph" },
+      { ...段("乙\n", "\n", "乙"), kind: "paragraph" },
+      { ...段("> 引用\n", "\n", ""), kind: "quote" },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size - 1 });
+    const 一次 = 设列表(editor.state, "numbered");
+    expect(一次.跳过).toBe(1);
+    editor.view.dispatch(一次.tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("1. 甲\n\n2. 乙\n\n> 引用\n");
+    editor.view.dispatch(设列表(editor.state, "bullet").tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 甲\n\n- 乙\n\n> 引用\n");
+    editor.view.dispatch(设列表(editor.state, "bullet").tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n乙\n\n> 引用\n");
+    editor.destroy();
+  });
+
+  it("紧跟在 2) 后面转成有序项：序号接着数，分隔符仍是右括号", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("2) 甲\n", "", "甲"), kind: "numbered" },
+      { ...段("乙\n", "\n", "乙"), kind: "paragraph" },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    let pos = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (n.textContent === "乙") pos = off;
+    });
+    editor.view.dispatch(applyBlockType(editor.state, pos, "numbered")!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("2) 甲\n\n3) 乙\n");
+    editor.destroy();
+  });
+
+  it("待办末尾回车：下一项是未勾选的待办，上一项的勾留在原处", () => {
+    const blocks: EditDoc["blocks"] = [
+      {
+        ...段("- [x] 已做\n", "", "已做"),
+        kind: "todo",
+        checked: true,
+      },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    块端(editor, 0, -1);
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("接着"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- [x] 已做\n- [ ] 接着\n");
     editor.destroy();
   });
 
@@ -1104,6 +1269,287 @@ describe("回车拆段不许把原块的账本留给新块", () => {
     expect(editor.state.doc.child(1).attrs.mdRaw).toBe("甲\n");
     expect(update次数).toBe(0);
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("相邻两块源切片相同、真改其中一处：另一块的空行与账本都不许动", () => {
+    const { doc } = 装([段("甲\n", "", "甲"), 段("甲\n", "\n\n", "甲"), 段("乙\n", "\n", "乙")]);
+    const editor = createTestEditor(doc);
+    editor.view.dispatch(editor.state.tr.insertText("X", 2));
+    // 上一版只凭"与上一块 mdRaw 相同"就认定是拆块产物：这里改的是第一块，第二块根本没被碰，
+    // 却会被清账本并压成 gap `""`——作者留的两个空行当场没了
+    expect(editor.state.doc.child(1).attrs.mdRaw).toBe("甲\n");
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲X\n\n\n甲\n\n乙\n");
+    editor.destroy();
+  });
+
+  it("粘贴一整块：新块按新建处理，不跟原块粘成一段", () => {
+    const { doc } = 装([段("甲\n", "", "甲"), 段("乙\n", "\n", "乙")]);
+    const editor = createTestEditor(doc);
+    const 原 = editor.state.doc.child(0);
+    const 末 = editor.state.doc.content.size - 1;
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 末)));
+    editor.view.dispatch(
+      editor.state.tr.replaceSelection(new Slice(Fragment.from(原), 0, 0)),
+    );
+    // 复制来的账本让新块带着原块的 gap `""`，两块之间没有空行，落盘被读回同一段。
+    // 守卫要的正是"新造的 + 另有同源"这两条同时成立，粘贴满足它
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n乙\n\n甲\n");
+    editor.destroy();
+  });
+
+  it("选中多段设成待办：新项不勾选；再点一次回到正文。引用跳过", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("甲\n", "", "甲"), kind: "paragraph" },
+      { ...段("乙\n", "\n", "乙"), kind: "paragraph" },
+      { ...段("> 引用\n", "\n", ""), kind: "quote" },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size - 1 });
+    const 一次 = 设列表(editor.state, "todo");
+    expect(一次.跳过).toBe(1);
+    editor.view.dispatch(一次.tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- [ ] 甲\n\n- [ ] 乙\n\n> 引用\n");
+    expect(共同列表(editor.state)).toBe("todo");
+    editor.view.dispatch(设列表(editor.state, "todo").tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n乙\n\n> 引用\n");
+    editor.destroy();
+  });
+
+  it("已勾选的待办混在选区里：转待办不改它的勾，再点一次两段都回到正文", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("- [x] 甲\n", "", "甲"), kind: "todo", checked: true },
+      { ...段("乙\n", "\n", "乙"), kind: "paragraph" },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size - 1 });
+    editor.view.dispatch(设列表(editor.state, "todo").tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- [x] 甲\n\n- [ ] 乙\n");
+    editor.view.dispatch(设列表(editor.state, "todo").tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n乙\n");
+    editor.destroy();
+  });
+
+  it("下拉里再选一次待办不发事务", () => {
+    const { doc } = 装([{ ...段("- [ ] 甲\n", "", "甲"), kind: "todo", checked: false }]);
+    const editor = createTestEditor(doc);
+    let pos = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (n.type.name === "mdItem") pos = off;
+    });
+    expect(applyBlockType(editor.state, pos, "todo")).toBeNull();
+    editor.destroy();
+  });
+
+  it("点前缀只切换这一项；勾回去后原样的 [X] 还在", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("- [ ] 甲\n", "", "甲"), kind: "todo", checked: false },
+      { ...段("- [X] 乙\n", "", "乙"), kind: "todo", checked: true },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    const 项 = [...editor.view.dom.querySelectorAll("[data-md-item='todo']")] as HTMLElement[];
+    expect(项).toHaveLength(2);
+    const 盒 = () =>
+      ({
+        left: 0,
+        top: 0,
+        right: 200,
+        bottom: 24,
+        width: 200,
+        height: 24,
+        x: 0,
+        y: 0,
+        toJSON() {
+          return {};
+        },
+      }) as DOMRect;
+    for (const el of 项) {
+      el.style.paddingLeft = "24px";
+      el.getBoundingClientRect = 盒;
+    }
+    const 点 = (el: HTMLElement, clientX: number, shiftKey = false) => {
+      // 不往编辑器上派发：交回的 mousedown 在 jsdom 里会去调不存在的 elementFromPoint
+      let 拦住 = false;
+      const 处理了 = 点待办前缀(editor.view, {
+        button: 0,
+        shiftKey,
+        altKey: false,
+        ctrlKey: false,
+        metaKey: false,
+        clientX,
+        clientY: 8,
+        target: el,
+        preventDefault() {
+          拦住 = true;
+        },
+      } as MouseEvent);
+      return 处理了 && 拦住;
+    };
+    expect(点(项[0]!, 40)).toBe(false);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- [ ] 甲\n- [X] 乙\n");
+    expect(点(项[0]!, 8, true)).toBe(false);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- [ ] 甲\n- [X] 乙\n");
+    expect(点(项[0]!, 8)).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- [x] 甲\n- [X] 乙\n");
+    expect(editor.state.doc.child(1).attrs.mdChecked).toBe(true);
+    editor.destroy();
+
+    const 再 = createTestEditor(装([blocks[1]!]).doc);
+    let pos = -1;
+    再.state.doc.forEach((n, off) => {
+      if (n.type.name === "mdItem") pos = off;
+    });
+    再.view.dispatch(切换待办勾选(再.state, pos)!);
+    expect(docToMarkdown(再.state.doc, 装([blocks[1]!]).doc)).toBe("- [ ] 乙\n");
+    再.view.dispatch(切换待办勾选(再.state, pos)!);
+    expect(docToMarkdown(再.state.doc, 装([blocks[1]!]).doc)).toBe("- [X] 乙\n");
+    再.destroy();
+  });
+
+  it("前缀列按这一项的边框算，不按点中元素的偏移", () => {
+    const 盒 = { left: 100, top: 10, bottom: 30, borderLeft: 2, paddingLeft: 24 };
+    expect(点在待办前缀(110, 20, 盒)).toBe(true);
+    expect(点在待办前缀(126, 20, 盒)).toBe(false);
+    expect(点在待办前缀(90, 20, 盒)).toBe(false);
+    expect(点在待办前缀(110, 40, 盒)).toBe(false);
+  });
+});
+
+describe("首行缩进", () => {
+  const 缩 = "\u3000\u3000";
+  const 段 = (raw: string, gapBefore: string, content: string) => ({
+    kind: "paragraph",
+    id: null,
+    raw,
+    gapBefore,
+    content,
+    level: null,
+    checked: null,
+    align: null,
+    fields: [] as [string, string][],
+    children: [],
+  });
+  const 装 = (blocks: EditDoc["blocks"]) => {
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    return { doc, src: reassemble(doc) };
+  };
+  const 全选 = (editor: ReturnType<typeof createTestEditor>) => {
+    editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size - 1 });
+  };
+
+  it("点一次在正文开头加上两个全角空格，再点一次去掉", () => {
+    const { doc } = 装([段("甲\n", "", "甲")]);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    expect(能设首行缩进(editor.state)).toBe(true);
+    expect(共同首行缩进(editor.state)).toBe(false);
+    editor.view.dispatch(设首行缩进(editor.state).tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(`${缩}甲\n`);
+    expect(共同首行缩进(editor.state)).toBe(true);
+    editor.view.dispatch(设首行缩进(editor.state).tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n");
+    expect(共同首行缩进(editor.state)).toBe(false);
+    editor.destroy();
+  });
+
+  it("开头已有一个全角空格时，再设一次是在它前面加上两个", () => {
+    const { doc } = 装([段("\u3000甲\n", "", "\u3000甲")]);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    editor.view.dispatch(设首行缩进(editor.state).tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(`${缩}\u3000甲\n`);
+    editor.destroy();
+  });
+
+  it("已经缩进的正文再设一次回到原来的字", () => {
+    const { doc } = 装([段(`${缩}甲\n`, "", `${缩}甲`)]);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    expect(共同首行缩进(editor.state)).toBe(true);
+    editor.view.dispatch(设首行缩进(editor.state).tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n");
+    editor.destroy();
+  });
+
+  it("多段里只给还没有的正文加上；列表、标题、引用跳过且源不动", () => {
+    const blocks: EditDoc["blocks"] = [
+      段("甲\n", "", "甲"),
+      { ...段("- 列表\n", "\n", "列表"), kind: "bullet" },
+      段(`${缩}乙\n`, "\n", `${缩}乙`),
+      { ...段("# 题\n", "\n", "题"), kind: "heading", level: 1 },
+      { ...段("> 引用\n", "\n", ""), kind: "quote" },
+      段("丙\n", "\n", "丙"),
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    全选(editor);
+    const 一次 = 设首行缩进(editor.state);
+    expect(一次.跳过).toBe(3);
+    expect(共同首行缩进(editor.state)).toBe(false);
+    editor.view.dispatch(一次.tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      `${缩}甲\n\n- 列表\n\n${缩}乙\n\n# 题\n\n> 引用\n\n${缩}丙\n`,
+    );
+    expect(共同首行缩进(editor.state)).toBe(true);
+    const 再 = 设首行缩进(editor.state);
+    expect(再.跳过).toBe(3);
+    editor.view.dispatch(再.tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "甲\n\n- 列表\n\n乙\n\n# 题\n\n> 引用\n\n丙\n",
+    );
+    editor.destroy();
+  });
+
+  it("空段落、只剩两个全角空格的段落、标题，都不缩", () => {
+    const 空 = createTestEditor(装([段("\n", "", "")]).doc);
+    全选(空);
+    expect(能设首行缩进(空.state)).toBe(false);
+    expect(设首行缩进(空.state).tr).toBeNull();
+    空.destroy();
+
+    const 只剩空格 = createTestEditor(装([段(`${缩}\n`, "", 缩)]).doc);
+    全选(只剩空格);
+    expect(能设首行缩进(只剩空格.state)).toBe(false);
+    expect(设首行缩进(只剩空格.state).tr).toBeNull();
+    expect(docToMarkdown(只剩空格.state.doc, 装([段(`${缩}\n`, "", 缩)]).doc)).toBe(`${缩}\n`);
+    只剩空格.destroy();
+
+    const 标题 = createTestEditor(
+      装([{ ...段("# 题\n", "", "题"), kind: "heading", level: 1 }]).doc,
+    );
+    全选(标题);
+    expect(能设首行缩进(标题.state)).toBe(false);
+    expect(设首行缩进(标题.state).tr).toBeNull();
+    expect(docToMarkdown(标题.state.doc, 装([{ ...段("# 题\n", "", "题"), kind: "heading", level: 1 }]).doc)).toBe(
+      "# 题\n",
+    );
+    标题.destroy();
+  });
+
+  it("加上的两个字不跟着旁边的加粗", () => {
+    const { doc } = 装([段("**甲**\n", "", "**甲**")]);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    editor.view.dispatch(设首行缩进(editor.state).tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(`${缩}**甲**\n`);
+    editor.destroy();
+  });
+
+  it("居中的正文把两个全角空格写在包裹里面", () => {
+    const 块 = {
+      ...段('<div align="center">\n\n甲\n\n</div>\n', "", "甲"),
+      align: "center",
+    };
+    const { doc } = 装([块]);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    editor.view.dispatch(设首行缩进(editor.state).tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      `<div align="center">\n\n${缩}甲\n\n</div>\n`,
+    );
     editor.destroy();
   });
 });

@@ -1,6 +1,7 @@
 import { Extension, Mark, Node, type Attributes, type Editor } from "@tiptap/core";
 import type { Node as PmNode, Schema } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction, type EditorState } from "@tiptap/pm/state";
+import { Mapping } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { EditorView, NodeView, ViewMutationRecord } from "@tiptap/pm/view";
 import { history, redo, undo } from "@tiptap/pm/history";
@@ -12,7 +13,7 @@ import {
   带围栏,
   moveCell,
   moveCurrentBlock,
-  numberedMarker,
+  这项有序记号,
   replaceBlockWithSource,
   判粘贴,
   图片下出口,
@@ -21,6 +22,11 @@ import {
   块内范围,
   清场所选,
   全选档,
+  列表回车,
+  列表退格,
+  列表跳过说明,
+  点待办前缀,
+  设列表,
   type BlockTypeId,
 } from "./blocks";
 import { 可无损, 收图注, 是库内资产, 拆自attrs, 新引用, type 资产引用 } from "./asset";
@@ -29,6 +35,7 @@ import { 批量, TableSelect } from "./tableSelectPlugin";
 import { 拼开栏, 拆开栏, 围栏行of } from "./fence";
 import { 短写, 已识别, 语言清单, 语言of, 着色区间, 识别 } from "./highlight";
 import { 引用高亮扩展 } from "./citeFocus";
+import { 查找扩展 } from "./findReplace";
 import { FormatPainter } from "./formatPainter";
 import { mightRender, renderOpaque } from "./render";
 import { 行距事件 } from "../ui/typography";
@@ -59,6 +66,11 @@ const mdAttributes: Attributes = {
   mdFields: { default: [] as [string, string][] },
   // 载入之后由 stampSignatures 打上去。空串意味着"新块"，必定被重新序列化
   mdSig: { default: "" },
+  /**
+   * 新建有序项的记号（`4.` / `3)`）。只活在编辑器里：有历史 `mdRaw` 时以源文件前缀为准，
+   * 这项用不上；没有 `mdRaw` 的新项才读它。默认空串，不进既有块的签名。
+   */
+  mdMarker: { default: "" },
   /**
    * 代码块的围栏账本：开栏行与闭栏行**原样**存着（含前导缩进与 `js // 注释` 那串 info），
    * 节点正文只装两道围栏之间的代码。于是"点进代码块"看到的和"退出来"看到的是同一份内容，
@@ -172,7 +184,7 @@ export const MdItem = Node.create({
     const kind = String(node.attrs.mdKind ?? "bullet");
     const marker =
       kind === "numbered"
-        ? numberedMarker(String(node.attrs.mdRaw ?? ""))
+        ? 这项有序记号(node)
         : kind === "todo"
           ? node.attrs.mdChecked
             ? "☑"
@@ -1162,6 +1174,7 @@ export const MdSup = Mark.create({
   parseHTML: () => [{ tag: "sup" }],
   renderHTML: ({ HTMLAttributes }) => ["sup", HTMLAttributes, 0],
 });
+
 export const MdSub = Mark.create({
   name: "sub",
   excludes: "sup",
@@ -1239,6 +1252,10 @@ export const MdLink = Mark.create({
  * **ID 只给有内容的那一半**（空块在 Markdown 里根本不存在，不配拥有 ID）。
  * ID 一经分配永不复用，见 [02]。
  *
+ * "新块"由反向映射判：起点落回旧文档时是 `deleted` 的才算。只凭"与上一块 `mdRaw`
+ * 相同"不够——作者故意写的相邻同源块（`甲\n\n\n甲`）也满足它，随便改一处就会把另一块
+ * 的空行压掉。
+ *
  * 只在**局部改动**里认拆块产物：载入、`moveBlock`、插入结构块、打签名走的都是整树
  * 替换，那些事务里出现的"相邻两块源切片相同"是文件本来的样子（`甲\n\n甲\n`），
  * 清掉就会把作者故意留的空行改没——那是另一种改用户内容。
@@ -1269,17 +1286,34 @@ export const LedgerGuard = () =>
         改.set(i, { ...块[i]!.n.attrs, ...改.get(i), ...属性 });
       const ID在 = new Map<string, number>();
 
-      块.forEach(({ n }, i) => {
+      /**
+       * 反查映射：新文档里的位置落回旧文档，`deleted` 说明这个起点是这次事务**新造的**。
+       * 拆块与粘贴都会把原块的账本复制给新节点，而"新节点"只有映射知道。
+       */
+      const 正: Mapping = new Mapping();
+      steps.forEach((t) => 正.appendMapping(t.mapping));
+      const 反向 = 正.invert();
+      const 同源数 = new Map<string, number>();
+      for (const { n } of 块) {
+        const raw = typeof n.attrs.mdRaw === "string" ? n.attrs.mdRaw : "";
+        if (raw) 同源数.set(raw, (同源数.get(raw) ?? 0) + 1);
+      }
+
+      块.forEach(({ n, 位置 }, i) => {
         const a = { ...n.attrs, ...改.get(i) };
         const raw = typeof a.mdRaw === "string" ? a.mdRaw : "";
-        const 前一份 = i > 0 ? (块[i - 1]!.n.attrs.mdRaw ?? "") : "";
+        // **不再拿"与上一块 mdRaw 相同"当拆块判据**：作者故意写的相邻同源块（`甲\n\n\n甲`）
+        // 也满足它，随便改一个字就把第二块多余的空行当成拆块产物压掉。现在两条一起看：
+        // ① 起点是这次事务新造的；② 这份源切片在文档里另有同源——拆块的两半、粘贴与原块
+        // 都满足，而撤销删除放回来的孤立原块不满足（它的账本应当跟着回来）。
+        const 新造 = 反向.mapResult(位置, 1).deleted;
         // 表格**不参与这条判据**。它的前提是"重新序列化等于原字节"——段落、标题、列表、
         // 不透明块都成立（产回来就是那份文本），表格不成立：`serializeTable` 产的是规范形，
         // 清掉账本等于把一张用户没碰过的表从 `|:-----|` 重写成 `| :--- |`（真机取证过：
         // 两张相邻且源文本相同的表，给第一张加一列，第二张的字节就跟着变了）。
         // 而这条判据本来也用不到表格身上：格子里的 Enter 被 `TableKeys` 接管成跳格，
         // 表格拆不出"相邻两块同源"这种产物。
-        if (raw && raw === 前一份 && n.type.name !== "mdTable") {
+        if (raw && 新造 && (同源数.get(raw) ?? 0) > 1 && n.type.name !== "mdTable") {
           // 新块没有源切片可回，账本按"新建"重来；`mdKind` 还得与**实际节点类型**对齐：
           // 拆一个列表项会得到 `mdParagraph`，而复制来的 `mdKind` 还写着 `bullet`——
           // 那种状态下序列化器认为它是列表的延续（gap `""`），两行就粘回一个列表项。
@@ -1353,9 +1387,11 @@ export const History = Extension.create({
  * 否则"能看不能做"。记法跟 Google Docs：`Ctrl+Alt+0–3` 改正文与标题层级，
  * `Ctrl+Shift+7/8/9` 改有序 / 无序 / 待办，`Alt+↑/↓` 上下移动整块。
  *
- * **一律走 `applyBlockType` / `moveBlock`**，不另写第二套落盘逻辑——那两处各自演化的
- * 分叉这一轮已经付过一次学费（显示用一套、序列化用另一套）。
+ * **类型切换走 `applyBlockType`，无序 / 有序 / 待办走 `设列表`**（第二次按取消，选区里的多块一起改），
+ * 移动走 `moveBlock`。另写一套落盘逻辑会和按钮分叉。下拉里的「待办」仍是设成这种类型，不取消。
  *
+ * 列表里的回车、项首退格不放进这张快捷键表：要看 `isComposing`，而 TipTap 的快捷键
+ * 函数拿不到那次按键。它们在下面的 `handleKeyDown` 里。
  * 移动之后要把光标放回那一块：`moveBlock` 是整树替换，选区映射后可能落在别的块上，
  * 于是"连按两次 Alt+↓"第二次移的就不是同一块了。这类"看起来能用、第二次就错"的 bug
  * 只能靠显式放回选区来断根。
@@ -1370,6 +1406,16 @@ export const BlockKeys = Extension.create({
       const tr = applyBlockType(state, $from.before(1), id);
       if (!tr) return false;
       editor.view.dispatch(tr.scrollIntoView());
+      return true;
+    };
+    const 列表 = (id: "bullet" | "numbered" | "todo") => ({ editor }: { editor: Editor }) => {
+      const { tr, 跳过 } = 设列表(editor.state, id);
+      if (!tr) return false;
+      editor.view.dispatch(tr.scrollIntoView());
+      const 说明 = 列表跳过说明(跳过);
+      if (说明) {
+        editor.view.dom.dispatchEvent(new CustomEvent("md-notice", { detail: 说明, bubbles: true }));
+      }
       return true;
     };
     const move = (delta: number) => ({ editor }: { editor: Editor }) => {
@@ -1387,12 +1433,39 @@ export const BlockKeys = Extension.create({
       "Ctrl-Alt-4": setType("heading4"),
       "Ctrl-Alt-5": setType("heading5"),
       "Ctrl-Alt-6": setType("heading6"),
-      "Ctrl-Shift-8": setType("bullet"),
-      "Ctrl-Shift-7": setType("numbered"),
-      "Ctrl-Shift-9": setType("todo"),
+      "Ctrl-Shift-8": 列表("bullet"),
+      "Ctrl-Shift-7": 列表("numbered"),
+      "Ctrl-Shift-9": 列表("todo"),
       "Alt-ArrowUp": move(-1),
       "Alt-ArrowDown": move(1),
     };
+  },
+  /**
+   * 回车在列表项里续下一项；空项上再按，或光标在项首按退格，退回正文。
+   * 输入法选词的回车（`isComposing` / keyCode 229）必须放行，否则确认候选词会把这一项拆开。
+   */
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handleKeyDown(view, event) {
+            if (!view.editable || event.isComposing || event.keyCode === 229) return false;
+            if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+            const 做 = event.key === "Enter" ? 列表回车 : event.key === "Backspace" ? 列表退格 : null;
+            if (!做) return false;
+            const tr = 做(view.state);
+            if (!tr) return false;
+            view.dispatch(tr.scrollIntoView());
+            return true;
+          },
+          handleDOMEvents: {
+            mousedown(view, event) {
+              return 点待办前缀(view, event);
+            },
+          },
+        },
+      }),
+    ];
   },
 });
 
@@ -2059,5 +2132,6 @@ export const mdExtensions = [
   FocusIndicator,
   OpaqueFace,
   引用高亮扩展,
+  查找扩展,
   History,
 ];

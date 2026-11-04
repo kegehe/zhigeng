@@ -7,11 +7,15 @@ import {
   Baseline,
   Bold,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Code,
   Highlighter,
   Italic,
   Link2,
+  List,
+  ListOrdered,
+  ListTodo,
   Minus,
   MoveDown,
   MoveUp,
@@ -45,6 +49,10 @@ export type 图标名 =
   | "sup"
   | "sub"
   | "link"
+  | "list"
+  | "listOrdered"
+  | "listTodo"
+  | "firstIndent"
   | "baseline"
   | "highlighter"
   | "ai"
@@ -70,6 +78,7 @@ export type 图标名 =
   | "redo"
   | "chevronUp"
   | "chevronDown"
+  | "chevronRight"
   | "pin";
 
 /**
@@ -150,6 +159,31 @@ function 图标填充(p: LucideProps) {
   );
 }
 
+/**
+ * 首行缩进：第一道线从右边起笔，下面两道顶到左边。
+ * Lucide 只有列表缩进，用在这里会被认成"列表往里缩一层"，而这枚按钮不做那件事。
+ */
+function 图标首行缩进(p: LucideProps) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={24}
+      height={24}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...p}
+    >
+      <path d="M10 6h10" />
+      <path d="M4 12h16" />
+      <path d="M4 18h16" />
+    </svg>
+  );
+}
+
 export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   bold: Bold,
   italic: Italic,
@@ -158,6 +192,10 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   sup: Superscript,
   sub: Subscript,
   link: Link2,
+  list: List,
+  listOrdered: ListOrdered,
+  listTodo: ListTodo,
+  firstIndent: 图标首行缩进,
   // 文字色与底色是两枚：Baseline（A 加一道底色条）与 Highlighter（马克笔）——
   // Google Docs / Word 那一套。用户不用先认"这枚按钮是调色板还是字体色"
   baseline: Baseline,
@@ -188,5 +226,7 @@ export const 工具图标: Record<图标名, ComponentType<LucideProps>> = {
   // 底部对话框：展开时朝下（点了收起来）、收起时朝上（点了展开）；钉子就是"别自动收"
   chevronUp: ChevronUp,
   chevronDown: ChevronDown,
+  // 左缘大纲把手：滑出方向朝右
+  chevronRight: ChevronRight,
   pin: Pin,
 };

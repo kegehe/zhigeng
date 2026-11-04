@@ -18,7 +18,15 @@ import {
   BLOCK_ALIGNS,
   BLOCK_TYPES,
   tableAt,
+  共同列表,
   共同对齐,
+  共同首行缩进,
+  列表跳过说明,
+  能设列表,
+  能设首行缩进,
+  设列表,
+  设首行缩进,
+  缩进跳过说明,
   有可对齐块,
   对所齐所选,
   填充所选,
@@ -46,9 +54,9 @@ export const 对齐图: Record<BlockAlign, 图标名> = {
  * 常驻顶部工具栏。
  *
  * **只放序列化器真能产出的操作**——这条限制不是偷懒，是产品的命根子：Markdown 是唯一
- * 真相（G1），编辑器与文件必须字节级往返（G5）。所以这里没有字号与缩进：它们连一种
- * 可逆的写法都还没有，给了按钮就是给用户一个"点了会丢"的陷阱。居中 / 右对齐 / 两端
- * 是 2026-11-03 才开的（`<div align>` 包裹，见 docs/02 D40）——先有可往返的字节，再有
+ * 真相（G1），编辑器与文件必须字节级往返（G5）。字号仍不做：没有可逆写法。
+ * 首行缩进是正文开头的两个全角空格，写在正文里；点一次加上，开头已经是这两个字再点一次去掉。
+ * 居中 / 右对齐 / 两端是 2026-11-03 才开的（`<div align>` 包裹，见 docs/02 D40）——先有可往返的字节，再有
  * 按钮，顺序不能反。
  *
  * 颜色与高亮是 2026-10-28 才放进来的一档，**不是因为"Markdown 有了语法"，是因为我们先
@@ -142,6 +150,10 @@ export function Toolbar({ editor }: { editor: Editor }) {
    */
   const 共同档 = 共同对齐(editor.state);
   const 可对齐 = 有可对齐块(editor.state);
+  const 列表档 = 共同列表(editor.state);
+  const 可设列表 = 能设列表(editor.state);
+  const 缩进开着 = 共同首行缩进(editor.state);
+  const 可缩进 = 能设首行缩进(editor.state);
 
   const 改表 = (做: (state: typeof editor.state, 起点: number) => ReturnType<typeof addRow>) => {
     if (表起点 === null) return;
@@ -182,6 +194,26 @@ export function Toolbar({ editor }: { editor: Editor }) {
   const move = (delta: number) => {
     const tr = moveCurrentBlock(editor.state, delta);
     if (tr) editor.view.dispatch(tr.scrollIntoView());
+  };
+  const 做列表 = (id: "bullet" | "numbered" | "todo") => {
+    const { tr, 跳过 } = 设列表(editor.state, id);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+    const 说明 = tr ? 列表跳过说明(跳过) : null;
+    if (说明) {
+      editor.view.dom.dispatchEvent(
+        new CustomEvent("md-notice", { detail: 说明, bubbles: true }),
+      );
+    }
+  };
+  const 做缩进 = () => {
+    const { tr, 跳过 } = 设首行缩进(editor.state);
+    if (tr) editor.view.dispatch(tr.scrollIntoView());
+    const 说明 = tr ? 缩进跳过说明(跳过) : null;
+    if (说明) {
+      editor.view.dom.dispatchEvent(
+        new CustomEvent("md-notice", { detail: 说明, bubbles: true }),
+      );
+    }
   };
 
   /**
@@ -265,6 +297,34 @@ export function Toolbar({ editor }: { editor: Editor }) {
               a.id !== "left" && 共同档 === a.id,
               !可对齐,
             ),
+          )
+        : null}
+      {表起点 === null
+        ? (
+            [
+              ["bullet", "无序列表 Ctrl+Shift+8", "list"],
+              ["numbered", "有序列表 Ctrl+Shift+7", "listOrdered"],
+              ["todo", "待办 Ctrl+Shift+9", "listTodo"],
+            ] as const
+          ).map(([id, 名, 图]) =>
+            btn(
+              "list-" + id,
+              名 + (可设列表 ? "" : "（只作用于正文、标题和列表项）"),
+              图,
+              () => 做列表(id),
+              列表档 === id,
+              !可设列表,
+            ),
+          )
+        : null}
+      {表起点 === null
+        ? btn(
+            "first-indent",
+            "首行缩进" + (可缩进 ? "" : "（只作用于有文字的正文）"),
+            "firstIndent",
+            做缩进,
+            缩进开着,
+            !可缩进,
           )
         : null}
       <span className="sep" aria-hidden="true" />

@@ -17,6 +17,9 @@ import type {
   SnapshotRow,
   AiProbeReport,
   AiView,
+  DocEditBlock,
+  DocEditPlan,
+  DocEditTurn,
   RewriteResult,
   TrashRow,
 } from "./types";
@@ -159,6 +162,23 @@ export const api = {
       preset,
       runId,
       doc: doc ?? null,
+      rel: rel ?? null,
+    }),
+  /**
+   * 整篇文档编辑：把**块清单**交给模型，换回块级补丁（replace / delete / insert_after）。
+   * 模型只提议；界面拿当前文档校验、预览，用户点「应用修改」才发一笔编辑器事务。
+   * 私密篇在 Rust 侧直接拒（整篇内容不能发给模型）。
+   */
+  aiDocEdit: (
+    blocks: DocEditBlock[],
+    instruction: string,
+    rel?: string,
+    history?: DocEditTurn[],
+  ) =>
+    invoke<DocEditPlan>("ai_doc_edit", {
+      blocks,
+      instruction,
+      history: history?.length ? history : null,
       rel: rel ?? null,
     }),
   /** 审计：最近的生成记录，含未采纳的那几次 */
