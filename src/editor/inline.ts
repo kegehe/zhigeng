@@ -316,6 +316,65 @@ export function serializeInline(node: PmNode): string {
   return 序列化行内(node);
 }
 
+/** 按固定层序给一段文字上标记。PM 的 mark 与源文本解析出来的 `InlineMark` 共用这一份 */
+function 包一段(text: string, marks: 标记[]): string {
+  for (const mark of marks) {
+    switch (mark.name) {
+      case "bold":
+        text = wrap(text, "**");
+        break;
+      case "italic":
+        text = wrap(text, "*");
+        break;
+      case "code":
+        text = text.includes("`") ? text : `\`${text}\``;
+        break;
+      case "strike":
+        text = wrap(text, "~~");
+        break;
+      case "link":
+        text = `[${text}](${mark.href ?? ""})`;
+        break;
+      case "highlight":
+        text = 包高亮(text);
+        break;
+      case "textColor":
+        text = 包色(text, "color", String(mark.color ?? ""));
+        break;
+      case "bgColor":
+        text = 包色(text, "background-color", String(mark.color ?? ""));
+        break;
+      case "sup":
+        text = 包上下标(text, "sup");
+        break;
+      case "sub":
+        text = 包上下标(text, "sub");
+        break;
+      default:
+        break;
+    }
+  }
+  return text;
+}
+
+type 标记 = { name: string; href?: string | undefined; color?: string | undefined };
+
+/**
+ * 一段**源文本**按本序列化器的写法归一之后长什么样。
+ *
+ * 结构化接管引用时要用它当判据：接管之后用户的每一次编辑都会重写整块字节，所以只有
+ * "原样的源文本经我们的笔写出来仍是同一串"才敢接管；`__粗__` 会被写成 `**粗**`，
+ * 拼不回原字节的那些引用继续走源文本面。
+ */
+export function 序列化行内文本(src: string): string {
+  return parseInline(src)
+    .map((n) => {
+      const marks = [...n.marks].sort((a, b) => (层序[a.name] ?? 99) - (层序[b.name] ?? 99));
+      return 包一段(n.text, marks);
+    })
+    .join("");
+}
+
 /**
  * 选区切片没有块节点可传：`doc.slice(from, to).content` 是一个 `Fragment`，
  * 但序列化要的只是"逐个子节点走一遍"这件事，所以这里不要求一定是 `Node`。
@@ -323,47 +382,14 @@ export function serializeInline(node: PmNode): string {
 export function 序列化行内(节点: 可行内容器): string {
   let out = "";
   节点.forEach((child) => {
-    let text = child.text ?? "";
-    const marks = [...child.marks].sort(
-      (a, b) => (层序[a.type.name] ?? 99) - (层序[b.type.name] ?? 99),
-    );
-    for (const mark of marks) {
-      switch (mark.type.name) {
-        case "bold":
-          text = wrap(text, "**");
-          break;
-        case "italic":
-          text = wrap(text, "*");
-          break;
-        case "code":
-          text = text.includes("`") ? text : `\`${text}\``;
-          break;
-        case "strike":
-          text = wrap(text, "~~");
-          break;
-        case "link":
-          text = `[${text}](${mark.attrs.href ?? ""})`;
-          break;
-        case "highlight":
-          text = 包高亮(text);
-          break;
-        case "textColor":
-          text = 包色(text, "color", String(mark.attrs.color ?? ""));
-          break;
-        case "bgColor":
-          text = 包色(text, "background-color", String(mark.attrs.color ?? ""));
-          break;
-        case "sup":
-          text = 包上下标(text, "sup");
-          break;
-        case "sub":
-          text = 包上下标(text, "sub");
-          break;
-        default:
-          break;
-      }
-    }
-    out += text;
+    const marks = [...child.marks]
+      .sort((a, b) => (层序[a.type.name] ?? 99) - (层序[b.type.name] ?? 99))
+      .map((m) => ({
+        name: m.type.name,
+        href: typeof m.attrs.href === "string" ? m.attrs.href : undefined,
+        color: typeof m.attrs.color === "string" ? m.attrs.color : undefined,
+      }));
+    out += 包一段(child.text ?? "", marks);
   });
   return out;
 }

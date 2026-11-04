@@ -15,6 +15,7 @@ import { 拼资产引用, 是库内资产, 拆资产引用, 拆自attrs, type �
 import { 拼开栏, 拼围栏, 拆围栏, 拆开栏 } from "./fence";
 import { 拼公式, 拆公式 } from "./mathFace";
 import { 拼引用, 引用账本 } from "./quoteFace";
+import { 序列化引用块, 引用接管 } from "./quoteStructured";
 import { 已识别, 短写, 语言清单, 识别 } from "./highlight";
 import { inlineToJson, serializeInline } from "./inline";
 import { parseGrid, parseTable, serializeTable, type Align } from "./table";
@@ -144,6 +145,10 @@ export function tableJson(
  */
 export function docToJson(doc: EditDoc): JsonNode {
   const content: JsonNode[] = doc.blocks.map((b) => {
+    // 引用 / Callout 先试结构化接管：正文是屏幕上的段落 / 列表，前缀仍在账本里。
+    // 拼不回原字节时 `引用接管` 返回 null，继续走下面 `mdOpaque` 的源文本面。
+    const 引 = 引用接管(b);
+    if (引) return 引;
     const type = nodeType(b);
     const attrs = attrsOf(b);
     if (type === "mdOpaque") {
@@ -416,6 +421,8 @@ function serializeNode(node: PmNode): string {
       const id = typeof a.mdId === "string" ? a.mdId : "";
       return id ? `---\n^${id}` : "---";
     }
+    case "mdQuote":
+      return 序列化引用块(node);
     case "mdOpaque": {
       const 缀文 = String(a.mdQuoteMarks ?? "");
       if (缀文) {
@@ -939,7 +946,7 @@ export function 列表回车(state: EditorState): Transaction | null {
   const sel = state.selection;
   if (!(sel instanceof TextSelection)) return null;
   const { $from, $to } = sel;
-  if ($from.depth < 1 || $to.depth < 1 || $from.before(1) !== $to.before(1)) return null;
+  if ($from.depth < 1 || $from.parent !== $to.parent) return null;
   if ($from.parent.type.name !== "mdItem") return null;
 
   const tr = state.tr;
@@ -947,7 +954,8 @@ export function 列表回车(state: EditorState): Transaction | null {
   const $ = tr.selection.$from;
   if ($.parent.type.name !== "mdItem") return null;
   const node = $.parent;
-  const 块起点 = $.before(1);
+  // 列表项也可能在引用里（引用 → mdItem），起点按"父节点的深度"算，不能写死 before(1)
+  const 块起点 = $.before($.depth);
 
   if (node.textContent.length === 0) {
     if (!改块类型(tr, 块起点, "paragraph")) return null;
@@ -989,8 +997,81 @@ export function 列表退格(state: EditorState): Transaction | null {
   const { $from } = sel;
   if ($from.parent.type.name !== "mdItem" || $from.parentOffset !== 0) return null;
   const tr = state.tr;
-  if (!改块类型(tr, $from.before(1), "paragraph")) return null;
+  if (!改块类型(tr, $from.before($from.depth), "paragraph")) return null;
   return tr;
+}
+
+/** 光标所在的引用（`mdQuote`）起点；不在结构化引用里返回 null。 */
+function 引用起点(state: EditorState): number | null {
+  const { $from } = state.selection;
+  if ($from.depth < 2) return null;
+  return $from.node(1).type.name === "mdQuote" ? $from.before(1) : null;
+}
+
+/**
+ * 结构化引用里的回车。
+ *
+ * - 正文段落：插一个软换行 `\n`。引用里"下一行"在内核看来就是同一段的续行
+ *   （夹具 04 的懒惰续行就是这个形状），拆成两个段落反而会在保存后并回去。
+ * - 标题 / Callout 标题行：拆出一个正文段落。标题在文件里只占一行，回车就是"标题写完了"。
+ * - 列表项交给 `列表回车`；跨块选区交回默认。
+ */
+export function 引用回车(state: EditorState): Transaction | null {
+  const sel = state.selection;
+  if (!(sel instanceof TextSelection)) return null;
+  const 位 = 引用起点(state);
+  if (位 === null) return null;
+  const 段型 = state.schema.nodes.mdParagraph;
+  if (!段型) return null;
+
+  const tr = state.tr;
+  if (!sel.empty) tr.deleteSelection();
+  const $ = tr.selection.$from;
+  if ($.depth < 2 || $.node(1).type.name !== "mdQuote") return null;
+  if ($.parent.type.name === "mdParagraph") {
+    tr.insertText("\n");
+    return tr;
+  }
+  if ($.parent.type.name !== "mdHeading" && $.parent.type.name !== "mdQuoteHead") return null;
+  const 落 = [{ type: 段型, attrs: { mdGap: "" } }];
+  if (!canSplit(tr.doc, $.pos, 1, 落)) return null;
+  tr.split($.pos, 1, 落);
+  return tr;
+}
+
+/**
+ * 结构化引用里的退格。只在"会吃掉标题"的两处拦一下：
+ * Callout 标题行开头、以及紧跟标题的正文段落开头——默认的 joinBackward 会把正文并进
+ * 标题，标题的字节就没了。其余位置交回 PM（段内删字、列表项交给 `列表退格`）。
+ */
+export function 引用退格(state: EditorState): Transaction | null {
+  const sel = state.selection;
+  if (!sel.empty || !(sel instanceof TextSelection)) return null;
+  const { $from } = sel;
+  if (引用起点(state) === null || $from.parentOffset !== 0) return null;
+  if ($from.parent.type.name === "mdQuoteHead") return state.tr;
+  if ($from.parent.type.name !== "mdParagraph" && $from.parent.type.name !== "mdHeading") {
+    return null;
+  }
+  const 引 = $from.node(1);
+  const 前 = $from.index(1) > 0 ? 引.child($from.index(1) - 1) : null;
+  return 前?.type.name === "mdQuoteHead" ? state.tr : null;
+}
+
+/**
+ * 光标在引用的最后一个正文块末尾按 `↓`：离开引用，落到下一块（没有就现造一个落脚点）。
+ * 中间的行交回 PM，那里 `↓` 该在引用内下移。
+ */
+export function exitQuoteDown(state: EditorState): Transaction | null {
+  const sel = state.selection;
+  if (!sel.empty || !(sel instanceof TextSelection)) return null;
+  const { $from } = sel;
+  const 位 = 引用起点(state);
+  if (位 === null) return null;
+  const 引 = $from.node(1);
+  if ($from.index(1) !== 引.childCount - 1) return null;
+  if ($from.parentOffset !== $from.parent.content.size) return null;
+  return 送出块下(state.tr, 位);
 }
 
 /**

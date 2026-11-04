@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Editor } from "@tiptap/core";
-import { DOMParser, DOMSerializer, Fragment, Slice } from "@tiptap/pm/model";
+import { DOMParser, DOMSerializer, Fragment, Slice, type Node as PmNode } from "@tiptap/pm/model";
 import { NodeSelection, TextSelection, type EditorState } from "@tiptap/pm/state";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createTestEditor } from "./testEditor";
@@ -109,10 +109,16 @@ describe("块编辑器字节级往返", () => {
     it(`${name}：改一处再改回去，产出仍然等于源文件`, () => {
       const editor = createTestEditor(doc);
       const { state } = editor;
-      // 找第一个带文字的块，在块**内**插一个字符再删掉：内容回到原样，签名也必须回到原样
+      // 找**第一个文字节点**，在它末尾插一个字符再删掉：内容回到原样，签名也必须回到原样。
+      // 不能按顶层块算：结构化引用的块尾是子节点边界，往那儿插会多出一个段落。
       let target = -1;
-      state.doc.forEach((node, pos) => {
-        if (target < 0 && node.textContent.length > 0) target = pos + node.nodeSize - 1;
+      state.doc.descendants((node, pos) => {
+        if (target >= 0) return false;
+        if (node.isText && node.textContent.length > 0) {
+          target = pos + node.nodeSize - 1;
+          return false;
+        }
+        return true;
       });
       expect(target).toBeGreaterThan(0);
       // 直接走 ProseMirror 事务：这就是"敲一个字"在最底层的形状，不借第三方命令封装
@@ -1707,6 +1713,66 @@ const 放到文末 = (editor: Editor) =>
     editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)),
   );
 
+/**
+ * 引用了代码块：这个形状超出结构化接管范围（只收段落 / 标题 / 列表），
+ * 继续走 `mdOpaque` 的两副面孔。下面这组测试钉的就是那副机制。
+ */
+const 落回源文本 = (): EditDoc => ({
+  frontMatter: "",
+  trailingGap: "",
+  blocks: [
+    {
+      kind: "quote",
+      id: null,
+      raw: "> 引用里的代码：\n>\n> ```\n> let a = 1;\n> ```\n",
+      gapBefore: "",
+      content: "",
+      level: null,
+      checked: null,
+      align: null,
+      fields: [],
+      children: [
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "引用里的代码：\n",
+          gapBefore: "",
+          content: "引用里的代码：",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "code",
+          id: null,
+          raw: "```\nlet a = 1;\n```\n",
+          gapBefore: "\n",
+          content: "",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    },
+    {
+      kind: "paragraph",
+      id: null,
+      raw: "后面的正文。\n",
+      gapBefore: "\n",
+      content: "后面的正文。",
+      level: null,
+      checked: null,
+      align: null,
+      fields: [],
+      children: [],
+    },
+  ],
+});
+
 describe("显示形切换不许碰到字节", () => {
   for (const name of SAMPLES) {
     const { src, doc } = load(name);
@@ -1715,9 +1781,11 @@ describe("显示形切换不许碰到字节", () => {
       const editor = createTestEditor(doc);
       const 装载后的文档 = editor.state.doc;
       const 块 = 不透明块(editor);
-      // 01 只有一条分隔线（已是原子块）、08 全是可编辑块：这两个样本没有不透明块可进出；
-      // 其余样本必须真有得测，否则这条测试就变成了空转
-      if (name !== "08-对齐" && name !== "01-基础") expect(块.length, name).toBeGreaterThan(0);
+      // 01 只有一条分隔线（已是原子块）、04 全是结构化引用、08 全是可编辑块：
+      // 这几个样本没有不透明块可进出；其余样本必须真有得测，否则这条测试就变成了空转
+      if (!["01-基础", "04-引用与标注", "08-对齐"].includes(name)) {
+        expect(块.length, name).toBeGreaterThan(0);
+      }
       for (const b of 块) {
         放进(editor, b.pos);
         放到文末(editor);
@@ -1729,13 +1797,36 @@ describe("显示形切换不许碰到字节", () => {
     });
   }
 
-  // 表格现在被网格节点接管了（见下面的表格用例），所以这一组"两副面孔"的测试改用代码块：
-  // 代码块仍然是不透明块，两副面孔的机制在它身上和引用/公式完全一样
+  it("结构化引用只有一面：光标进出不换 DOM，也不发事务", () => {
+    const { doc, src } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 文档前 = editor.state.doc;
+    const 引们: number[] = [];
+    editor.state.doc.forEach((n, off) => {
+      if (n.type.name === "mdQuote") 引们.push(off);
+    });
+    expect(引们).toHaveLength(5);
+    for (const 位 of 引们) {
+      const 壳 = 面孔(editor, 位)!;
+      expect(壳.hasAttribute("data-md-quote"), String(位)).toBe(true);
+      expect(壳.querySelector(".md-view, .md-src"), "结构化引用不该有两副面孔").toBeNull();
+      放进(editor, 位);
+      expect(壳.hasAttribute("data-md-mode"), "点进来也不换面").toBe(false);
+      放到文末(editor);
+      expect(壳.hasAttribute("data-md-mode")).toBe(false);
+    }
+    expect(editor.state.doc).toBe(文档前);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  // 表格被网格节点接管、代码围栏与公式也被账本接管，剩下的两副面孔只在不认得的形状上出现。
+  // 这里用一个"引用里嵌代码"的块来钉那套机制：它拼不回结构化正文，必须继续显示源文本。
   it("光标进来退回源文本，交出口变回显示形", () => {
-    const { doc } = load("04-引用与标注");
+    const doc = 落回源文本();
     const editor = createTestEditor(doc);
     const 引 = 不透明块(editor)[0]!;
-    expect(引).toBeTruthy();
+    expect(引.kind).toBe("quote");
 
     expect(面孔(editor, 引.pos)!.dataset["mdMode"]).toBeUndefined();
     expect(面孔(editor, 引.pos)!.querySelector(".md-view > *")).not.toBeNull();
@@ -1764,18 +1855,20 @@ describe("显示形切换不许碰到字节", () => {
   it("改了源文本，交出口之后显示形跟着变", () => {
     // 重画发生在"交出焦点"那一刻，不在击键路径上。这条钉住两件事：
     // 该重画的时候真的重画了，且它读的是节点正文而不是载入时那份旧字节
-    const { doc } = load("04-引用与标注");
+    const doc = 落回源文本();
     const editor = createTestEditor(doc);
     const 引 = 不透明块(editor)[0]!;
     放进(editor, 引.pos);
-    editor.view.dispatch(editor.state.tr.insertText("改", 引.pos + 1));
+    // 回退块也走前缀账本：节点正文是剥掉 `>` 之后的那段，偏移要按正文算
+    const 偏移 = editor.state.doc.nodeAt(引.pos)!.textContent.indexOf("代码");
+    editor.view.dispatch(editor.state.tr.insertText("改", 引.pos + 1 + 偏移));
     放到文末(editor);
-    expect(面孔(editor, 引.pos)!.querySelector(".quote")!.textContent).toContain("改");
+    expect(面孔(editor, 引.pos)!.querySelector(".quote")!.textContent).toContain("改代码");
     editor.destroy();
   });
 
   it("显示形在 contentDOM 之外：PM 的解析与剪贴板都读不到它", () => {
-    const { doc } = load("04-引用与标注");
+    const doc = 落回源文本();
     const editor = createTestEditor(doc);
     const 引 = 不透明块(editor)[0]!;
     const 壳 = 面孔(editor, 引.pos)!;
@@ -1791,7 +1884,7 @@ describe("显示形切换不许碰到字节", () => {
   it("点显示形要真的把光标放进来", () => {
     // 真机抓的：Chromium 不会把插入符放进 `contenteditable=false` 的岛里，点了什么也不发生。
     // 所以这一下必须由 NodeView 自己发选区——不接管的话"点一下改源码"整条路是死的。
-    const { doc } = load("04-引用与标注");
+    const doc = 落回源文本();
     const editor = createTestEditor(doc);
     const 引 = 不透明块(editor)[0]!;
     const 壳 = 面孔(editor, 引.pos)!;
@@ -1826,7 +1919,7 @@ describe("显示形切换不许碰到字节", () => {
     // jsdom 里没有 `elementFromPoint`，交回 PM 的 `mousedown` 会在 PM 内部抛——那是环境的
     // 限制不是产品的问题（WebView2 有这个方法）。所以这里只喂不走坐标计算的事件类型，
     // "右键那一下该交回"由上面那条判据断言，效果在真机上验。
-    const { doc, src } = load("04-引用与标注");
+    const doc = 落回源文本();
     const editor = createTestEditor(doc);
     const 引 = 不透明块(editor)[0]!;
     const 宿主 = 面孔(editor, 引.pos)!.querySelector(".md-view")!;
@@ -1837,42 +1930,52 @@ describe("显示形切换不许碰到字节", () => {
     }
     expect(editor.state.selection.from).toBe(选区前);
     expect(面孔(editor, 引.pos)!.dataset["mdMode"]).toBeUndefined();
-    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(reassemble(doc));
     editor.destroy();
   });
 
-  it("点 Callout 标题只改折叠态，不动选区也不动文档", () => {
+  it("点 Callout 的类型牌只改折叠态，不动选区也不动文档", () => {
     const { doc, src } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 折 = 不透明块(editor).find((b) => b.kind === "callout")!;
-    const 壳 = 面孔(editor, 折.pos)!;
-    const 头 = 壳.querySelector(".cal-head")!;
+    let 位 = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (位 < 0 && n.type.name === "mdQuote" && n.attrs.mdKind === "callout") 位 = off;
+    });
+    expect(位).toBeGreaterThanOrEqual(0);
+    const 壳 = 面孔(editor, 位)!;
+    const 牌 = 壳.querySelector<HTMLButtonElement>(".cal-badge")!;
+    expect(牌).not.toBeNull();
     const 选区前 = editor.state.selection.from;
     const 文档前 = editor.state.doc;
-    头.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-    expect(壳.querySelector<HTMLElement>(".callout")!.dataset["folded"]).toBeTruthy();
-    头.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-    expect(壳.querySelector<HTMLElement>(".callout")!.dataset["folded"]).toBeUndefined();
+    牌.click();
+    expect(壳.dataset["folded"]).toBeTruthy();
+    牌.click();
+    expect(壳.dataset["folded"]).toBeUndefined();
     expect(editor.state.doc).toBe(文档前);
     expect(editor.state.selection.from).toBe(选区前);
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
 
-  it("Callout 标题用行内装饰加粗，折叠态在源文本面有牌", () => {
-    // `::first-line` 只对块容器生效，源文本面的 `<code>` 是行内元素——那条 CSS 在
-    // WebView2 里一直是空转。改成 Decoration.inline 之后，标题的 600 与显示形同源。
+  it("Callout 的标题是第一个正文节点，折叠态来自账本而不是第二份状态", () => {
     const { doc, src } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 标注 = 不透明块(editor).filter((b) => b.kind === "callout");
-    expect(标注.length).toBeGreaterThanOrEqual(2);
+    const 标注: number[] = [];
+    editor.state.doc.forEach((n, off) => {
+      if (n.type.name === "mdQuote" && n.attrs.mdKind === "callout") 标注.push(off);
+    });
+    expect(标注).toHaveLength(2);
 
-    const 展开 = 面孔(editor, 标注[0]!.pos)!;
-    expect(展开.querySelector(".md-callout-lead")!.textContent).toBe("打扰预算是多少？");
-    expect(展开.hasAttribute("data-md-folded")).toBe(false);
+    const 展开 = 面孔(editor, 标注[0]!)!;
+    expect(展开.dataset["callout"]).toBe("question");
+    expect(展开.querySelector(".cal-badge")!.textContent).toBe("question");
+    expect(展开.querySelector("[data-md-quote-head]")!.textContent).toBe("打扰预算是多少？");
+    expect(展开.dataset["folded"]).toBeUndefined();
 
-    const 折叠 = 面孔(editor, 标注[1]!.pos)!;
-    expect(折叠.hasAttribute("data-md-folded")).toBe(true);
+    const 折叠 = 面孔(editor, 标注[1]!)!;
+    expect(折叠.dataset["callout"]).toBe("note");
+    expect(折叠.querySelector("[data-md-quote-head]")!.textContent).toBe("折叠的提示");
+    expect(折叠.dataset["folded"]).toBe("1");
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
@@ -2052,42 +2155,40 @@ describe("公式单面：`$$` 进账本，编辑面就是显示形", () => {
 });
 
 /**
- * 引用 / Callout 的前缀进账本：正文就是屏幕上那一段，`>` 与 `[!type]` 不再进可编辑面。
- * 与围栏同一条边界——拼不回原字节的块不接管，继续两副面孔。
+ * 结构化引用（docs/02 D42 / D43）：`>` 与 `[!type]` 进账本，正文是真正可编辑的
+ * 段落 / 标题 / 列表。边界只有一条——拼不回原字节的块不接管，继续两副面孔。
  */
-describe("引用账本：前缀进账本，点进去仍是同一段正文", () => {
-  const 引述块 = (editor: Editor) =>
-    不透明块(editor).filter((b) => b.kind === "quote" || b.kind === "callout");
+describe("结构化引用：前缀进账本，正文是真正可编辑的段落", () => {
+  const 引述们 = (editor: Editor) => {
+    const out: { pos: number; node: PmNode }[] = [];
+    editor.state.doc.forEach((n, off) => {
+      if (n.type.name === "mdQuote") out.push({ pos: off, node: n });
+    });
+    return out;
+  };
 
-  it("夹具 04 的五块引用 / Callout 都进了账本，正文不带前缀，字节不变", () => {
+  it("夹具 04 的五块引用 / Callout 都结构化接管，正文不带前缀，字节不变", () => {
     const { doc, src } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 块们 = 引述块(editor);
+    const 块们 = 引述们(editor);
     expect(块们).toHaveLength(5);
-    for (const b of 块们) {
-      const 节 = editor.state.doc.nodeAt(b.pos)!;
-      expect(节.attrs.mdQuoteMarks, b.kind).toBeTruthy();
-      expect(节.textContent).not.toMatch(/(^|\n)\s{0,3}>/);
-      expect(节.textContent).not.toContain("[!");
-      expect(节.textContent).not.toContain("^b-");
+    expect(块们.filter((b) => b.node.attrs.mdKind === "callout")).toHaveLength(2);
+    for (const { node } of 块们) {
+      expect(node.attrs.mdQuoteMarks).toBeTruthy();
+      expect(node.textContent).not.toMatch(/(^|\n)\s{0,3}>/);
+      expect(node.textContent).not.toContain("[!");
+      expect(node.textContent).not.toContain("^b-");
+      expect(node.firstChild!.type.name).toBe(
+        node.attrs.mdKind === "callout" ? "mdQuoteHead" : "mdParagraph",
+      );
     }
-    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
-    editor.destroy();
-  });
-
-  it("点进点出只换 DOM 属性，doc 还是同一个对象，字节不变", () => {
-    const { doc, src } = load("04-引用与标注");
-    const editor = createTestEditor(doc);
-    const 文档前 = editor.state.doc;
-    for (const b of 引述块(editor)) {
-      const 壳 = 面孔(editor, b.pos)!;
-      expect(壳.querySelector(".md-view"), b.kind).not.toBeNull();
-      放进(editor, b.pos);
-      expect(壳.dataset["mdMode"]).toBe("source");
-      放到文末(editor);
-      expect(壳.dataset["mdMode"]).toBeUndefined();
-    }
-    expect(editor.state.doc).toBe(文档前);
+    // 列表与懒惰续行也进了正文，而不是留在某段源文本里
+    expect([...块们[3]!.node.children].map((n) => n.type.name)).toEqual([
+      "mdParagraph",
+      "mdItem",
+      "mdItem",
+    ]);
+    expect(块们[4]!.node.textContent).toBe("懒惰续行\n仍然属于上面这个引用。");
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
@@ -2095,13 +2196,14 @@ describe("引用账本：前缀进账本，点进去仍是同一段正文", () =
   it("改一个字再改回去，前缀与块锚都还在原来的位置", () => {
     const { doc, src } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 首 = 引述块(editor)[0]!;
-    editor.view.dispatch(editor.state.tr.insertText("X", 首.pos + 1));
+    const 首 = 引述们(editor)[0]!;
+    // 引用 → 段落 → 文字：块起点 +2 才是第一个字符
+    editor.view.dispatch(editor.state.tr.insertText("X", 首.pos + 2));
     const 改过 = docToMarkdown(editor.state.doc, doc);
     expect(改过).toContain("> X普通引用的第一行。");
     expect(改过).toContain("^b-x1y2z3a4b5");
     expect(改过.match(/\^b-x1y2z3a4b5/g)).toHaveLength(1);
-    editor.view.dispatch(editor.state.tr.delete(首.pos + 1, 首.pos + 2));
+    editor.view.dispatch(editor.state.tr.delete(首.pos + 2, 首.pos + 3));
     expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
     editor.destroy();
   });
@@ -2109,8 +2211,8 @@ describe("引用账本：前缀进账本，点进去仍是同一段正文", () =
   it("Callout 的标题是正文，`[!type]` 只在账本里，改字不会复制第二份", () => {
     const { doc } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 标 = 引述块(editor).find((b) => b.kind === "callout")!;
-    editor.view.dispatch(editor.state.tr.insertText("X", 标.pos + 1));
+    const 标 = 引述们(editor).find((b) => b.node.attrs.mdKind === "callout")!;
+    editor.view.dispatch(editor.state.tr.insertText("X", 标.pos + 2));
     const 出 = docToMarkdown(editor.state.doc, doc);
     expect(出.match(/\[!question\]/g)).toHaveLength(1);
     expect(出).toContain("> [!question] X打扰预算是多少？");
@@ -2118,19 +2220,34 @@ describe("引用账本：前缀进账本，点进去仍是同一段正文", () =
     editor.destroy();
   });
 
-  it("剪贴板的 renderHTML / parseHTML 把前缀账本带回来", () => {
+  it("空引用（只有 `>`）拼不回正文，继续按源文本回显", () => {
+    const { doc, src } = load("06-插入骨架");
+    const editor = createTestEditor(doc);
+    const 空 = 不透明块(editor).find((b) => b.kind === "quote");
+    expect(空).toBeTruthy();
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("剪贴板认回 mdQuote：类型与标题都在，前缀由序列化器重新起头", () => {
     const { doc } = load("04-引用与标注");
     const editor = createTestEditor(doc);
-    const 标 = 引述块(editor).find((b) => b.kind === "callout")!;
+    const 标 = 引述们(editor).find((b) => b.node.attrs.mdKind === "callout")!;
     const 块 = editor.state.doc.nodeAt(标.pos)!;
     const 包装 = document.createElement("div");
     包装.append(DOMSerializer.fromSchema(editor.state.schema).serializeNode(块));
     const 回 = DOMParser.fromSchema(editor.state.schema).parse(包装);
     const 新 = 回.firstChild!;
-    expect(新.type.name).toBe("mdOpaque");
-    expect(新.attrs.mdQuoteMarks).toBe(块.attrs.mdQuoteMarks);
-    expect(新.attrs.mdQuoteAnchor).toBe(块.attrs.mdQuoteAnchor);
+    expect(新.type.name).toBe("mdQuote");
+    expect(新.attrs.mdKind).toBe("callout");
+    expect(新.attrs.mdCalloutType).toBe("question");
+    expect(新.attrs.mdCalloutFolded).toBe(false);
+    expect(新.firstChild!.type.name).toBe("mdQuoteHead");
+    expect(新.firstChild!.textContent).toBe("打扰预算是多少？");
     expect(新.textContent).toBe(块.textContent);
+    // 剪贴板不可信：前缀账本与块锚不跟着 HTML 走，粘出来的块按 `[!type]` 与 `> ` 重新起头
+    expect(新.attrs.mdQuoteMarks).toBe("");
+    expect(新.attrs.mdQuoteAnchor).toBe("");
     editor.destroy();
   });
 });

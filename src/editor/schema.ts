@@ -10,6 +10,7 @@ import {
   enterCell,
   exitTableDown,
   exitOpaqueDown,
+  exitQuoteDown,
   带围栏,
   moveCell,
   moveCurrentBlock,
@@ -24,6 +25,8 @@ import {
   全选档,
   列表回车,
   列表退格,
+  引用回车,
+  引用退格,
   列表跳过说明,
   点待办前缀,
   设列表,
@@ -104,6 +107,15 @@ const mdAttributes: Attributes = {
   mdQuoteMarks: { default: "" },
   /** 从末行摘下的块锚，含前面的空白。空串 = 这块没有行尾锚，或锚还在正文里。 */
   mdQuoteAnchor: { default: "" },
+  /**
+   * 结构化引用的行尾格式：`\r\n` / `\n`，以及末行是否还带着那个 `\r`。
+   * 前缀账本只管"每行前面是什么"，行尾这两笔不记下来，CRLF 文件改一个字就整块换形。
+   */
+  mdQuoteEol: { default: "\n" },
+  mdQuoteTail: { default: "" },
+  /** Callout 的类型与折叠标记（`> [!note]-`）。普通引用是空串 / false。 */
+  mdCalloutType: { default: "" },
+  mdCalloutFolded: { default: false },
 };
 
 /** 每个 md* 属性都是编辑器的私有账本，不进 DOM；行内字段额外带一份成 `data-fields` */
@@ -811,6 +823,156 @@ class OpaqueView implements NodeView {
     this.view.focus();
   }
 }
+
+/**
+ * 结构化引用 / Callout 的标题行。单独一个节点是为了让"标题"和"正文段落"在编辑面
+ * 各占一行，而且回车时能明确地"从标题落到正文"——把它们塞进同一个段落就分不清了。
+ *
+ * 不带任何账本属性：标题的 `[!type]` 前缀住在父节点的 `mdQuoteMarks` 里。
+ */
+export const MdQuoteHead = Node.create({
+  name: "mdQuoteHead",
+  content: "inline*",
+  defining: true,
+  parseHTML() {
+    return [{ tag: "div[data-md-quote-head]" }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ["div", { ...domAttrs(HTMLAttributes), "data-md-quote-head": "" }, 0];
+  },
+});
+
+/**
+ * 引用 / Callout 的结构化节点（docs/02 D42 / D43）。
+ *
+ * 与 `mdOpaque` 的区别只有一条：**正文是真正可编辑的段落 / 列表**，而不是一段源文本。
+ * 每行前面的 `>`、Callout 的 `[!type]`、行尾块锚仍在 `md*` 账本里，保存时按行拼回去。
+ * 拼不回去的块在 `quoteStructured.ts` 里就被挡在门外，继续走 `mdOpaque`。
+ */
+class QuoteView implements NodeView {
+  dom: HTMLElement;
+  contentDOM: HTMLElement;
+  private 牌: HTMLButtonElement | null = null;
+  private 节点: PmNode;
+
+  constructor(node: PmNode, 属性: Record<string, unknown>) {
+    this.节点 = node;
+    const 型 = String(node.attrs.mdKind ?? "quote");
+    if (型 === "callout") {
+      const dom = document.createElement("div");
+      dom.className = "callout md-quote";
+      for (const [k, v] of Object.entries(属性)) {
+        if (k.startsWith("md") || v === null || v === undefined) continue;
+        dom.setAttribute(k, String(v));
+      }
+      const 牌 = document.createElement("button");
+      牌.type = "button";
+      牌.className = "cal-badge";
+      牌.setAttribute("aria-label", "折叠 / 展开");
+      // 折叠是**显示态**：只改 DOM 属性，不发事务、也不写回 `[!type]-`（与显示形同一条）
+      牌.addEventListener("mousedown", (e) => e.preventDefault());
+      牌.addEventListener("click", () => {
+        if (dom.dataset["folded"]) delete dom.dataset["folded"];
+        else dom.dataset["folded"] = "1";
+      });
+      const 身 = document.createElement("div");
+      身.className = "cal-body";
+      dom.append(牌, 身);
+      this.dom = dom;
+      this.contentDOM = 身;
+      this.牌 = 牌;
+      if (node.attrs.mdCalloutFolded) dom.dataset["folded"] = "1";
+    } else {
+      const dom = document.createElement("blockquote");
+      dom.className = "quote md-quote";
+      for (const [k, v] of Object.entries(属性)) {
+        if (k.startsWith("md") || v === null || v === undefined) continue;
+        dom.setAttribute(k, String(v));
+      }
+      this.dom = dom;
+      this.contentDOM = dom;
+    }
+    this.同步(node);
+  }
+
+  private 同步(node: PmNode): void {
+    this.节点 = node;
+    const 型 = String(node.attrs.mdKind ?? "quote");
+    this.dom.dataset["mdQuote"] = 型 === "callout" ? "callout" : "quote";
+    const 类 = String(node.attrs.mdCalloutType ?? "").toLowerCase();
+    if (型 === "callout" && 类) this.dom.dataset["callout"] = 类;
+    else delete this.dom.dataset["callout"];
+    if (this.牌) this.牌.textContent = 类;
+  }
+
+  update(node: PmNode): boolean {
+    if (node.type.name !== "mdQuote") return false;
+    this.同步(node);
+    return true;
+  }
+
+  stopEvent(ev: Event): boolean {
+    const 目标 = ev.target;
+    return 目标 instanceof Element && 目标.closest(".cal-badge") !== null;
+  }
+
+  ignoreMutation(mut: ViewMutationRecord): boolean {
+    const 目标 = mut.target as globalThis.Node;
+    return !(目标 === this.contentDOM || this.contentDOM.contains(目标));
+  }
+
+  selectNode(): void {
+    this.dom.dataset.mdSel = "";
+  }
+  deselectNode(): void {
+    delete this.dom.dataset.mdSel;
+  }
+}
+
+export const MdQuote = Node.create({
+  name: "mdQuote",
+  group: "block",
+  content: "(mdParagraph | mdHeading | mdItem | mdQuoteHead)+",
+  defining: true,
+  isolating: true,
+  addAttributes() {
+    return mdAttributes;
+  },
+  parseHTML() {
+    return [
+      {
+        tag: "blockquote[data-md-quote]",
+        getAttrs: (el) => {
+          const 元 = el as HTMLElement;
+          const 标 = 元.getAttribute("data-callout") ?? "";
+          return {
+            mdKind: 元.getAttribute("data-md-quote") === "callout" ? "callout" : "quote",
+            // 剪贴板不可信：类型只收字母与连字符，别的一律当普通引用
+            mdCalloutType: /^[A-Za-z-]+$/.test(标) ? 标 : "",
+            mdCalloutFolded: 元.hasAttribute("data-md-folded"),
+          };
+        },
+      },
+    ];
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    const 型 = String(node.attrs.mdKind ?? "quote");
+    const 类 = String(node.attrs.mdCalloutType ?? "");
+    return [
+      "blockquote",
+      {
+        ...domAttrs(HTMLAttributes),
+        "data-md-quote": 型 === "callout" ? "callout" : "quote",
+        ...(型 === "callout" && /^[A-Za-z-]+$/.test(类) ? { "data-callout": 类 } : {}),
+        ...(node.attrs.mdCalloutFolded ? { "data-md-folded": "" } : {}),
+      },
+      0,
+    ];
+  },
+  addNodeView() {
+    return ({ node, HTMLAttributes }) => new QuoteView(node, HTMLAttributes);
+  },
+});
 
 export const MdOpaque = Node.create({
   name: "mdOpaque",
@@ -1583,7 +1745,12 @@ export const BlockKeys = Extension.create({
           handleKeyDown(view, event) {
             if (!view.editable || event.isComposing || event.keyCode === 229) return false;
             if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
-            const 做 = event.key === "Enter" ? 列表回车 : event.key === "Backspace" ? 列表退格 : null;
+            const 做 =
+              event.key === "Enter"
+                ? (s: EditorState) => 列表回车(s) ?? 引用回车(s)
+                : event.key === "Backspace"
+                  ? (s: EditorState) => 列表退格(s) ?? 引用退格(s)
+                  : null;
             if (!做) return false;
             const tr = 做(view.state);
             if (!tr) return false;
@@ -2121,7 +2288,9 @@ export const TableKeys = Extension.create({
       // 格子里的 Enter 归表格；选中的是图片块时 Enter 是"下去"，两条串在同一个键上，
       // 同一个键在两个扩展里各绑一次的话谁赢取决于注册顺序，那是查不动的东西
       Enter: 走((s) => enterCell(s) ?? 图片下出口(s)),
-      ArrowDown: 走((s) => exitTableDown(s) ?? exitOpaqueDown(s) ?? 图片下出口(s)),
+      ArrowDown: 走(
+        (s) => exitTableDown(s) ?? exitOpaqueDown(s) ?? exitQuoteDown(s) ?? 图片下出口(s),
+      ),
       /**
        * 框了多格时 `Delete` / `Backspace` 清空所选的每一格——与电子表格一致，也是用户
        * 框完最自然按下去的那一键。**没框多格就返回 false**：单格时那两键仍是删字符，
@@ -2246,6 +2415,8 @@ export const mdExtensions = [
   MdParagraph,
   MdHeading,
   MdItem,
+  MdQuoteHead,
+  MdQuote,
   MdOpaque,
   MdDivider,
   MdImage,
