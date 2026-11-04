@@ -5,6 +5,8 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   applyBlockAlign,
   applyBlockType,
+  块转换位置,
+  在引用里,
   BLOCK_ALIGNS,
   BLOCK_TYPES,
   cellAt,
@@ -437,10 +439,11 @@ export function BlockEditor({
       if (!host) return;
       const c = editor.view.coordsAtPos(pos);
       const $p = editor.state.doc.resolve(pos);
+      // 引用里落到光标所在的子块上：`/` 就打在它身上，菜单选类型也只该换它
       setMenu({
         top: c.bottom - host.top + 6,
         left: c.left - host.left,
-        start: $p.depth ? $p.before(1) : 0,
+        start: $p.depth ? 块转换位置($p) : 0,
         dropSlash: pos,
       });
     };
@@ -745,7 +748,15 @@ export function BlockEditor({
     const { state } = editor;
     // 与输入规则、顶部工具栏共用 applyBlockType。`/` 是菜单的触发符，选中类型后就是
     // 垃圾字符必须吃掉；它在记录位置的**后面**，删错方向就等于删块边界。
-    let tr = applyBlockType(state, menu.start, id) ?? state.tr;
+    //
+    // 手柄菜单开在整段引用上时 applyBlockType 给 null（引用不能原地换类型，D43）。
+    // 这里必须说一句话——否则点了菜单没反应，看起来就是坏了。
+    const 块 = state.doc.nodeAt(menu.start);
+    const 换 = applyBlockType(state, menu.start, id);
+    let tr = 换 ?? state.tr;
+    if (!换 && 块?.type.name === "mdQuote") {
+      noticeRef.current?.("引用不能原地换类型——先点进正文改里面的那一块");
+    }
     const p = menu.dropSlash;
     if (p !== undefined && state.doc.textBetween(p, p + 1) === "/") tr = tr.delete(p, p + 1);
     if (tr.docChanged) editor.view.dispatch(tr.scrollIntoView());
@@ -761,6 +772,13 @@ export function BlockEditor({
   const applyInsert = (kind: string, source: string) => {
     if (!menu) return;
     const { state } = editor;
+    // `/` 菜单开在引用里的子块上时，插入的是代码 / 表格 / 引用这类整块——
+    // 引用的内容规只收段落 / 标题 / 列表项，塞不进去（会在 setNodeMarkup 上抛错）
+    if (menu.dropSlash !== undefined && 在引用里(state, menu.start)) {
+      noticeRef.current?.("引用里不能插入这类整块——先回到正文");
+      setMenu(null);
+      return;
+    }
     const tr =
       menu.dropSlash !== undefined
         ? replaceBlockWithSource(state, menu.start, kind, source)

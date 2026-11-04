@@ -8,6 +8,7 @@ import {
   addRow,
   applyBlockAlign,
   applyBlockType,
+  块转换起点,
   cellAt,
   INSERTABLE,
   insertSourceBlock,
@@ -173,8 +174,10 @@ export function Toolbar({ editor }: { editor: Editor }) {
   };
 
   const setType = (id: BlockTypeId) => {
-    if (!$from.depth) return;
-    const tr = applyBlockType(editor.state, $from.before(1), id);
+    // 引用里改的是光标所在的子块；整段引用不能换类型（D43）
+    const 位 = 块转换起点(editor.state);
+    if (位 === null) return;
+    const tr = applyBlockType(editor.state, 位, id);
     if (tr) editor.view.dispatch(tr.scrollIntoView());
   };
   const 做块对齐 = (对: BlockAlign) => {

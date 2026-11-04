@@ -318,6 +318,17 @@ export function serializeInline(node: PmNode): string {
 
 /** 按固定层序给一段文字上标记。PM 的 mark 与源文本解析出来的 `InlineMark` 共用这一份 */
 function 包一段(text: string, marks: 标记[]): string {
+  /**
+   * 软换行可以落在带标记的文字里（结构化引用里回车就是这么插的），但开闭符号不能被
+   * 换行劈开：`**甲\n乙**` 我们自己的解析器不认（`parseInline` 要求体内没有空白），
+   * 保存一次加粗就没了。按行拆开、每行各包一份，换行留在标记外，才是能读回来的写法。
+   */
+  if (text.includes("\n")) {
+    return text
+      .split("\n")
+      .map((段) => (段 === "" ? "" : 包一段(段, marks)))
+      .join("\n");
+  }
   for (const mark of marks) {
     switch (mark.name) {
       case "bold":

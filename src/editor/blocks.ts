@@ -666,11 +666,15 @@ export function blockTypePatch(
 ): { typeName: string; attrs: Record<string, unknown> } | null {
   // 表格、不透明块与分隔线都不给转：序列化器没有"把一张表变成段落"这条路，
   // 允许转就是把用户的表格洗成一行 `|` 文本（D27 判死的正是这种）；分隔线是原子块，
-  // 转成文字块等于把它悄悄删掉
+  // 转成文字块等于把它悄悄删掉。结构化引用本身也不给转：它的内容规只收子块，
+  // 换成任何行内块/列表都会在 `setNodeMarkup` 里抛 RangeError（引用里的子块由调用方
+  // 按深度定位后单独转换，见 `块转换位置`）。
   if (
     node.type.name === "mdOpaque" ||
     node.type.name === "mdTable" ||
-    node.type.name === "mdDivider"
+    node.type.name === "mdDivider" ||
+    node.type.name === "mdQuote" ||
+    node.type.name === "mdQuoteHead"
   )
     return null;
   const 清场 = { mdKind: "paragraph", mdLevel: null, mdChecked: null };
@@ -711,8 +715,11 @@ function 是可转块(node: PmNode): boolean {
 
 /** 顶层块起点的前一块。`pos` 必须是那一块自己的起点 */
 function 前驱于(doc: PmNode, pos: number): PmNode | null {
-  const i = doc.resolve(Math.max(0, pos)).index(0);
-  return i > 0 ? (doc.child(i - 1) ?? null) : null;
+  // 位置可能落在结构化引用的子块上：`index(0)` 只看顶层，会把引用前面那一块
+  // 当成它的前驱。按解析出来的深度取同一层的兄弟才是对的。
+  const $ = doc.resolve(Math.max(0, pos));
+  const i = $.index($.depth);
+  return i > 0 ? ($.node($.depth).child(i - 1) ?? null) : null;
 }
 
 /**
@@ -878,8 +885,10 @@ export function 点待办前缀(view: EditorView, event: MouseEvent): boolean {
   }
   if (内 < 0) return false;
   const $ = view.state.doc.resolve(内);
-  if ($.depth < 1 || $.node(1).type.name !== "mdItem") return false;
-  const tr = 切换待办勾选(view.state, $.before(1));
+  // 列表项也可能在结构化引用里（引用 → mdItem）：按光标所在那一层的节点判，
+  // 写死 node(1) 在引用里拿到的是 mdQuote，点复选框就永远没反应
+  if ($.depth < 1 || $.node($.depth).type.name !== "mdItem") return false;
+  const tr = 切换待办勾选(view.state, $.before($.depth));
   if (!tr) return false;
   event.preventDefault();
   view.dispatch(tr);
@@ -1009,18 +1018,45 @@ function 引用起点(state: EditorState): number | null {
 }
 
 /**
+ * 换块类型 / 清除格式该动哪一块。顶层就是这一整块；结构化引用里是**光标所在的子块**——
+ * 整段引用没有"换成标题"这条路（内容规只收子块），输入规则、斜杠菜单、工具栏与样式命令
+ * 都必须落到子块上，否则 `setNodeMarkup` 直接抛 RangeError（docs/02 D43）。
+ */
+export function 块转换位置($: ResolvedPos): number {
+  return $.node(1).type.name === "mdQuote" ? $.before($.depth) : $.before(1);
+}
+
+/** `块转换位置` 的选区版本；光标不在任何块里给 null（顶层与引用内都适用）。 */
+export function 块转换起点(state: EditorState): number | null {
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  return 块转换位置($from);
+}
+
+/** 这个位置是否落在结构化引用里（`menu.start` 站在引用的子块边界上也算）。 */
+export function 在引用里(state: EditorState, pos: number): boolean {
+  const $ = state.doc.resolve(pos);
+  return $.depth >= 1 && $.node(1).type.name === "mdQuote";
+}
+
+/**
  * 结构化引用里的回车。
  *
- * - 正文段落：插一个软换行 `\n`。引用里"下一行"在内核看来就是同一段的续行
+ * - 正文段落中间：插一个软换行 `\n`。引用里"下一行"在内核看来就是同一段的续行
  *   （夹具 04 的懒惰续行就是这个形状），拆成两个段落反而会在保存后并回去。
+ * - 正文段落末尾：拆出一个同类型段落。软换行落在段尾时屏幕上**看不见光标**（CSS 的
+ *   `pre-wrap` 不会为末尾换行多出一行），接着打的字还插在换行前面；落盘还会多一条
+ *   `> `，内核把空行并进上一段的 `raw`，下次载入整块掉出结构化。所以只有段中才插 `\n`。
  * - 标题 / Callout 标题行：拆出一个正文段落。标题在文件里只占一行，回车就是"标题写完了"。
- * - 列表项交给 `列表回车`；跨块选区交回默认。
+ * - 列表项交给 `列表回车`；跨块选区交回默认（`列表回车` 同一条守卫）。
  */
 export function 引用回车(state: EditorState): Transaction | null {
   const sel = state.selection;
   if (!(sel instanceof TextSelection)) return null;
   const 位 = 引用起点(state);
   if (位 === null) return null;
+  // 选区一端在引用里、一端在外面时，"在光标处插一行"会把外面的文字并成引用的续行
+  if (sel.$from.parent !== sel.$to.parent) return null;
   const 段型 = state.schema.nodes.mdParagraph;
   if (!段型) return null;
 
@@ -1029,7 +1065,29 @@ export function 引用回车(state: EditorState): Transaction | null {
   const $ = tr.selection.$from;
   if ($.depth < 2 || $.node(1).type.name !== "mdQuote") return null;
   if ($.parent.type.name === "mdParagraph") {
-    tr.insertText("\n");
+    if ($.parentOffset < $.parent.content.size) {
+      tr.insertText("\n");
+      return tr;
+    }
+    const 落 = [
+      {
+        type: 段型,
+        attrs: {
+          ...$.parent.attrs,
+          mdRaw: "",
+          mdGap: "",
+          mdId: null,
+          mdSig: "",
+          mdFields: [],
+          mdAlign: "",
+          mdLevel: null,
+          mdChecked: null,
+          mdKind: "paragraph",
+        },
+      },
+    ];
+    if (!canSplit(tr.doc, $.pos, 1, 落)) return null;
+    tr.split($.pos, 1, 落);
     return tr;
   }
   if ($.parent.type.name !== "mdHeading" && $.parent.type.name !== "mdQuoteHead") return null;

@@ -2,7 +2,7 @@ import type { ResolvedPos } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { NodeSelection } from "@tiptap/pm/state";
 
-import { applyBlockType, blockTypePatch, type BlockTypeId } from "./blocks";
+import { applyBlockType, blockTypePatch, 块转换位置, type BlockTypeId } from "./blocks";
 import { 调色板, 底色of } from "./colors";
 import { serializeInline } from "./inline";
 import { 引用账本 } from "./quoteFace";
@@ -174,6 +174,8 @@ const 块名表: Record<string, string> = {
   mdOpaque: "代码 / 引用这类源码块",
   mdTable: "表格",
   mdImage: "图片",
+  mdQuote: "引用",
+  mdQuoteHead: "Callout 标题",
 };
 
 const 块名 = (类: string): string => 块名表[类] ?? "这一块";
@@ -246,10 +248,12 @@ export function 应用样式命令(state: EditorState, 锚: 锚, 命: 样式命�
     }
     // 与工具栏的「清除格式」同一条口径：行内样式去掉，块回正文；链接保留
     if ($.depth >= 1) {
-      const 块 = $.node(1);
-      const 补 = blockTypePatch(块, "paragraph");
-      if (补) {
-        tr.setNodeMarkup($.before(1), state.schema.nodes[补.typeName], {
+      // 引用里动的是光标所在的子块，不是整段引用（整段引用换类型会抛 RangeError）
+      const 位 = 块转换位置($);
+      const 块 = state.doc.nodeAt(位);
+      const 补 = 块 ? blockTypePatch(块, "paragraph") : null;
+      if (块 && 补) {
+        tr.setNodeMarkup(位, state.schema.nodes[补.typeName], {
           ...块.attrs,
           ...补.attrs,
         });
@@ -261,10 +265,14 @@ export function 应用样式命令(state: EditorState, 锚: 锚, 命: 样式命�
 
   if (命.类 === "块") {
     if ($.depth < 1) return { tr: null, 说明: "光标不在正文块里，改不了块类型" };
-    const 块 = $.node(1);
-    const tr = applyBlockType(state, $.before(1), 命.型);
+    const 位 = 块转换位置($);
+    const 块 = state.doc.nodeAt(位) ?? $.node(1);
+    const tr = applyBlockType(state, 位, 命.型);
     if (!tr) {
-      const 不能 = 块.type.name !== "mdParagraph" && 块.type.name !== "mdHeading" && 块.type.name !== "mdItem";
+      const 不能 =
+        块.type.name !== "mdParagraph" &&
+        块.type.name !== "mdHeading" &&
+        块.type.name !== "mdItem";
       return {
         tr: null,
         说明: 不能
@@ -282,14 +290,20 @@ export function 应用样式命令(state: EditorState, 锚: 锚, 命: 样式命�
 /**
  * 段落 / 标题 / 列表项 → 引用。
  *
- * 引用在我们的模型里是 `mdOpaque`（正文就是自己的源文本），块锚点写在行内末尾
- * （`> … ^b-id`），所以不能走 `replaceBlockWithSource`：那条路会给新块一份空账本，
- * 再补一个落脚点段落——转一次引用就把块 ID 和原来那一行的排版都换掉了。
+ * 新建时先落成 `mdOpaque`（正文就是自己的源文本，带账本），下一次载入由
+ * `引用接管` 翻成结构化引用。块锚点写在行内末尾（`> … ^b-id`），所以不能走
+ * `replaceBlockWithSource`：那条路会给新块一份空账本，再补一个落脚点段落——
+ * 转一次引用就把块 ID 和原来那一行的排版都换掉了。
  * 这里直接建节点，沿用它自己的 `mdRaw` / `mdGap`（换内容不改排版），只把 `mdSig` 清空
  * 让保存时按新正文重新产出。
  */
 function 转引用(state: EditorState, $: ResolvedPos, 字: number): 应用果 {
   if ($.depth < 1) return { tr: null, 说明: "光标不在正文块里，变不成引用" };
+  // 引用里不能再套一层：内核的 `take_quote` 把嵌套引用当不可表示的形状，
+  // 写出去也只能退回源文本面，不如直接说清楚
+  if ($.node(1).type.name === "mdQuote") {
+    return { tr: null, 说明: "引用里不能再套一层引用" };
+  }
   const 块 = $.node(1);
   if (块.type.name !== "mdParagraph" && 块.type.name !== "mdHeading" && 块.type.name !== "mdItem") {
     return { tr: null, 说明: `${块名(块.type.name)}不能变成引用` };

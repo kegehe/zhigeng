@@ -1,7 +1,7 @@
 import { Editor } from "@tiptap/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { 底色of, 调色板 } from "./colors";
-import { inlineToJson, parseInline, serializeInline } from "./inline";
+import { inlineToJson, parseInline, serializeInline, 序列化行内文本 } from "./inline";
 import { mdExtensions } from "./schema";
 
 // 用例里的色值从调色板取，不写字面量：两者不同源的话，"界面上是红的、落盘是另一个红"
@@ -149,5 +149,56 @@ describe("颜色与高亮", () => {
       ["红", ["textColor"]],
     ]);
     expect(段[2]!.marks[0]!.color).toBe(红);
+  });
+});
+
+/**
+ * 软换行（结构化引用里回车插的那个 `\n`）可以落在带标记的文字里。开闭符号不能被
+ * 换行劈开——`**甲\n乙**` 我们自己的解析器不认，保存一次加粗就没了（D43）。
+ */
+describe("软换行与行内标记", () => {
+  function 装段(内容: unknown[]): Editor {
+    const el = document.createElement("div");
+    document.body.append(el);
+    const editor = new Editor({
+      element: el,
+      extensions: mdExtensions,
+      content: { type: "doc", content: [{ type: "mdParagraph", content: 内容 }] } as never,
+    });
+    编辑器.push(editor);
+    return editor;
+  }
+
+  it("跨行的加粗按行拆开，换行留在标记外", () => {
+    const editor = 装段([{ type: "text", marks: [{ type: "bold" }], text: "甲\n乙" }]);
+    const 出 = serializeInline(editor.state.doc.firstChild!);
+    expect(出).toBe("**甲**\n**乙**");
+    expect(parseInline(出).map((n) => [n.text, n.marks.map((m) => m.name)])).toEqual([
+      ["甲", ["bold"]],
+      ["\n", []],
+      ["乙", ["bold"]],
+    ]);
+    expect(序列化行内文本(出)).toBe(出);
+  });
+
+  it("行尾换行也拆开：不会写出收口在下一行的 `**甲乙\n**`", () => {
+    const editor = 装段([{ type: "text", marks: [{ type: "bold" }], text: "甲乙\n" }]);
+    expect(serializeInline(editor.state.doc.firstChild!)).toBe("**甲乙**\n");
+  });
+
+  it("同一段字上的颜色 / 高亮同样按行拆", () => {
+    const editor = 装段([
+      {
+        type: "text",
+        marks: [
+          { type: "highlight" },
+          { type: "textColor", attrs: { color: 红 } },
+        ],
+        text: "甲\n乙",
+      },
+    ]);
+    expect(serializeInline(editor.state.doc.firstChild!)).toBe(
+      `<span style="color:${红}">==甲==</span>\n<span style="color:${红}">==乙==</span>`,
+    );
   });
 });

@@ -36,7 +36,13 @@ function 字段尾(字段: [string, string][]): string {
 }
 
 function 子行(d: 子描述): string[] {
-  if (d.型 === "mdParagraph") return d.文.split("\n");
+  if (d.型 === "mdParagraph") {
+    const 行 = d.文.split("\n");
+    // 行内字段挂在段落最后一行末尾；与标题 / 列表同一条写法，否则带 `due::` 的
+    // 引用段落永远过不了判据、只能退回源文本面
+    if (d.字段.length) 行[行.length - 1] += 字段尾(d.字段);
+    return 行;
+  }
   if (d.型 === "mdHeading") {
     const 级 = Math.min(6, Math.max(1, d.级));
     return [`${"#".repeat(级)} ${d.文}${字段尾(d.字段)}`];
@@ -249,6 +255,12 @@ export function 序列化引用块(node: PmNode): string {
     const 描述 = 节点描述(子);
     行.push(...隔行(描述.隔), ...子行(描述));
   }
+  /**
+   * 末尾的空段落不落字节（与顶层"空白块不写"同一条规矩）：回车拆出来的那一半在用户
+   * 打字之前就是空的，写出去只是一条 `> `——内核载入时把它并进上一段的 `raw`，
+   * 整块反而掉出结构化。中间的空行不是空段落，而是下一子的 `mdGap`，不受影响。
+   */
+  while (行.length && 行[行.length - 1] === "") 行.pop();
   const 正文 = 头 ? [serializeInline(头), ...行] : 行;
   const 身 = 正文.join(eol) + tail;
 

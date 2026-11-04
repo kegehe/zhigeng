@@ -7,6 +7,9 @@ import type { EditorView, NodeView, ViewMutationRecord } from "@tiptap/pm/view";
 import { history, redo, undo } from "@tiptap/pm/history";
 import {
   applyBlockType,
+  块转换起点,
+  块转换位置,
+  在引用里,
   enterCell,
   exitTableDown,
   exitOpaqueDown,
@@ -907,6 +910,11 @@ class QuoteView implements NodeView {
 
   update(node: PmNode): boolean {
     if (node.type.name !== "mdQuote") return false;
+    // 普通引用与 Callout 的 DOM 结构不同（badge、.cal-body）。kind 一变就得让 PM
+    // 重建 NodeView——Return true 只会改 data 属性，屏幕上看不到 badge，还是旧壳子。
+    if (String(node.attrs.mdKind ?? "quote") !== String(this.节点.attrs.mdKind ?? "quote")) {
+      return false;
+    }
     this.同步(node);
     return true;
   }
@@ -1649,6 +1657,47 @@ export const BlockIdGuard = Extension.create({
   },
 });
 
+/**
+ * Callout 的标题行被整个删掉时兜底。
+ *
+ * 保存时第一行带 `[!type]` 的就是标题——标题节点没了，正文第一段会**接任标题**
+ * （`> [!note] 正文`）。用户只是删了一行，语义却悄悄变了。这里把整块退回普通引用：
+ * 类型与账本首行一起改掉（账本才是落盘的权威），文字一个不少。
+ */
+export const CalloutGuard = Extension.create({
+  name: "calloutGuard",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        appendTransaction: (steps, _old, state) => {
+          if (!steps.some((tr) => tr.docChanged)) return undefined;
+          let tr: Transaction | null = null;
+          state.doc.forEach((node, pos) => {
+            if (node.type.name !== "mdQuote") return;
+            if (!String(node.attrs.mdCalloutType ?? "")) return;
+            let 有头 = false;
+            node.forEach((孩子) => {
+              if (孩子.type.name === "mdQuoteHead") 有头 = true;
+            });
+            if (有头) return;
+            const 缀 = String(node.attrs.mdQuoteMarks ?? "").split("\n");
+            // Callout 的首行前缀是 `> [!type] `；退回普通引用只保留 `>` 那一截
+            缀[0] = /^(\s{0,3}>\s*)/.exec(缀[0] ?? "")?.[1] ?? "> ";
+            tr = (tr ?? state.tr).setNodeMarkup(pos, undefined, {
+              ...node.attrs,
+              mdKind: "quote",
+              mdCalloutType: "",
+              mdCalloutFolded: false,
+              mdQuoteMarks: 缀.join("\n"),
+            });
+          });
+          return tr ?? undefined;
+        },
+      }),
+    ];
+  },
+});
+
 /** 撤销栈直接用 ProseMirror 自己的 history，不经过任何第三方封装 */
 export const History = Extension.create({
   name: "history",
@@ -1695,9 +1744,10 @@ export const BlockKeys = Extension.create({
   addKeyboardShortcuts() {
     const setType = (id: BlockTypeId) => ({ editor }: { editor: Editor }) => {
       const { state } = editor;
-      const { $from } = state.selection;
-      if (!$from.depth) return false;
-      const tr = applyBlockType(state, $from.before(1), id);
+      // 结构化引用里转的是光标所在的子块，不是整段引用（后者内容规不答应，见 D43）
+      const 位 = 块转换起点(state);
+      if (位 === null) return false;
+      const tr = applyBlockType(state, 位, id);
       if (!tr) return false;
       editor.view.dispatch(tr.scrollIntoView());
       return true;
@@ -2212,7 +2262,9 @@ export const BlockTools = Extension.create({
             if (text === " ") {
               const $pos = view.state.doc.resolve(from);
               if ($pos.depth === 0) return false;
-              const start = $pos.before(1);
+              // 引用里落到光标所在的子块上：拿整段引用的位置既读不对前缀，
+              // 换类型那一步也会在内容规上抛 RangeError（D43）
+              const start = 块转换位置($pos);
               const node = view.state.doc.nodeAt(start);
               if (!node) return false;
               const 前缀 = node.textBetween(0, from - start - 1, undefined, "￼");
@@ -2223,6 +2275,16 @@ export const BlockTools = Extension.create({
                * 产出同一份字节，否则一边绿一边坏。
                */
               if (前缀 === "```") {
+                // 引用的内容规只收子块，代码块放不进去：说清楚，别把整段引用换掉
+                if ($pos.node(1).type.name === "mdQuote") {
+                  view.dom.dispatchEvent(
+                    new CustomEvent("md-notice", {
+                      detail: "引用里放不了代码块——先把它变成普通正文",
+                      bubbles: true,
+                    }),
+                  );
+                  return false;
+                }
                 const 换 = replaceBlockWithSource(view.state, start, "code", "```\n\n```");
                 if (!换) return false;
                 view.dispatch(换.scrollIntoView());
@@ -2240,7 +2302,8 @@ export const BlockTools = Extension.create({
             if (text === "/") {
               const $pos = view.state.doc.resolve(from);
               if ($pos.depth === 0) return false;
-              const node = view.state.doc.nodeAt($pos.before(1));
+              // 引用里看的是光标所在的子块：拿整段引用判"空不空"永远不为空，菜单就打不开
+              const node = view.state.doc.nodeAt(块转换位置($pos));
               if (!node || node.type.name === "mdOpaque") return false;
               // 只在空块的行首唤出菜单；句中打斜杠就是打斜杠
               if (node.textContent.trim() !== "" || $pos.parentOffset !== 0) return false;
@@ -2434,6 +2497,7 @@ export const mdExtensions = [
   MdBgColor,
   MdLink,
   BlockIdGuard,
+  CalloutGuard,
   BlockTools,
   BlockKeys,
   BlockSelectAll,

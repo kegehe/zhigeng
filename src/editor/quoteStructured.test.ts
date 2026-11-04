@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EditBlock } from "../ipc/types";
-import { docToMarkdown, exitQuoteDown, 列表回车, 列表退格, 引用回车, 引用退格 } from "./blocks";
+import { docToMarkdown, exitQuoteDown, applyBlockType, 块转换起点, 列表回车, 列表退格, 引用回车, 引用退格, 点待办前缀 } from "./blocks";
 import { 引用接管 } from "./quoteStructured";
 import { createTestEditor } from "./testEditor";
 import type { EditDoc } from "./blocks";
@@ -362,6 +362,114 @@ describe("结构化引用里的键盘", () => {
     expect(退).not.toBeNull();
     editor.view.dispatch(退!);
     expect(editor.state.doc.firstChild!.child(1).type.name).toBe("mdParagraph");
+    editor.destroy();
+  });
+});
+
+describe("D43 复查：引用内的边界", () => {
+  it("段落末尾回车拆子块：空行不落盘，接着打字才占一行", () => {
+    const doc = 文档([引({ raw: "> 甲\n", children: [文()] })]);
+    const editor = createTestEditor(doc);
+    const 位 = 顶层(editor, "mdQuote");
+    // 引用 → 段落 → 文字：+2 是第一个字，+1 到段尾
+    editor.commands.setTextSelection(位 + 2 + 1);
+    const tr = 引用回车(editor.state);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(editor.state.doc.firstChild!.childCount).toBe(2);
+    expect(editor.state.doc.firstChild!.child(1).textContent).toBe("");
+    // 空段落不写字节：文件里不该多出一条 `> `
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("> 甲\n");
+    // 光标在新段里，接着打的字落在新的一行
+    editor.view.dispatch(editor.state.tr.insertText("乙"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("> 甲\n> 乙\n");
+    editor.destroy();
+  });
+
+  it("段中回车仍是软换行；跨行加粗按行拆开，落盘可读回", () => {
+    const doc = 文档([引({ raw: "> 甲乙\n", children: [文({ raw: "甲乙\n", content: "甲乙" })] })]);
+    const editor = createTestEditor(doc);
+    const 位 = 顶层(editor, "mdQuote");
+    const 粗 = editor.state.schema.marks.bold!.create();
+    editor.view.dispatch(editor.state.tr.addMark(位 + 2, 位 + 4, 粗));
+    editor.commands.setTextSelection(位 + 2 + 1);
+    editor.view.dispatch(引用回车(editor.state)!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("> **甲**\n> **乙**\n");
+    editor.destroy();
+  });
+
+  it("引用里的子块能换类型；整段引用本身不换，也不抛错", () => {
+    const doc = 文档([引({ raw: "> 甲\n", children: [文()] })]);
+    const editor = createTestEditor(doc);
+    const 位 = 顶层(editor, "mdQuote");
+    editor.commands.setTextSelection(位 + 2);
+    const 标 = 块转换起点(editor.state)!;
+    const tr = applyBlockType(editor.state, 标, "heading1");
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("> # 甲\n");
+    expect(applyBlockType(editor.state, 位, "heading1")).toBeNull();
+    editor.destroy();
+  });
+
+  it("引用行首 `# ` 输入规则落到子块上，不再抛 RangeError", () => {
+    const doc = 文档([引({ raw: "> #\n", children: [文({ raw: "#\n", content: "#" })] })]);
+    const editor = createTestEditor(doc);
+    const 位 = 顶层(editor, "mdQuote");
+    editor.commands.setTextSelection(位 + 2 + 1);
+    const 接了 = editor.view.someProp("handleTextInput", (f) =>
+      f(editor.view, 位 + 2 + 1, 位 + 2 + 1, " ", () => editor.state.tr),
+    );
+    expect(接了).toBe(true);
+    expect(editor.state.doc.firstChild!.firstChild!.type.name).toBe("mdHeading");
+    editor.destroy();
+  });
+
+  it("引用里的待办项：点前缀能勾选", () => {
+    const doc = 文档([
+      引({
+        raw: "> - [ ] 甲\n",
+        children: [{ ...文(), kind: "todo", raw: "- [ ] 甲\n", content: "甲", checked: false }],
+      }),
+    ]);
+    const editor = createTestEditor(doc);
+    const 项 = editor.view.dom.querySelector("[data-md-item='todo']") as HTMLElement;
+    expect(项).not.toBeNull();
+    项.style.paddingLeft = "24px";
+    项.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 200, bottom: 24, width: 200, height: 24, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    let 拦住 = false;
+    const 处理了 = 点待办前缀(editor.view, {
+      button: 0,
+      shiftKey: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      clientX: 8,
+      clientY: 8,
+      target: 项,
+      preventDefault() {
+        拦住 = true;
+      },
+    } as unknown as MouseEvent);
+    expect(处理了 && 拦住).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("> - [x] 甲\n");
+    editor.destroy();
+  });
+
+  it("Callout 标题行删掉：整块退回普通引用，正文不接任标题", () => {
+    const doc = 文档([
+      引({ kind: "callout", raw: "> [!note] 标题\n> 甲\n", children: [文()] }),
+    ]);
+    const editor = createTestEditor(doc);
+    const 位 = 顶层(editor, "mdQuote");
+    const 头 = editor.state.doc.firstChild!.firstChild!;
+    expect(头.type.name).toBe("mdQuoteHead");
+    editor.view.dispatch(editor.state.tr.delete(位 + 1, 位 + 1 + 头.nodeSize));
+    const 块 = editor.state.doc.firstChild!;
+    expect(块.attrs.mdKind).toBe("quote");
+    expect(String(块.attrs.mdCalloutType)).toBe("");
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("> 甲\n");
     editor.destroy();
   });
 });

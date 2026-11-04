@@ -170,8 +170,10 @@ export function 刷格式(
   state.doc.forEach((node, offset) => {
     if (offset + node.nodeSize <= from || offset >= to) return;
     const 型 = node.type.name;
-    // 整块不能带行内 mark：代码 / 引用（marks: ""）与原子块（图片 / 分隔线）
-    if (型 === "mdOpaque" || 型 === "mdImage" || 型 === "mdDivider") {
+    // 整块不能带行内 mark：代码 / 引用（marks: ""）与原子块（图片 / 分隔线）。
+    // 结构化引用也一样：它的子块不在顶层遍历里，整段换类型还会在内容规上抛错，
+    // 这里只刷行内格式，块类型算跳过（D43）
+    if (型 === "mdOpaque" || 型 === "mdImage" || 型 === "mdDivider" || 型 === "mdQuote") {
       跳过.add(offset);
       return;
     }
