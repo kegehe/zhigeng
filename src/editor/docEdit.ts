@@ -45,6 +45,7 @@ export function 块类型(node: PmNode): string {
   if (名 === "mdParagraph") return "paragraph";
   if (名 === "mdTable") return "table";
   if (名 === "mdImage") return "image";
+  if (名 === "mdDivider") return "divider";
   if (名 === "mdOpaque") return String(node.attrs.mdKind ?? "raw");
   return 名;
 }
@@ -55,7 +56,7 @@ export function 块文本(node: PmNode): string {
   if (名 === "mdParagraph" || 名 === "mdHeading" || 名 === "mdItem") {
     return serializeInline(node);
   }
-  if (名 === "mdOpaque" || 名 === "mdTable" || 名 === "mdImage") {
+  if (名 === "mdOpaque" || 名 === "mdTable" || 名 === "mdImage" || 名 === "mdDivider") {
     return 块源码(node);
   }
   return node.textContent;
@@ -497,7 +498,11 @@ export function 应用整篇编辑(
   // 落脚点：以表格或围栏收尾的文档没有键盘出口。它不落盘（`docToMarkdown` 空块不写字节），
   // 中途的落脚点已在 `插入节点` 摘掉——正文里不再多出那一行可见的空白。
   const 末 = 结果[结果.length - 1];
-  if (末 && 插入来的.has(末) && (末.type.name === "mdTable" || 末.type.name === "mdOpaque")) {
+  if (
+    末 &&
+    插入来的.has(末) &&
+    (末.type.name === "mdTable" || 末.type.name === "mdDivider" || 末.type.name === "mdOpaque")
+  ) {
     const 尾 = state.schema.nodes.mdParagraph?.create();
     if (尾) 结果.push(尾);
   }

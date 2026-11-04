@@ -40,6 +40,7 @@ import {
   moveCell,
   replaceBlockWithSource,
   moveBlock,
+  moveBlockWithSelection,
   moveCurrentBlock,
   pasteGrid,
   reassemble,
@@ -329,7 +330,7 @@ describe("块类型切换的产出仍是字节级正确的 Markdown", () => {
   it("不透明块拒绝切换：引用 / 表格 / 代码不会被洗成段落", () => {
     const { doc, src } = 样本();
     const editor = createTestEditor(doc);
-    // 不透明块的节点内容就是它自己的源文本（`> 引用的话`），不是剥了前缀的正文
+    // 不透明块拒绝类型切换。引用的可编辑正文是剥了 `>` 的那段，不是源文本本身
     const pos = 位置(editor, (n) => n.textContent.includes("引用的话"));
     for (const id of ["heading2", "bullet", "paragraph"] as BlockTypeId[]) {
       expect(applyBlockType(editor.state, pos, id)).toBeNull();
@@ -591,6 +592,126 @@ describe("工具栏的移动与分隔线", () => {
     expect(docToMarkdown(editor.state.doc, doc)).toBe("乙\n\n甲\n\n丙\n");
     // 选区必须还在"甲"那一块：否则连点两次按钮移的就不是同一块
     expect(editor.state.selection.$from.parent.textContent).toBe("甲");
+    editor.destroy();
+  });
+
+  it("拖完光标跟着被拖的那一块：光标原来在别的块上，也要落到刚挪过的块开头", () => {
+    const { doc } = 三块();
+    const editor = createTestEditor(doc);
+    // 光标停在「丙」，拖的是「甲」——手柄跟着鼠标，插入符经常不在被拖的块里
+    const 丙尾 = editor.state.doc.content.size - 1;
+    editor.commands.setTextSelection(丙尾);
+    expect(editor.state.selection.$from.parent.textContent).toBe("丙");
+    const tr = moveBlockWithSelection(editor.state, 0, 2);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("乙\n\n甲\n\n丙\n");
+    expect(editor.state.selection.$from.parent.textContent).toBe("甲");
+    expect(editor.state.selection.$from.parentOffset).toBe(0);
+    editor.destroy();
+  });
+
+  it("拖引用块时不把光标放进源文本开头，下一击键不会插在 > 前面", () => {
+    const blocks: EditDoc["blocks"] = [
+      {
+        kind: "quote",
+        id: null,
+        raw: "> 引用的话\n",
+        gapBefore: "",
+        content: "引用的话",
+        level: null,
+        checked: null,
+        align: null,
+        fields: [],
+        children: [],
+      },
+      {
+        kind: "paragraph",
+        id: null,
+        raw: "正文\n",
+        gapBefore: "\n",
+        content: "正文",
+        level: null,
+        checked: null,
+        align: null,
+        fields: [],
+        children: [],
+      },
+    ];
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    const editor = createTestEditor(doc);
+    let 正文里 = 0;
+    editor.state.doc.forEach((n, off) => {
+      if (n.textContent === "正文") 正文里 = off + 1;
+    });
+    editor.commands.setTextSelection(正文里);
+    const tr = moveBlockWithSelection(editor.state, 0, 2);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 选 = editor.state.selection;
+    expect(选 instanceof NodeSelection).toBe(true);
+    expect((选 as NodeSelection).node.type.name).toBe("mdOpaque");
+    expect((选 as NodeSelection).node.textContent).toBe("引用的话");
+    editor.destroy();
+  });
+
+  it("整块选中的引用下移后仍是整块选中", () => {
+    const blocks: EditDoc["blocks"] = [
+      {
+        kind: "paragraph",
+        id: null,
+        raw: "上面\n",
+        gapBefore: "",
+        content: "上面",
+        level: null,
+        checked: null,
+        align: null,
+        fields: [],
+        children: [],
+      },
+      {
+        kind: "quote",
+        id: null,
+        raw: "> 引用的话\n",
+        gapBefore: "\n",
+        content: "引用的话",
+        level: null,
+        checked: null,
+        align: null,
+        fields: [],
+        children: [],
+      },
+    ];
+    const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+    const editor = createTestEditor(doc);
+    const 位 = editor.state.doc.child(0).nodeSize;
+    editor.view.dispatch(editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 位)));
+    const tr = moveCurrentBlock(editor.state, -1);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    const 选 = editor.state.selection;
+    expect(选 instanceof NodeSelection).toBe(true);
+    expect((选 as NodeSelection).node.type.name).toBe("mdOpaque");
+    expect(editor.state.doc.child(0).type.name).toBe("mdOpaque");
+    editor.destroy();
+  });
+
+  it("拖的就是光标所在的块时，块内偏移留在原地", () => {
+    const { doc } = 三块();
+    const editor = createTestEditor(doc);
+    let 甲尾 = 0;
+    editor.state.doc.forEach((n, off) => {
+      if (n.textContent === "甲") 甲尾 = off + n.nodeSize - 1;
+    });
+    editor.commands.setTextSelection(甲尾);
+    const 偏移 = editor.state.selection.$from.parentOffset;
+    expect(偏移).toBeGreaterThan(0);
+    const tr = moveBlockWithSelection(editor.state, 0, 3);
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("乙\n\n丙\n\n甲\n");
+    expect(editor.state.selection.$from.parent.textContent).toBe("甲");
+    expect(editor.state.selection.$from.parentOffset).toBe(偏移);
     editor.destroy();
   });
 
@@ -859,7 +980,7 @@ describe("编辑不透明块不许把整块写成空", () => {
     expect(pos).toBeGreaterThan(0);
     editor.view.dispatch(editor.state.tr.insertText("啊", pos));
     const out = docToMarkdown(editor.state.doc, doc);
-    expect(out).toContain("引用的话啊");
+    expect(out).toContain("> 引用的话啊");
     expect(out).toContain("```\nlet a = 1\n```");
     editor.destroy();
   });
@@ -1385,7 +1506,7 @@ describe("回车拆段不许把原块的账本留给新块", () => {
         preventDefault() {
           拦住 = true;
         },
-      } as MouseEvent);
+      } as unknown as MouseEvent);
       return 处理了 && 拦住;
     };
     expect(点(项[0]!, 40)).toBe(false);
@@ -1594,8 +1715,9 @@ describe("显示形切换不许碰到字节", () => {
       const editor = createTestEditor(doc);
       const 装载后的文档 = editor.state.doc;
       const 块 = 不透明块(editor);
-      // 08-对齐 全是可编辑块，没有不透明块可进出；其余样本必须真有得测
-      if (name !== "08-对齐") expect(块.length, name).toBeGreaterThan(0);
+      // 01 只有一条分隔线（已是原子块）、08 全是可编辑块：这两个样本没有不透明块可进出；
+      // 其余样本必须真有得测，否则这条测试就变成了空转
+      if (name !== "08-对齐" && name !== "01-基础") expect(块.length, name).toBeGreaterThan(0);
       for (const b of 块) {
         放进(editor, b.pos);
         放到文末(editor);
@@ -1737,6 +1859,24 @@ describe("显示形切换不许碰到字节", () => {
     editor.destroy();
   });
 
+  it("Callout 标题用行内装饰加粗，折叠态在源文本面有牌", () => {
+    // `::first-line` 只对块容器生效，源文本面的 `<code>` 是行内元素——那条 CSS 在
+    // WebView2 里一直是空转。改成 Decoration.inline 之后，标题的 600 与显示形同源。
+    const { doc, src } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 标注 = 不透明块(editor).filter((b) => b.kind === "callout");
+    expect(标注.length).toBeGreaterThanOrEqual(2);
+
+    const 展开 = 面孔(editor, 标注[0]!.pos)!;
+    expect(展开.querySelector(".md-callout-lead")!.textContent).toBe("打扰预算是多少？");
+    expect(展开.hasAttribute("data-md-folded")).toBe(false);
+
+    const 折叠 = 面孔(editor, 标注[1]!.pos)!;
+    expect(折叠.hasAttribute("data-md-folded")).toBe(true);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
   it("画不来的块不许被藏起来：明确降级，源文本继续在屏幕上", () => {
     const { doc, src } = load("05-未识别语法");
     const editor = createTestEditor(doc);
@@ -1812,6 +1952,7 @@ describe("代码块单面：着色与语言牌跟着编辑面走", () => {
   });
 
   it("没闭栏的围栏仍然两副面孔（那种形状拼不回去，不能假装是代码框）", () => {
+
     const d: EditDoc = {
       frontMatter: "",
       trailingGap: "",
@@ -1824,6 +1965,275 @@ describe("代码块单面：着色与语言牌跟着编辑面走", () => {
     expect(壳.querySelector(".md-view")).not.toBeNull();
     expect(壳.querySelector(".md-src")!.textContent).toContain("```go");
     expect(壳.querySelector(".md-src span"), "围栏在正文里，不上色").toBeNull();
+    editor.destroy();
+  });
+});
+
+/**
+ * 公式**只有一面**：两道 `$$` 进了账本，可编辑面就是显示形那张居中的公式。
+ *
+ * 与代码块同一条判据——只接管"首末两行各自只有 `$$`"的形状；单行 `$$ E = mc^2 $$`
+ * 拼不回同样的字节，宁可按源文本回显。这里除了"没有宿主"，还要钉住两点：公式不该
+ * 长出代码块的语言牌 / 复制键，以及改一行之后落盘的仍是 `$$\n…\n$$`。
+ */
+describe("公式单面：`$$` 进账本，编辑面就是显示形", () => {
+  const 公式块 = (editor: ReturnType<typeof createTestEditor>) =>
+    不透明块(editor).find((b) => b.kind === "math")!;
+
+  it("走 `$$` 账本的那一块没有宿主，面上只有公式体", () => {
+    const { doc, src } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 数 = 公式块(editor);
+    expect(数).toBeTruthy();
+    const 壳 = 面孔(editor, 数.pos)!;
+    expect(壳.querySelector(".md-view"), "公式块不该再有显示形宿主").toBeNull();
+    expect(壳.hasAttribute("data-md-math")).toBe(true);
+    expect(壳.querySelector(".md-src")!.textContent).toBe("E = mc^2");
+    expect(壳.querySelector(".md-lang"), "公式没有语言牌").toBeNull();
+    expect(壳.querySelector(".md-copy"), "公式没有复制键").toBeNull();
+    expect(壳.querySelector(".md-gutter"), "公式不排行号").toBeNull();
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("聚焦前后是同一批 DOM，改一行仍按 `$$` 围栏落盘", () => {
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 数 = 公式块(editor);
+    const 源 = () => 面孔(editor, 数.pos)!.querySelector(".md-src")!;
+    const 未聚焦 = 源().textContent;
+    放进(editor, 数.pos);
+    expect(源().textContent).toBe(未聚焦);
+    expect(源().querySelectorAll("span")).toHaveLength(0);
+    const 尾 = 数.pos + 1 + (未聚焦?.length ?? 0);
+    editor.view.dispatch(editor.state.tr.insertText("\nE = mc^3", 尾));
+    expect(源().textContent).toBe("E = mc^2\nE = mc^3");
+    expect(docToMarkdown(editor.state.doc, doc)).toContain("$$\nE = mc^2\nE = mc^3\n$$");
+    放到文末(editor);
+    expect(源().textContent).toBe("E = mc^2\nE = mc^3");
+    editor.destroy();
+  });
+
+  it("单行 `$$ E = mc^2 $$` 拼不回原字节，继续两副面孔", () => {
+    const d: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        { kind: "math", id: null, raw: "$$E = mc^2$$\n", gapBefore: "", content: "", level: null, checked: null, align: null, fields: [], children: [] },
+      ],
+    };
+    const editor = createTestEditor(d);
+    const 壳 = 面孔(editor, 0)!;
+    expect(壳.hasAttribute("data-md-math")).toBe(false);
+    expect(壳.querySelector(".md-view"), "显示形还在").not.toBeNull();
+    expect(壳.querySelector(".md-src")!.textContent).toContain("$$");
+    expect(docToMarkdown(editor.state.doc, d)).toBe("$$E = mc^2$$\n");
+    editor.destroy();
+  });
+
+  it("空的 `$$` 中间那一行按字节分得清", () => {
+    const 文档 = (raw: string): EditDoc => ({
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        { kind: "math", id: null, raw, gapBefore: "", content: "", level: null, checked: null, align: null, fields: [], children: [] },
+      ],
+    });
+    for (const raw of ["$$\n$$\n", "$$\n\n$$\n"]) {
+      const d = 文档(raw);
+      const editor = createTestEditor(d);
+      const 壳 = 面孔(editor, 0)!;
+      expect(壳.hasAttribute("data-md-math"), raw).toBe(true);
+      expect(壳.querySelector(".md-src")!.textContent, raw).toBe("");
+      expect(docToMarkdown(editor.state.doc, d), raw).toBe(raw);
+      editor.destroy();
+    }
+  });
+});
+
+/**
+ * 引用 / Callout 的前缀进账本：正文就是屏幕上那一段，`>` 与 `[!type]` 不再进可编辑面。
+ * 与围栏同一条边界——拼不回原字节的块不接管，继续两副面孔。
+ */
+describe("引用账本：前缀进账本，点进去仍是同一段正文", () => {
+  const 引述块 = (editor: Editor) =>
+    不透明块(editor).filter((b) => b.kind === "quote" || b.kind === "callout");
+
+  it("夹具 04 的五块引用 / Callout 都进了账本，正文不带前缀，字节不变", () => {
+    const { doc, src } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 块们 = 引述块(editor);
+    expect(块们).toHaveLength(5);
+    for (const b of 块们) {
+      const 节 = editor.state.doc.nodeAt(b.pos)!;
+      expect(节.attrs.mdQuoteMarks, b.kind).toBeTruthy();
+      expect(节.textContent).not.toMatch(/(^|\n)\s{0,3}>/);
+      expect(节.textContent).not.toContain("[!");
+      expect(节.textContent).not.toContain("^b-");
+    }
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("点进点出只换 DOM 属性，doc 还是同一个对象，字节不变", () => {
+    const { doc, src } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 文档前 = editor.state.doc;
+    for (const b of 引述块(editor)) {
+      const 壳 = 面孔(editor, b.pos)!;
+      expect(壳.querySelector(".md-view"), b.kind).not.toBeNull();
+      放进(editor, b.pos);
+      expect(壳.dataset["mdMode"]).toBe("source");
+      放到文末(editor);
+      expect(壳.dataset["mdMode"]).toBeUndefined();
+    }
+    expect(editor.state.doc).toBe(文档前);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("改一个字再改回去，前缀与块锚都还在原来的位置", () => {
+    const { doc, src } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 首 = 引述块(editor)[0]!;
+    editor.view.dispatch(editor.state.tr.insertText("X", 首.pos + 1));
+    const 改过 = docToMarkdown(editor.state.doc, doc);
+    expect(改过).toContain("> X普通引用的第一行。");
+    expect(改过).toContain("^b-x1y2z3a4b5");
+    expect(改过.match(/\^b-x1y2z3a4b5/g)).toHaveLength(1);
+    editor.view.dispatch(editor.state.tr.delete(首.pos + 1, 首.pos + 2));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("Callout 的标题是正文，`[!type]` 只在账本里，改字不会复制第二份", () => {
+    const { doc } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 标 = 引述块(editor).find((b) => b.kind === "callout")!;
+    editor.view.dispatch(editor.state.tr.insertText("X", 标.pos + 1));
+    const 出 = docToMarkdown(editor.state.doc, doc);
+    expect(出.match(/\[!question\]/g)).toHaveLength(1);
+    expect(出).toContain("> [!question] X打扰预算是多少？");
+    expect(出).toContain("^b-c6d9f2g5h8");
+    editor.destroy();
+  });
+
+  it("剪贴板的 renderHTML / parseHTML 把前缀账本带回来", () => {
+    const { doc } = load("04-引用与标注");
+    const editor = createTestEditor(doc);
+    const 标 = 引述块(editor).find((b) => b.kind === "callout")!;
+    const 块 = editor.state.doc.nodeAt(标.pos)!;
+    const 包装 = document.createElement("div");
+    包装.append(DOMSerializer.fromSchema(editor.state.schema).serializeNode(块));
+    const 回 = DOMParser.fromSchema(editor.state.schema).parse(包装);
+    const 新 = 回.firstChild!;
+    expect(新.type.name).toBe("mdOpaque");
+    expect(新.attrs.mdQuoteMarks).toBe(块.attrs.mdQuoteMarks);
+    expect(新.attrs.mdQuoteAnchor).toBe(块.attrs.mdQuoteAnchor);
+    expect(新.textContent).toBe(块.textContent);
+    editor.destroy();
+  });
+});
+
+/**
+ * 分隔线**只有一面**：它是原子块，屏幕上就是一条线，点上、选中、失焦都不换 DOM。
+ *
+ * `---` / `***` / `___` 三种写法都认（内核都判成 `divider`），原字节留在 `mdRaw` 里，
+ * 没改过的块走"原样回写"那条路。剪贴板也要认回来——否则复制一条线贴到别处就消失了。
+ */
+describe("分隔线单面：原子块，屏幕上只有一条线", () => {
+  it("夹具里的三种写法都是原子块，字节逐字节等于源文件", () => {
+    const { doc, src } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    const 线们: number[] = [];
+    editor.state.doc.forEach((n, off) => {
+      if (n.type.name === "mdDivider") 线们.push(off);
+    });
+    expect(线们).toHaveLength(2);
+    for (const 位 of 线们) {
+      const dom = editor.view.nodeDOM(位) as HTMLElement;
+      expect(dom.tagName).toBe("HR");
+      expect(dom.hasAttribute("data-md-divider")).toBe(true);
+      expect(dom.querySelector(".md-src, .md-view"), "分隔线没有源码面").toBeNull();
+    }
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(src);
+    editor.destroy();
+  });
+
+  it("选中它只有 DOM 标记，不发事务；↓ 从它下面出去", () => {
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    let 位 = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (位 < 0 && n.type.name === "mdDivider") 位 = off;
+    });
+    const 文档前 = editor.state.doc;
+    editor.view.dispatch(
+      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 位)),
+    );
+    const dom = editor.view.nodeDOM(位) as HTMLElement;
+    expect(dom.hasAttribute("data-md-sel")).toBe(true);
+    expect(editor.state.doc).toBe(文档前);
+    const tr = 图片下出口(editor.state);
+    if (位 + editor.state.doc.nodeAt(位)!.nodeSize < editor.state.doc.content.size) {
+      expect(tr).not.toBeNull();
+    }
+    editor.destroy();
+  });
+
+  it("插进来的分隔线是原子块，落盘仍是内核认得的 `---`", () => {
+    const { doc } = load("06-插入骨架");
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(editor.state.doc.firstChild!.nodeSize - 1);
+    const tr = editor.state.tr.insert(
+      editor.state.doc.content.size,
+      editor.state.schema.nodes.mdDivider!.create({ mdKind: "divider", mdGap: "\n" }),
+    );
+    editor.view.dispatch(tr);
+    let 数 = 0;
+    editor.state.doc.forEach((n) => {
+      if (n.type.name === "mdDivider") 数++;
+    });
+    expect(数).toBe(2);
+    expect(docToMarkdown(editor.state.doc, doc)).toContain("\n---\n");
+    editor.destroy();
+  });
+
+  it("带块锚的分隔线把 `^b-…` 放下一行，行内锚会退化成段落", () => {
+    const { doc } = load("03-代码表格与公式");
+    const editor = createTestEditor(doc);
+    let 位 = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (位 < 0 && n.type.name === "mdDivider") 位 = off;
+    });
+    const 块 = editor.state.doc.nodeAt(位)!;
+    // 清掉签名等于"这块被改过"，逼它走重新序列化那条路
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(位, undefined, {
+        ...块.attrs,
+        mdId: "b-k3x9m2v7qa",
+        mdSig: "",
+      }),
+    );
+    const 产出 = docToMarkdown(editor.state.doc, doc);
+    expect(产出).toContain("---\n^b-k3x9m2v7qa");
+    expect(产出).not.toContain("--- ^b-k3x9m2v7qa");
+    editor.destroy();
+  });
+
+  it("走一遍剪贴板的 renderHTML / parseHTML，类型与形状都回得来", () => {
+    const { doc } = load("06-插入骨架");
+    const editor = createTestEditor(doc);
+    let 位 = -1;
+    editor.state.doc.forEach((n, off) => {
+      if (位 < 0 && n.type.name === "mdDivider") 位 = off;
+    });
+    const 块 = editor.state.doc.nodeAt(位)!;
+    const 包装 = document.createElement("div");
+    包装.append(DOMSerializer.fromSchema(editor.state.schema).serializeNode(块));
+    const 回 = DOMParser.fromSchema(editor.state.schema).parse(包装);
+    expect(回.firstChild?.type.name).toBe("mdDivider");
+    expect(回.firstChild?.attrs.mdKind).toBe("divider");
     editor.destroy();
   });
 });

@@ -161,13 +161,13 @@ describe("查找", () => {
     expect(查找(editor.state.doc, "开会", false)).toHaveLength(1);
   });
 
-  it("引用找的是源文本，所以 > 也算", () => {
+  it("引用找的是正文，> 前缀不在可编辑的字里", () => {
     const editor = 打开(
       篇([块({ kind: "quote", content: "", raw: "> 引用甲\n" })]),
     );
-    expect(editor.state.doc.textContent).toBe("> 引用甲");
+    expect(editor.state.doc.textContent).toBe("引用甲");
     expect(查找(editor.state.doc, "引用甲", false)).toHaveLength(1);
-    expect(查找(editor.state.doc, ">", true)).toHaveLength(1);
+    expect(查找(editor.state.doc, ">", true)).toEqual([]);
   });
 
   it("代码块只找栏中间的代码", () => {

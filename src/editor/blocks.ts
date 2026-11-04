@@ -13,6 +13,8 @@ import type { EditorView } from "@tiptap/pm/view";
 import type { EditBlock, EditDoc } from "../ipc/types";
 import { 拼资产引用, 是库内资产, 拆资产引用, 拆自attrs, type 资产引用 } from "./asset";
 import { 拼开栏, 拼围栏, 拆围栏, 拆开栏 } from "./fence";
+import { 拼公式, 拆公式 } from "./mathFace";
+import { 拼引用, 引用账本 } from "./quoteFace";
 import { 已识别, 短写, 语言清单, 识别 } from "./highlight";
 import { inlineToJson, serializeInline } from "./inline";
 import { parseGrid, parseTable, serializeTable, type Align } from "./table";
@@ -72,6 +74,8 @@ function 行尾回车(b: EditBlock): string {
 function nodeType(b: EditBlock): string {
   // 父项的 raw 含子项那几行的字节（缩进也在里面），所以带子项的块不能拆成行内节点
   if (!EDITABLE.has(b.kind) || b.children.length) {
+    // 分隔线没有正文：`---` / `***` / `___` 只是三种写法，原字节进 `mdRaw`
+    if (b.kind === "divider" && !b.children.length) return "mdDivider";
     // 图片是唯一被接管的**原子**块：缩略图就是它的正文，光标进来不许换一副样子
     if (图片接管(b)) return "mdImage";
     // 表格是唯一被"接管"的不透明块：判据保守（见 table.ts），够格才建网格，
@@ -171,6 +175,31 @@ export function docToJson(doc: EditDoc): JsonNode {
             mdFenceBody: 拆.身.length > 0,
           },
           content: 身 ? [{ type: "text", text: 身 }] : [],
+        };
+      }
+      const 公式 = b.kind === "math" ? 拆公式(体) : null;
+      if (公式) {
+        const 身 = 公式.身.join("\n");
+        return {
+          type,
+          attrs: {
+            ...attrs,
+            mdMathOpen: 公式.开,
+            mdMathClose: 公式.闭,
+            mdMathBody: 公式.身.length > 0,
+          },
+          content: 身 ? [{ type: "text", text: 身 }] : [],
+        };
+      }
+      // 引用 / Callout 与围栏同一条路：前缀进账本，节点正文只留屏幕上那一段。
+      // 拼不回原字节的不接管（`引用账本` 返回 null），继续整段源文本。
+      const 引用 =
+        b.kind === "quote" || b.kind === "callout" ? 引用账本(text, b.kind, b.id) : null;
+      if (引用) {
+        return {
+          type,
+          attrs: { ...attrs, mdQuoteMarks: 引用.缀.join("\n"), mdQuoteAnchor: 引用.锚 },
+          content: 引用.身 ? [{ type: "text", text: 引用.身 }] : [],
         };
       }
       return { type, attrs, content: text ? [{ type: "text", text }] : [] };
@@ -376,7 +405,40 @@ function serializeNode(node: PmNode): string {
       // 顺序是文件里的顺序：引用、锚点、行尾回车。换一下就改了用户字节的位置
       return 拼资产引用(拆) + anchorSuffix(a.mdId) + String(a.mdEol ?? "");
     }
+    case "mdDivider": {
+      // **不读 `mdRaw`**：换了形状的块会从旧块继承 raw（`替换节点` 那一路），
+      // 拿它当字节就把上一块的正文写成了分隔线。原子块没有"正文"可言，
+      // 重新序列化时按内核认得的骨架写 `---`。
+      //
+      // 锚点**必须独占下一行**：`--- ^b-xxx` 里混进了 `^`，内核的 `is_hr` 只认
+      // 清一色的 `-`，读出来是段落而不是分隔线。独立成行的 `^b-` 由内核挂给
+      // 上面那块（`trailing_id` 那条通用规则），所以形状是 `---\n^b-xxx`。
+      const id = typeof a.mdId === "string" ? a.mdId : "";
+      return id ? `---\n^${id}` : "---";
+    }
     case "mdOpaque": {
+      const 缀文 = String(a.mdQuoteMarks ?? "");
+      if (缀文) {
+        const 文 = 拼引用(缀文.split("\n"), node.textContent, String(a.mdQuoteAnchor ?? ""));
+        const id = typeof a.mdId === "string" ? a.mdId : "";
+        if (!id || 文.trimEnd().endsWith(`^${id}`)) return 文;
+        return 文.trimEnd() + anchorSuffix(id);
+      }
+      /**
+       * 公式账本：正文只有两条 `$$` 之间的公式体，两道围栏按原样拼回去。
+       * 与围栏同一条规矩——空正文要按 `mdMathBody` 分成 `[]` 与 `[""]`。
+       */
+      const 数开 = String(a.mdMathOpen ?? "");
+      const 数闭 = String(a.mdMathClose ?? "");
+      if (数开 && 数闭) {
+        const 身 = node.textContent
+          ? node.textContent.split("\n")
+          : a.mdMathBody
+            ? [""]
+            : [];
+        const 锚 = typeof a.mdId === "string" && a.mdId ? `\n^${a.mdId}` : "";
+        return 拼公式({ 开: 数开, 身, 闭: 数闭 }) + 锚;
+      }
       // 源文本块：内容就是用户的源文本，改了就原样落盘（自带换行由调用方补）
       // **不能写 `node.text`**：那是 `TextNode` 才有的字段，块节点上它是 undefined，
       // `?? ""` 会把整块吃成空字符串——用户编辑一次代码块 / 表格 / 引用，那块就没了。
@@ -461,6 +523,14 @@ export function 有效开栏(node: PmNode, 允许猜 = true): string {
  */
 export function 带围栏(node: PmNode, 允许猜 = true): string {
   const a = node.attrs as Record<string, unknown>;
+  const 缀文 = String(a.mdQuoteMarks ?? "");
+  if (缀文) return 拼引用(缀文.split("\n"), node.textContent, String(a.mdQuoteAnchor ?? ""));
+  const 数开 = String(a.mdMathOpen ?? "");
+  const 数闭 = String(a.mdMathClose ?? "");
+  if (数开 && 数闭) {
+    const 身 = node.textContent ? node.textContent.split("\n") : a.mdMathBody ? [""] : [];
+    return 拼公式({ 开: 数开, 身, 闭: 数闭 });
+  }
   const 开 = 有效开栏(node, 允许猜);
   const 闭 = String(a.mdFenceClose ?? "");
   if (!开 || !闭) return node.textContent;
@@ -587,9 +657,15 @@ export function blockTypePatch(
   node: PmNode,
   id: BlockTypeId,
 ): { typeName: string; attrs: Record<string, unknown> } | null {
-  // 表格与不透明块都不给转：序列化器没有"把一张表变成段落"这条路，
-  // 允许转就是把用户的表格洗成一行 `|` 文本（D27 判死的正是这种）
-  if (node.type.name === "mdOpaque" || node.type.name === "mdTable") return null;
+  // 表格、不透明块与分隔线都不给转：序列化器没有"把一张表变成段落"这条路，
+  // 允许转就是把用户的表格洗成一行 `|` 文本（D27 判死的正是这种）；分隔线是原子块，
+  // 转成文字块等于把它悄悄删掉
+  if (
+    node.type.name === "mdOpaque" ||
+    node.type.name === "mdTable" ||
+    node.type.name === "mdDivider"
+  )
+    return null;
   const 清场 = { mdKind: "paragraph", mdLevel: null, mdChecked: null };
   switch (id) {
     case "paragraph":
@@ -1136,46 +1212,86 @@ export function 删当前块(state: EditorState): Transaction | null {
   return 起 < 0 ? null : 删块在(state, 起);
 }
 
+/** 当前选区落在第几个顶层块上；没有可指的块给 -1。 */
+function 选区所在序号(state: EditorState): number {
+  const 起点 = 顶层块起点(state);
+  if (起点 < 0) return -1;
+  let index = -1;
+  let i = 0;
+  state.doc.forEach((_n, off) => {
+    if (off === 起点) index = i;
+    i++;
+  });
+  return index;
+}
+
+/**
+ * 换位之后把选区放回被挪的那一块。
+ *
+ * `moveBlock` 是整树替换，映射后的光标可能落到别的块上。原子块没有块内偏移，
+ * 选回这一块本身。正文有块内光标时尽量停在原来的字符偏移上，超出就收到块尾。
+ *
+ * `offset === null` 表示光标本来不在这块的正文里（在别的块上，或这是整块选中）。
+ * 引用和代码的正文是源文本，开头就是 `>` 或围栏；这时放在偏移 0，下一击键会插在
+ * 记号前面，把这一块改坏。没有块内光标时改回整块选中，渲染那一面还在。
+ */
+function 放回挪过的块(tr: Transaction, newIndex: number, offset: number | null): Transaction | null {
+  let newStart = -1;
+  let k = 0;
+  tr.doc.forEach((_n, off) => {
+    if (k === newIndex) newStart = off;
+    k++;
+  });
+  const moved = newStart < 0 ? null : tr.doc.nodeAt(newStart);
+  if (!moved) return null;
+  if (moved.type.isAtom || (offset === null && moved.type.name === "mdOpaque")) {
+    return tr.setSelection(NodeSelection.create(tr.doc, newStart));
+  }
+  const back = Math.min(Math.max(0, offset ?? 0), moved.content.size);
+  return tr.setSelection(TextSelection.near(tr.doc.resolve(newStart + 1 + back)));
+}
+
+/**
+ * 把第 `from` 块挪到 `to`，并把选区放回那一块。手柄拖拽与 `moveCurrentBlock` 共用。
+ *
+ * 光标本来就在被拖的那一块的正文里时，保留块内偏移，接着打的字还在原来那个字旁边。
+ * 光标在别的块上时，正文块放到开头；引用和代码改成整块选中，不把插入符放进源文本。
+ *
+ * 原地不动返回 null，调用方不发事务。
+ */
+export function moveBlockWithSelection(
+  state: EditorState,
+  from: number,
+  to: number,
+): Transaction | null {
+  const tr = moveBlock(state, from, to);
+  if (!tr) return null;
+  // depth 为 0 时是整块选中：`$from.parentOffset` 是这块在文档里的位置，不是块内偏移。
+  // 拿它去夹块尾，光标会从整块选中跳到源文本末尾。
+  const offset =
+    选区所在序号(state) === from && state.selection.$from.depth > 0
+      ? state.selection.$from.parentOffset
+      : null;
+  const newIndex = from < to ? to - 1 : to;
+  return 放回挪过的块(tr, newIndex, offset);
+}
+
 /**
  * 把光标所在的整块上移 / 下移一格，返回带着**已放回选区**的事务。
  *
- * 键盘（`Alt+↑/↓`）与工具栏的上下移按钮共用这一个函数。放回选区不是锦上添花：
- * `moveBlock` 是整树替换，映射后光标可能落到别的块上，于是"连按两次"第二次移的
- * 就不是同一块——第一次对、第二次错的 bug 靠想是想不到的。
+ * 键盘（`Alt+↑/↓`）与工具栏的上下移按钮共用这一个函数，落点与手柄拖拽一样走
+ * `moveBlockWithSelection`。放回选区不是锦上添花：`moveBlock` 是整树替换，映射后
+ * 光标可能落到别的块上，于是"连按两次"第二次移的就不是同一块。
  *
  * 到边界返回 null（调用方据此什么都不做，也**不发空事务**：空事务会吞键、还会白标
  * 一次脏，800ms 后凭空写盘）。
  */
 export function moveCurrentBlock(state: EditorState, delta: number): Transaction | null {
-  const { $from } = state.selection;
   if (delta === 0) return null;
-  const 起点 = 顶层块起点(state);
-  if (起点 < 0) return null;
-  let index = -1;
-  let i = 0;
-  state.doc.forEach((n, off) => {
-    if (off === 起点) index = i;
-    i++;
-  });
+  const index = 选区所在序号(state);
   if (index < 0) return null;
   // `to` 的口径是"最终落在原序号 to 的位置"：下移一格要跨过紧跟的那一块
-  const tr = moveBlock(state, index, delta < 0 ? index - 1 : index + 2);
-  if (!tr) return null;
-  const newIndex = delta < 0 ? index - 1 : index + 1;
-  let newStart = 0;
-  let k = 0;
-  tr.doc.forEach((n, off) => {
-    if (k === newIndex) newStart = off;
-    k++;
-  });
-  const moved = tr.doc.nodeAt(newStart);
-  if (!moved) return null;
-  if (moved.type.isAtom) {
-    // 原子块没有"块内偏移"可回，选回这一块本身（连着按两次 Alt+↓ 移的才是同一块）
-    return tr.setSelection(NodeSelection.create(tr.doc, newStart));
-  }
-  const back = Math.min($from.parentOffset, moved.content.size);
-  return tr.setSelection(TextSelection.near(tr.doc.resolve(newStart + 1 + back)));
+  return moveBlockWithSelection(state, index, delta < 0 ? index - 1 : index + 2);
 }
 
 /**
@@ -1279,6 +1395,14 @@ function sourceBlock(state: EditorState, kind: string, source: string, gap: stri
       return 尾 ? [表, 尾] : [表];
     }
   }
+  if (kind === "divider") {
+    const 型 = state.schema.nodes.mdDivider;
+    if (!型) throw new Error("schema 里没有 mdDivider 节点");
+    // 不塞 `mdRaw`：那是"来自文件的原字节"，新块没有；序列化器写 `---`
+    const 块 = 型.create(账本);
+    const 尾 = 落脚点(state.schema);
+    return 尾 ? [块, 尾] : [块];
+  }
   const opaque = state.schema.nodes.mdOpaque;
   if (!opaque) throw new Error("schema 里没有 mdOpaque 节点");
   /**
@@ -1286,9 +1410,20 @@ function sourceBlock(state: EditorState, kind: string, source: string, gap: stri
    * 于是插完直接就能在框里打字，屏幕上从头到尾不出现 ` ``` `。与 `docToJson` 载入
    * 文件时同一条路——插入的代码块与读进来的代码块必须长一样，否则"改一次才知道分叉"。
    */
+  const 引用 = kind === "quote" || kind === "callout" ? 引用账本(source, kind, null) : null;
+  if (引用) {
+    const 块 = opaque.create(
+      { ...账本, mdQuoteMarks: 引用.缀.join("\n"), mdQuoteAnchor: 引用.锚 },
+      引用.身 ? state.schema.text(引用.身) : null,
+    );
+    const 尾 = 落脚点(state.schema);
+    return 尾 ? [块, 尾] : [块];
+  }
   const 拆 = kind === "code" ? 拆围栏(source) : null;
-  // 空正文**不能建空文本节点**（PM 不允许），靠 `mdFenceBody` 记住"围栏之间有一行"
-  const 正文 = 拆 ? 拆.身.join("\n") : "";
+  // 整篇编辑给的源码可能带着行尾换行，而账本记的是"末行是 `$$`"的精确形状
+  const 公式 = kind === "math" ? 拆公式(source.replace(/\n+$/, "")) : null;
+  // 空正文**不能建空文本节点**（PM 不允许），靠 `mdFenceBody` / `mdMathBody` 记住"中间有一行"
+  const 正文 = 拆 ? 拆.身.join("\n") : 公式 ? 公式.身.join("\n") : "";
   const 块 =
     拆 && 拆.闭
       ? opaque.create(
@@ -1300,7 +1435,17 @@ function sourceBlock(state: EditorState, kind: string, source: string, gap: stri
           },
           正文 ? state.schema.text(正文) : null
         )
-      : opaque.create(账本, state.schema.text(source));
+      : 公式
+        ? opaque.create(
+            {
+              ...账本,
+              mdMathOpen: 公式.开,
+              mdMathClose: 公式.闭,
+              mdMathBody: 公式.身.length > 0,
+            },
+            正文 ? state.schema.text(正文) : null
+          )
+        : opaque.create(账本, state.schema.text(source));
   /**
    * 与表格同一条规矩：插进来的块下面留一个空段落**落脚点**（空段落不落盘，一个字节都不多）。
    * 不留的话，"在文末插一个代码块"就只剩鼠标能出去——而代码块的出口本来就设计成 `↓`。
@@ -2046,15 +2191,18 @@ export function exitOpaqueDown(state: EditorState): Transaction | null {
 }
 
 /**
- * 选中图片块时按 `↓` 或 `Enter`：离开这块，落到它下面那一行（没有就现造一个落脚点）。
+ * 选中原子块（图片 / 分隔线）时按 `↓` 或 `Enter`：离开这块，落到它下面那一行
+ * （没有就现造一个落脚点）。
  *
- * 图片是**原子块**，插入符根本进不去，所以判据不是"在最后一行"而是"这一整块就是选区"
+ * 原子块的插入符根本进不去，所以判据不是"在最后一行"而是"这一整块就是选区"
  * （点一下、或方向键走到它上面都会得到 NodeSelection）。不接这条键，"文末粘一张图"
  * 就又变成用户报过两次的那个死局：块占了文末，键盘出不去。
  */
 export function 图片下出口(state: EditorState): Transaction | null {
   const 选 = state.selection;
-  if (!(选 instanceof NodeSelection) || 选.node.type.name !== "mdImage") return null;
+  if (!(选 instanceof NodeSelection)) return null;
+  const 型 = 选.node.type.name;
+  if (型 !== "mdImage" && 型 !== "mdDivider") return null;
   return 送出块下(state.tr, 选.from);
 }
 

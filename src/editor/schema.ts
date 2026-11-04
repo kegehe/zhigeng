@@ -33,6 +33,7 @@ import { 可无损, 收图注, 是库内资产, 拆自attrs, 新引用, type 资
 import { api, describeError, 资产地址 } from "../ipc/commands";
 import { 批量, TableSelect } from "./tableSelectPlugin";
 import { 拼开栏, 拆开栏, 围栏行of } from "./fence";
+import { 锚可进账本, 缀可进账本 } from "./quoteFace";
 import { 短写, 已识别, 语言清单, 语言of, 着色区间, 识别 } from "./highlight";
 import { 引用高亮扩展 } from "./citeFocus";
 import { 查找扩展 } from "./findReplace";
@@ -86,6 +87,23 @@ const mdAttributes: Attributes = {
    * 而两者的正文都是空字符串——不记这一笔，用户删空代码块最后一行就会多出一个空行。
    */
   mdFenceBody: { default: false },
+  /**
+   * 块级公式的 `$$` 账本，与围栏同一形状：两道 `$$` 原样存着，节点正文只装公式体。
+   * 只接管"首末两行各自只有 `$$`"的写法；单行 `$$ E = mc^2 $$` 拼不回同样的字节，
+   * 继续按源文本回显（见 `mathFace.ts`）。
+   */
+  mdMathOpen: { default: "" },
+  mdMathClose: { default: "" },
+  /** 两道 `$$` 之间**有没有那一行**：`$$\n$$` 与 `$$\n\n$$` 是两种字节 */
+  mdMathBody: { default: false },
+  /**
+   * 引用 / Callout 的前缀账本：每行原样的 `>`（Callout 标题行含 `[!type]`），
+   * 用换行拼成一串。节点正文只留剥掉前缀之后的字，所以点进去和看着是同一段。
+   * 空串 = 没走这条路（拼不回原字节，或者根本不是引用）。
+   */
+  mdQuoteMarks: { default: "" },
+  /** 从末行摘下的块锚，含前面的空白。空串 = 这块没有行尾锚，或锚还在正文里。 */
+  mdQuoteAnchor: { default: "" },
 };
 
 /** 每个 md* 属性都是编辑器的私有账本，不进 DOM；行内字段额外带一份成 `data-fields` */
@@ -302,7 +320,12 @@ class OpaqueView implements NodeView {
   private kind = "raw";
   private 正文 = "";
   private 待重算 = true;
+  /** 没有宿主、只有可编辑这一面（代码围栏 / 公式 `$$` 两种账本） */
   private 单面 = false;
+  /** 代码单面：语言牌 / 复制键 / 行号栏那一套只属于代码，公式不挂这些 */
+  private 代码面 = false;
+  /** 公式单面：只给 CSS 一个抓手，把可编辑面画成显示形那张居中公式 */
+  private 数学面 = false;
 
   constructor(
     node: PmNode,
@@ -341,15 +364,18 @@ class OpaqueView implements NodeView {
     pre.append(code);
 
     /**
-     * **代码块（走围栏账本的那种）只有一面**：围栏不在正文里，可编辑的那一面画出来就是
-     * 渲染好的那份（着色由 `CodeHighlight` 装饰、语言牌由 CSS 从 `data-md-lang` 画），
-     * 所以点进去与退出来是同一批 DOM——用户要的"样式不变"到这儿才真的成立。
-     * 没闭栏的代码块与引用 / Callout / 公式那些仍然两副面孔：它们的"显示形"要剥掉
-     * 正文里真实存在的字节，改一处就对不上一次。
+     * **走了账本的不透明块只有一面**：围栏 / `$$` 不在正文里，可编辑的那一面画出来就是
+     * 渲染好的那份，所以点进去与退出来是同一批 DOM——用户要的"样式不变"到这儿才真的成立。
+     * 代码那一面外挂着语言牌 / 复制 / 行号，公式只借 CSS 画成居中的公式；没闭栏的代码块
+     * 与引用 / Callout 仍然两副面孔：它们的显示形要剥掉正文里真实存在的字节。
      */
-    this.单面 = this.kind === "code" && Boolean(node.attrs.mdFenceOpen) && Boolean(node.attrs.mdFenceClose);
+    this.代码面 =
+      this.kind === "code" && Boolean(node.attrs.mdFenceOpen) && Boolean(node.attrs.mdFenceClose);
+    this.数学面 =
+      this.kind === "math" && Boolean(node.attrs.mdMathOpen) && Boolean(node.attrs.mdMathClose);
+    this.单面 = this.代码面 || this.数学面;
     this.节点 = node;
-    if (this.单面) {
+    if (this.代码面) {
       dom.dataset["mdCode"] = "";
       /**
        * 语言牌是个**真下拉**（用户点名要"块内语言牌变成交互控件"）。它排在 contentDOM
@@ -408,6 +434,7 @@ class OpaqueView implements NodeView {
       头.append(牌框, 抄);
       dom.append(头);
     }
+    if (this.数学面) dom.dataset["mdMath"] = "";
 
     // 宿主排在源文本**前面**：PM 的 `localPosFromDOM` 按"点击的元素在 contentDOM 之前还是
     // 之后"决定落点，排在前面才拿到块首，点一下就是"从这块的开头改源码"。
@@ -416,6 +443,7 @@ class OpaqueView implements NodeView {
     this.dom = dom;
     this.host = this.单面 ? null : host;
     this.contentDOM = code;
+    this.刷引用();
     渲染实例.set(dom, this);
     // 装载这一次不许猜语言（`补渲染` 交出焦点时也会被调，那次允许）
     this.补渲染(false);
@@ -433,7 +461,7 @@ class OpaqueView implements NodeView {
    * - 只在行数真的变了的时候重写 DOM。行数要是不变，打字这一路一次读写都不做。
    */
   private 刷行号(): void {
-    if (!this.单面) return;
+    if (!this.代码面) return;
     const 数 = this.节点.textContent.split("\n").length; // 行尾带 `\r` 不影响计数
     if (数 === this.行号数) return;
     this.行号数 = 数;
@@ -574,6 +602,28 @@ class OpaqueView implements NodeView {
     );
   }
 
+  /**
+   * 引用账本在的时候，点进去的那一面用和显示形同一套盒子（左边线 / Callout 色）。
+   * 类型从标题行前缀里读，不另存一份——两份会分叉。
+   */
+  private 刷引用(): void {
+    const 缀文 = String(this.节点.attrs.mdQuoteMarks ?? "");
+    if (!缀文) {
+      delete this.dom.dataset["mdQuote"];
+      delete this.dom.dataset["callout"];
+      return;
+    }
+    this.dom.dataset["mdQuote"] = this.kind === "callout" ? "callout" : "quote";
+    const 首 = 缀文.split("\n")[0] ?? "";
+    const m = /\[!([A-Za-z-]+)\]([+-]?)/.exec(首);
+    if (m?.[1]) this.dom.dataset["callout"] = m[1].toLowerCase();
+    else delete this.dom.dataset["callout"];
+    // 折叠态只活在显示形；源文本面把标题连同正文一起摊开，于是得在牌上说明一声，
+    // 否则"点进来正文突然多出来"会被读成渲染坏了。
+    if (m?.[2] === "-") this.dom.dataset["mdFolded"] = "";
+    else delete this.dom.dataset["mdFolded"];
+  }
+
   /** 只在脏了的时候重画：一次焦点转移不该重排没动过的块 */
   补渲染(允许算 = true): void {
     if (this.单面) {
@@ -595,9 +645,12 @@ class OpaqueView implements NodeView {
     const kind = String(node.attrs.mdKind ?? "raw");
     // 单面 / 两面是 **DOM 形状**的差别（有没有宿主），不是属性差别——交给 PM 重建视图，
     // 在这儿将就就会留下"点进去没有可编辑面"或"两面重叠"的怪状态
-    const 该单面 =
+    const 该代码面 =
       kind === "code" && Boolean(node.attrs.mdFenceOpen) && Boolean(node.attrs.mdFenceClose);
-    if (该单面 !== this.单面) return false;
+    const 该数学面 =
+      kind === "math" && Boolean(node.attrs.mdMathOpen) && Boolean(node.attrs.mdMathClose);
+    if (该代码面 !== this.代码面 || 该数学面 !== this.数学面) return false;
+    if ((该代码面 || 该数学面) !== this.单面) return false;
     const 旧开栏 = String(this.节点.attrs.mdFenceOpen ?? "");
     this.节点 = node;
     if (kind !== this.kind) {
@@ -611,7 +664,8 @@ class OpaqueView implements NodeView {
      * 下拉与着色还写着 `go`，屏幕与盘各说一句话。只读缓存（`允许算 = false`），
      * 这条路每次击键都会走。
      */
-    if (this.单面 && String(node.attrs.mdFenceOpen ?? "") !== 旧开栏) this.刷语言(false);
+    if (this.代码面 && String(node.attrs.mdFenceOpen ?? "") !== 旧开栏) this.刷语言(false);
+    this.刷引用();
     // 行数变了才重写那一栏（打字时行数一般不动，这条判据让它在击键路径上零读写）
     this.刷行号();
     // 单面那一种**不算源文本**：`带围栏` 会走自动识别，而 update 每次击键都来一遍
@@ -791,6 +845,21 @@ export const MdOpaque = Node.create({
             出.mdFenceClose = 元.getAttribute("data-md-fence-close") ?? "";
             出.mdFenceBody = 元.getAttribute("data-md-fence-body") === "1";
           }
+          const 数开 = 元.getAttribute("data-md-math-open");
+          if (数开) {
+            出.mdMathOpen = 数开;
+            出.mdMathClose = 元.getAttribute("data-md-math-close") ?? "";
+            出.mdMathBody = 元.getAttribute("data-md-math-body") === "1";
+          }
+          const 缀文 = 元.getAttribute("data-md-quote-marks");
+          if (缀文) {
+            const 缀 = 缀文.split("\u001e");
+            const 锚 = 元.getAttribute("data-md-quote-anchor") ?? "";
+            if (缀可进账本(缀) && 锚可进账本(锚)) {
+              出.mdQuoteMarks = 缀.join("\n");
+              出.mdQuoteAnchor = 锚;
+            }
+          }
           return 出;
         },
       },
@@ -799,6 +868,10 @@ export const MdOpaque = Node.create({
   renderHTML({ node, HTMLAttributes }) {
     const 开 = String(node.attrs.mdFenceOpen ?? "");
     const 闭 = String(node.attrs.mdFenceClose ?? "");
+    const 数开 = String(node.attrs.mdMathOpen ?? "");
+    const 数闭 = String(node.attrs.mdMathClose ?? "");
+    const 缀文 = String(node.attrs.mdQuoteMarks ?? "");
+    const 锚 = String(node.attrs.mdQuoteAnchor ?? "");
     return [
       "pre",
       {
@@ -810,6 +883,19 @@ export const MdOpaque = Node.create({
               "data-md-fence-open": 开,
               "data-md-fence-close": 闭,
               "data-md-fence-body": node.attrs.mdFenceBody ? "1" : "0",
+            }
+          : {}),
+        ...(数开 && 数闭
+          ? {
+              "data-md-math-open": 数开,
+              "data-md-math-close": 数闭,
+              "data-md-math-body": node.attrs.mdMathBody ? "1" : "0",
+            }
+          : {}),
+        ...(缀文
+          ? {
+              "data-md-quote-marks": 缀文.split("\n").join("\u001e"),
+              "data-md-quote-anchor": 锚,
             }
           : {}),
       },
@@ -990,6 +1076,52 @@ class ImageView implements NodeView {
     this.打过字 = false;
   }
 }
+
+/**
+ * 分隔线。**schema 里的原子块**：`---` / `***` / `___` 都是它，原字节躺在 `mdRaw` 里。
+ *
+ * 为什么不留在 `mdOpaque`：那一行没有"正文"可言，整行都是语法记号。两副面孔会逼用户
+ * 点进去对着三个横线改源码——而这里能做的只有"删掉这一块"或"换成别的块"。原子化之后
+ * 屏幕上只有一条线，聚焦、选中、失焦都是同一批 DOM。
+ */
+export const MdDivider = Node.create({
+  name: "mdDivider",
+  group: "block",
+  atom: true,
+  selectable: true,
+  addAttributes() {
+    return mdAttributes;
+  },
+  parseHTML() {
+    return [
+      {
+        tag: "hr[data-md-divider]",
+        // 剪贴板 HTML 里只带形状；类型与账本默认值由这里补齐（`mdKind` 默认是 paragraph）
+        getAttrs: () => ({ mdKind: "divider" }),
+      },
+    ];
+  },
+  renderHTML() {
+    return ["hr", { class: "md-divider", "data-md-divider": "" }];
+  },
+  addNodeView() {
+    return () => {
+      const dom = document.createElement("hr");
+      dom.className = "md-divider";
+      dom.setAttribute("data-md-divider", "");
+      return {
+        dom,
+        // 选中标记与图片 / 代码块同一个属性名：屏幕上一个块被选中该是同一副样子
+        selectNode() {
+          dom.dataset["mdSel"] = "";
+        },
+        deselectNode() {
+          delete dom.dataset["mdSel"];
+        },
+      };
+    };
+  },
+});
 
 /**
  * 图片块。**schema 里的原子块**，字节只有文件里那一行引用：
@@ -1723,11 +1855,21 @@ function 着色装饰(doc: PmNode, schema: Schema, 选: { from: number; to: numb
     doc.forEach((块, off) => {
       if (块.type.name !== "mdOpaque") return;
       const a = 块.attrs as Record<string, unknown>;
+      const 文 = 块.textContent;
+      /**
+       * Callout 的标题行在源文本面里是行内 `<code>` 里的一段文字，`::first-line` 只对
+       * 块容器生效——CSS 那条规则在 WebView2 里一直是空转（实测 600 落到 400）。
+       * 用行内装饰给首行套一个类，两边读同一份字重。
+       */
+      if (a.mdKind === "callout" && a.mdQuoteMarks && 文) {
+        const 换 = 文.indexOf("\n");
+        const 止 = off + 1 + (换 < 0 ? 文.length : 换);
+        if (止 > off + 1) 出.push(Decoration.inline(off + 1, 止, { class: "md-callout-lead" }));
+      }
       // 只覆盖走了围栏账本的那批：正文就是纯代码。没闭栏的围栏不接管（那条路上正文里
       // 本来就带着 ```，给它上色会把围栏当代码关键字）
       if (!a.mdFenceOpen || !a.mdFenceClose) return;
       if (!看得见(off, off + 块.nodeSize)) return;
-      const 文 = 块.textContent;
       if (!文) return;
       const 语 = 上色语言(块, off, 选, () => performance.now() > 死线);
       if (!语) return;
@@ -2105,6 +2247,7 @@ export const mdExtensions = [
   MdHeading,
   MdItem,
   MdOpaque,
+  MdDivider,
   MdImage,
   MdTable,
   MdTableRow,

@@ -5,6 +5,7 @@ import { NodeSelection } from "@tiptap/pm/state";
 import { applyBlockType, blockTypePatch, type BlockTypeId } from "./blocks";
 import { 调色板, 底色of } from "./colors";
 import { serializeInline } from "./inline";
+import { 引用账本 } from "./quoteFace";
 import type { 锚 } from "./rewrite";
 
 /**
@@ -306,10 +307,18 @@ function 转引用(state: EditorState, $: ResolvedPos, 字: number): 应用果 {
   if (!opaque) return { tr: null, 说明: "这个编辑器里没有引用块" };
   const id = typeof 块.attrs.mdId === "string" ? 块.attrs.mdId : "";
   const 源 = `> ${文}${id ? ` ^${id}` : ""}`;
+  const 账 = 引用账本(源, "quote", id || null);
   const 起 = $.before(1);
   const 新 = opaque.create(
-    { ...块.attrs, mdKind: "quote", mdLevel: null, mdChecked: null, mdSig: "" },
-    state.schema.text(源),
+    {
+      ...块.attrs,
+      mdKind: "quote",
+      mdLevel: null,
+      mdChecked: null,
+      mdSig: "",
+      ...(账 ? { mdQuoteMarks: 账.缀.join("\n"), mdQuoteAnchor: 账.锚 } : {}),
+    },
+    state.schema.text(账 && 账.身 ? 账.身 : 源),
   );
   const tr = state.tr.replaceWith(起, 起 + 块.nodeSize, 新);
   // 选中整块：引用立刻以渲染后的样子出现（光标放进块里会把那一面翻回源文本）

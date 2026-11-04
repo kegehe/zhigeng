@@ -12,7 +12,7 @@ import {
   docToJson,
   INSERTABLE,
   insertSourceBlock,
-  moveBlock,
+  moveBlockWithSelection,
   replaceBlockWithSource,
   stampSignatures,
   共同对齐,
@@ -33,6 +33,7 @@ import {
 } from "./blocks";
 import { 归一 } from "./tableSelect";
 import { 改选区, 定锚点, 矩形of, 选区of } from "./tableSelectPlugin";
+import { 起手势, 取消手势, 跟手, 松手势 } from "./blockDrag";
 import { mdExtensions } from "./schema";
 import { 关格式刷, 开格式刷, 能开格式刷, 格式刷状态of } from "./formatPainter";
 import { 就绪后标出 } from "./citeFocus";
@@ -71,6 +72,20 @@ const MARKS: { name: string; 标签: string; 图: 图标名 }[] = [
   { name: "sup", 标签: "上标", 图: "sup" },
   { name: "sub", 标签: "下标", 图: "sub" },
 ];
+
+/**
+ * 块节点上多出来的属性，ProseMirror 的 DOM 观察器会读回去，当成用户改了这篇。
+ * 停一下再写，写完再开。观察器停着的时候发生的变动不会补记。
+ */
+function 不惊动观察器(view: object, 改: () => void) {
+  const 观察 = (view as { domObserver?: { stop(): void; start(): void } }).domObserver;
+  观察?.stop();
+  try {
+    改();
+  } finally {
+    观察?.start();
+  }
+}
 
 /**
  * 所见即所得的正文：**浏览与编辑是同一个实例**，只是 `editable` 不同。
@@ -143,9 +158,13 @@ export function BlockEditor({
     start: number;
     index: number;
   } | null>(null);
-  /** 拖拽时的落位指示线 */
+  /** 拖拽时的落位指示线。松手不读它：落点在抬起那一刻重新量。 */
   const [drop, setDrop] = useState<{ top: number; index: number } | null>(null);
-  const dropRef = useRef<{ top: number; index: number } | null>(null);
+  /** 抓取光标写在 className 里。直接 classList 加上去，下一次 setDrop 重绘会把类名抹掉。 */
+  const [拖着, set拖着] = useState(false);
+  /** 进行中的手势。卸掉编辑器时必须拆监听、摘掉浮层，否则副本留在 body 上。 */
+  const 收拖拽 = useRef<(() => void) | null>(null);
+  const 落地计时 = useRef(0);
   const [linking, setLinking] = useState(false);
   // 格式刷开关走只带 meta 的事务，既不触发 selectionUpdate 也不触发 update；
   // 这个 tick 只用来让气泡上的按扣跟着重渲染（比较引用，见下面的 onTr）
@@ -228,23 +247,38 @@ export function BlockEditor({
     return () => dom.removeEventListener("mousedown", onMouseDown);
   }, [editor]);
 
-  // 鼠标停在哪个块上，手柄就贴到那一块旁边。只在块或位置真的变了时 setState——
-  // mousemove 的频率比击键还高，每下都渲染等于把 G6 的预算花在画一个 ⋮ 上
+  // 鼠标停在哪个块上，手柄就贴到那一块左边。只在块或位置真的变了时 setState——
+  // mousemove 的频率比击键还高，每下都渲染等于把 G6 的预算花在画一个 ⋮ 上。
+  // 不能只听 ProseMirror 的 mouseleave：手柄画在正文盒子外面，鼠标移过去会先离开正文。
+  // 离开的瞬间若把 hover 清掉，手柄在到达之前就被卸掉。改听窗口坐标，页边 28px 内仍算这一块。
   useEffect(() => {
     if (!editor) return;
-    const dom = editor.view.dom;
     const onMove = (ev: MouseEvent) => {
+      const 目标 = ev.target;
+      if (目标 instanceof Element && 目标.closest(".handle")) return;
+      const rect = editor.view.dom.getBoundingClientRect();
+      const 在列内 =
+        ev.clientX >= rect.left - 28 &&
+        ev.clientX <= rect.right &&
+        ev.clientY >= rect.top &&
+        ev.clientY <= rect.bottom;
+      if (!在列内) {
+        setHover(null);
+        return;
+      }
       const b = blockAt(ev.clientX, ev.clientY);
       setHover((h) => (b ? (h && h.start === b.start && h.top === b.top ? h : b) : null));
     };
-    const onLeave = () => setHover(null);
-    dom.addEventListener("mousemove", onMove);
-    dom.addEventListener("mouseleave", onLeave);
-    return () => {
-      dom.removeEventListener("mousemove", onMove);
-      dom.removeEventListener("mouseleave", onLeave);
-    };
+    window.addEventListener("mousemove", onMove);
+    return () => window.removeEventListener("mousemove", onMove);
   }, [editor]);
+
+  useEffect(() => {
+    return () => {
+      收拖拽.current?.();
+      if (落地计时.current) window.clearTimeout(落地计时.current);
+    };
+  }, []);
 
   /**
    * 格子里按下鼠标：定锚点；拖过别的格子（或 Shift 点另一格）扩成矩形选区。
@@ -781,53 +815,175 @@ export function BlockEditor({
    * 用 pointer 事件而不是 HTML5 拖放：一是拖放要在 contenteditable 里和 ProseMirror
    * 自己的 drop 处理抢事件，二是真机验证只能用 CDP 发普通鼠标事件，`dragstart` 那套
    * 它根本触发不了——验证不了的交互不该上生产。
+   *
+   * 三个出口与目录树同一套：`pointerup` 用松手这一刻重新量的落点落子，
+   * `pointercancel` 放弃（触摸被系统抢走时只有 cancel、没有 up），别的 `pointerId` 不理。
    */
   const onHandleDown = (e: React.PointerEvent, from: { index: number; start: number }) => {
+    if (e.button !== 0 || !e.isPrimary) return;
     e.preventDefault();
-    const originY = e.clientY;
-    let moved = false;
-    const move = (ev: PointerEvent) => {
-      if (!moved && Math.abs(ev.clientY - originY) < 5) return;
-      moved = true;
-      const b = blockAt(ev.clientX, ev.clientY);
-      const next = b
-        ? {
-            top: b.top + (b.上半 ? 0 : b.height),
-            index: b.上半 ? b.index : b.index + 1,
-          }
-        : null;
-      dropRef.current = next;
-      setDrop(next);
+    // 点正文会先进入编辑。手柄画在正文外面，不走那条 mousedown。
+    // 不在这里打开编辑，onUpdate 看到 editableRef 仍是 false，拖完这篇不会标脏。
+    if (!editableRef.current) {
+      editableRef.current = true;
+      editor.setEditable(true);
+      startRef.current();
+    }
+    // 上一根指针还没结束（比如点在窗口外松的手）先拆掉，避免两套监听一起落子
+    收拖拽.current?.();
+    let 手势 = 起手势(e.pointerId, from.index, e.clientY);
+    const 量落点 = (x: number, y: number) => {
+      const b = blockAt(x, y);
+      if (!b) return null;
+      return {
+        top: b.top + (b.上半 ? 0 : b.height),
+        index: b.上半 ? b.index : b.index + 1,
+      };
     };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      const target = dropRef.current;
-      dropRef.current = null;
+    const 打开菜单 = () => {
+      const dom = editor.view.nodeDOM(from.start);
+      if (!(dom instanceof HTMLElement)) return;
+      // 与 `blockAt` 同一个参考系：菜单要贴在这一块的下沿，就得按 rect 相对 wrap 算
+      const r = dom.getBoundingClientRect();
+      setMenu({
+        top: r.bottom - (wrap.current?.getBoundingClientRect().top ?? 0) + 4,
+        left: 0,
+        start: from.start,
+      });
+    };
+    const 源块 = () => {
+      const dom = editor.view.nodeDOM(from.start);
+      return dom instanceof HTMLElement ? dom : null;
+    };
+    let 浮层: HTMLElement | null = null;
+    const 放下浮层 = () => {
+      浮层?.remove();
+      浮层 = null;
+    };
+    // 捕获挂在 wrap 上，不挂在手柄上：一拖过 5px 手柄就会卸掉，捕获跟着没了，
+    // 在窗口外松手就收不到 pointerup，浮层会留在屏幕上。
+    const 释放 = () => {
+      const 宿主 = wrap.current;
+      if (!宿主) return;
+      try {
+        if (宿主.hasPointerCapture(e.pointerId)) 宿主.releasePointerCapture(e.pointerId);
+      } catch {
+        // 指针已经结束时再问捕获，浏览器抛 NotFoundError
+      }
+    };
+    /** 整块的一份副本跟着指针走，样式必须和正文里看到的一样，所以套回同一套
+     *  `.prose-note` / `.block-editor` / `.ProseMirror`，不能挂到 body 上裸奔。 */
+    const 拿起 = () => {
+      if (浮层) return;
+      const 源 = 源块();
+      if (!源) return;
+      const r = 源.getBoundingClientRect();
+      const 壳 = document.createElement("div");
+      壳.className = "block-drag-ghost prose-note block-editor";
+      壳.setAttribute("aria-hidden", "true");
+      const 镜 = document.createElement("div");
+      镜.className = "ProseMirror";
+      const 克隆 = 源.cloneNode(true);
+      if (克隆 instanceof HTMLElement) {
+        克隆.removeAttribute("id");
+        克隆.removeAttribute("data-md-landed");
+        克隆.contentEditable = "false";
+        // 外边距是块与块之间的缝，不属于这块看起来的样子。边框盒已经按源块对齐。
+        克隆.style.margin = "0";
+        克隆.querySelectorAll("[id]").forEach((n) => n.removeAttribute("id"));
+        克隆.querySelectorAll("[contenteditable]").forEach((n) => {
+          if (n instanceof HTMLElement) n.contentEditable = "false";
+        });
+        镜.appendChild(克隆);
+      }
+      壳.appendChild(镜);
+      壳.style.left = `${r.left}px`;
+      壳.style.top = `${r.top}px`;
+      壳.style.width = `${r.width}px`;
+      document.body.appendChild(壳);
+      浮层 = 壳;
+    };
+    const 跟着 = (clientY: number) => {
+      if (!浮层) return;
+      浮层.style.transform = `translate3d(0, ${clientY - 手势.原点Y}px, 0)`;
+    };
+    const 收场 = () => {
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", 取消, true);
+      放下浮层();
+      释放();
+      if (收拖拽.current === 收场) 收拖拽.current = null;
+      set拖着(false);
       setDrop(null);
-      if (!moved) {
-        const dom = editor.view.nodeDOM(from.start);
-        if (dom instanceof HTMLElement) {
-          // 与 `blockAt` 同一个参考系：菜单要贴在这一块的下沿，就得按 rect 相对 wrap 算
-          const r = dom.getBoundingClientRect();
-          setMenu({
-            top: r.bottom - (wrap.current?.getBoundingClientRect().top ?? 0) + 4,
-            left: 0,
-            start: from.start,
-          });
-        }
+    };
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== 手势.指针) return;
+      手势 = 跟手(手势, ev.pointerId, ev.clientY);
+      if (!手势.拖过) return;
+      set拖着(true);
+      拿起();
+      跟着(ev.clientY);
+      const 落 = 量落点(ev.clientX, ev.clientY);
+      // from 与 from+1 是原地：线画了松手也不动，不如不画
+      const 有效 = 落 !== null && 落.index !== from.index && 落.index !== from.index + 1;
+      const 下一 = 有效 && 落 ? { top: 落.top, index: 落.index } : { top: -1, index: -1 };
+      setDrop((prev) =>
+        prev && prev.top === 下一.top && prev.index === 下一.index ? prev : 下一,
+      );
+    };
+    const up = (ev: PointerEvent) => {
+      if (ev.pointerId !== 手势.指针) return;
+      // 先量再拆：拆的时候会摘掉浮层。量的途中若视图已经卸了，也得把浮层摘掉。
+      let 结果: ReturnType<typeof 松手势> = { 种类: "放弃" };
+      try {
+        const 此刻 = 量落点(ev.clientX, ev.clientY);
+        结果 = 松手势(手势, 此刻?.index ?? null);
+      } finally {
+        收场();
+      }
+      if (结果.种类 === "点击") {
+        打开菜单();
         return;
       }
-      if (!target) return;
-      const tr = moveBlock(editor.state, from.index, target.index);
-      if (tr) editor.view.dispatch(tr);
+      if (结果.种类 !== "放下") return;
+      const tr = moveBlockWithSelection(editor.state, 结果.from, 结果.to);
+      if (!tr) return;
+      editor.view.dispatch(tr.scrollIntoView());
+      editor.view.focus();
+      const 选 = editor.state.selection;
+      const 起点 =
+        选 instanceof NodeSelection ? 选.from : 选.$from.depth > 0 ? 选.$from.before(1) : -1;
+      if (起点 < 0) return;
+      const 落到 = editor.view.nodeDOM(起点);
+      if (!(落到 instanceof HTMLElement)) return;
+      if (落地计时.current) window.clearTimeout(落地计时.current);
+      // 属性写在块节点上。观察器开着时，它会把这一下读成文档改动。
+      不惊动观察器(editor.view, () => 落到.setAttribute("data-md-landed", ""));
+      落地计时.current = window.setTimeout(() => {
+        落地计时.current = 0;
+        if (!落到.isConnected) return;
+        不惊动观察器(editor.view, () => 落到.removeAttribute("data-md-landed"));
+      }, 240);
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    const 取消 = (ev: PointerEvent) => {
+      if (ev.pointerId !== 手势.指针) return;
+      // 被系统抢走的手势只有 cancel、没有 up。这里必须走「放弃」，不能再落子。
+      if (取消手势().种类 === "放弃") 收场();
+    };
+    收拖拽.current = 收场;
+    try {
+      wrap.current?.setPointerCapture(e.pointerId);
+    } catch {
+      // 指针在按下和捕获之间已经失效
+    }
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", 取消, true);
   };
 
   return (
-    <div className="editor-wrap" ref={wrap}>
+    <div className={拖着 ? "editor-wrap is-dragging" : "editor-wrap"} ref={wrap}>
       <div className="editor-tools">
         <Toolbar editor={editor} />
         {查找开 ? (
@@ -1086,10 +1242,14 @@ export function BlockEditor({
           tabIndex={-1}
           onPointerDown={(e) => onHandleDown(e, { index: hover.index, start: hover.start })}
         >
-          ⋮
+          <span className="grip" aria-hidden="true">
+            ⋮
+          </span>
         </div>
       ) : null}
-      {drop ? <div className="drop-line" style={{ top: drop.top }} aria-hidden="true" /> : null}
+      {drop && drop.index >= 0 ? (
+        <div className="drop-line" style={{ top: drop.top }} aria-hidden="true" />
+      ) : null}
       {menu ? (
         <div
           className="slash"

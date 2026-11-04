@@ -170,8 +170,8 @@ export function 刷格式(
   state.doc.forEach((node, offset) => {
     if (offset + node.nodeSize <= from || offset >= to) return;
     const 型 = node.type.name;
-    // 整块不能带行内 mark：代码 / 引用（marks: ""）与图片（原子块）
-    if (型 === "mdOpaque" || 型 === "mdImage") {
+    // 整块不能带行内 mark：代码 / 引用（marks: ""）与原子块（图片 / 分隔线）
+    if (型 === "mdOpaque" || 型 === "mdImage" || 型 === "mdDivider") {
       跳过.add(offset);
       return;
     }

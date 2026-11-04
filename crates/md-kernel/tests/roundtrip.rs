@@ -281,6 +281,17 @@ fn 边界_分隔符三义性() {
     assert_eq!(hr.blocks.len(), 3);
     assert!(matches!(hr.blocks[1].kind, Kind::Divider));
     assert_eq!(&render_canonical(&hr), "上文\n\n---\n\n下文\n");
+    // 分隔线的块锚只能独占下一行；行内 `--- ^b-…` 混进 `^` 就不再是分隔线
+    let anchored = parse("上文\n\n---\n^b-k3x9m2v7qa\n\n下文\n");
+    assert_eq!(anchored.blocks.len(), 3);
+    assert!(matches!(anchored.blocks[1].kind, Kind::Divider));
+    assert_eq!(anchored.blocks[1].id.as_deref(), Some("b-k3x9m2v7qa"));
+    assert_eq!(
+        &render_canonical(&anchored),
+        "上文\n\n---\n^b-k3x9m2v7qa\n\n下文\n"
+    );
+    let inline = parse("上文\n\n--- ^b-k3x9m2v7qa\n\n下文\n");
+    assert!(matches!(inline.blocks[1].kind, Kind::Paragraph));
 }
 
 #[test]

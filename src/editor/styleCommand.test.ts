@@ -335,7 +335,8 @@ describe("变成引用", () => {
     expect(块新.attrs.mdRaw).toBe("正文一段\n");
     expect(块新.attrs.mdGap).toBe("");
     expect(块新.attrs.mdSig).toBe("");
-    expect(块新.textContent).toBe("> 正文一段 ^b-7");
+    expect(块新.textContent).toBe("正文一段 ^b-7");
+    expect(块新.attrs.mdQuoteMarks).toBe("> ");
     // 落笔后整块选中：引用以渲染后的样子出现，不会先翻回源文本
     expect(editor.state.selection).toBeInstanceOf(NodeSelection);
     editor.destroy();

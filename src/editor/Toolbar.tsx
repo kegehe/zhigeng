@@ -275,6 +275,11 @@ export function Toolbar({ editor }: { editor: Editor }) {
             </option>
           ))}
         </select>
+      ) : typeName === "mdDivider" ? (
+        // 分隔线是原子块：屏幕上就是一条线，能做的就是删掉它或换成别的块
+        <select aria-label="块类型" value="divider" disabled>
+          <option value="divider">分隔线</option>
+        </select>
       ) : typeName === "mdImage" ? (
         // 图片块没有"类型"可转：那一行引用整体就是它的字节，能改的只有图注
         <select aria-label="块类型" value="image" disabled>
