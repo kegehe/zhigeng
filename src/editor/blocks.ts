@@ -984,21 +984,79 @@ export function 设首行缩进(state: EditorState): { tr: Transaction | null; �
  *
  * - 右半是新的一项，编号得接着左半往下数（否则列表中间凭空出现一个 `1.`）；
  * - 待办不带勾（否则拆一下"已完成"就多出一项已完成的）；
- * - 行内字段只属于被拆的那一块本身，复制过去会让 `k:: v` 在文件里出现两次。
+ * - 行内字段是块尾的灰字（`k:: v`），属于**原来那一块的结尾**：右半还有字就跟着右半走
+ *   （灰字仍守在段落末尾），右半是空的（在块尾按回车）就留在左半。两边各带一份等于
+ *   文件里凭空多出一条 `k:: v`；两边都不带则是用户写的字段被回车吃掉。
  *
- * `列表回车`与工具栏按光标拆块共用这一份，两处各写一份就会一边修好、一边继续错。
+ * `列表回车`、`正文回车`与工具栏按光标拆块共用这一份，几处各写一份就会一边修好、一边继续错。
  */
 function 校正拆分右半(tr: Transaction, 左起点: number, 右起点: number): void {
   const 左 = tr.doc.nodeAt(左起点);
   const 右 = tr.doc.nodeAt(右起点);
   if (!左 || !右) return;
-  const 改: Record<string, unknown> = { mdFields: [] };
+  const 右有字 = 右.textContent.length > 0;
+  const 左有字 = 左.textContent.length > 0;
+  /**
+   * 右半是拆出来的新块：源切片 / 签名只属于左半，块锚按"有字的那一半"留
+   * （与 `LedgerGuard` 同一条）。这里自己清而不等守卫，是因为下面给左半摘字段用的
+   * `setNodeMarkup` 会整段替换左半的位置——守卫反查映射时会把**左半**也判成新造的，
+   * 于是把左半的 `mdRaw` 一起清掉，序号 `3.` 就落回 `1.`。右半先清成空，守卫看到的
+   * "同源"只剩左半一份，就不会误伤。
+   */
+  const 右改: Record<string, unknown> = {
+    mdRaw: "",
+    mdSig: "",
+    mdId: 右有字 && !左有字 ? 右.attrs.mdId : null,
+    mdFields: 右有字 ? (右.attrs.mdFields ?? []) : [],
+  };
+  // 字段是块尾的灰字：右半还有字就跟着右半走（灰字仍守在段落末尾），右半是空的
+  // （在块尾按回车）就留在左半。两边各带一份等于文件里凭空多出一条 `k:: v`。
+  if (右有字 && Array.isArray(左.attrs.mdFields) && 左.attrs.mdFields.length) {
+    tr.setNodeMarkup(左起点, undefined, { ...左.attrs, mdFields: [] });
+  }
   if (右.type.name === "mdItem") {
     const 类 = String(右.attrs.mdKind ?? "");
-    if (类 === "numbered") 改.mdMarker = 下一项有序记号(左, Number(右.attrs.mdDepth ?? 0));
-    else if (类 === "todo") 改.mdChecked = false;
+    if (类 === "numbered") 右改.mdMarker = 下一项有序记号(左, Number(右.attrs.mdDepth ?? 0));
+    else if (类 === "todo") 右改.mdChecked = false;
   }
-  tr.setNodeMarkup(右起点, undefined, { ...右.attrs, ...改 });
+  tr.setNodeMarkup(右起点, undefined, { ...右.attrs, ...右改 });
+}
+
+/**
+ * 正文与标题里的回车。拆块形状与 PM 默认的 `splitBlock` 一致：**块尾**回车续一个
+ * 默认的正文块（标题写完了，下一行不是标题），段首 / 段中照抄原类型与层级。
+ * 补的一件事：**行内字段不许被整份复制给两半**——PM 拆块复制 attrs，一次回车就在
+ * 文件里多出一条 `k:: v`。字段归属由 `校正拆分右半` 按"留在块尾"决定。
+ *
+ * 列表项与结构化引用各有自己的回车（`列表回车` / `引用回车`），在按键链里排在前面；
+ * 表格格子、不透明块里的回车不归这里管（表格有自己的行列语义）。
+ */
+export function 正文回车(state: EditorState): Transaction | null {
+  const sel = state.selection;
+  if (!(sel instanceof TextSelection)) return null;
+  const { $from, $to } = sel;
+  if ($from.depth !== 1 || $from.parent !== $to.parent) return null;
+  const 型 = $from.parent.type.name;
+  if (型 !== "mdParagraph" && 型 !== "mdHeading") return null;
+
+  const tr = state.tr;
+  if (!sel.empty) tr.deleteSelection();
+  const $ = tr.selection.$from;
+  const node = $.parent;
+  if (node.type.name !== 型) return null;
+  const 块起点 = $.before($.depth);
+  const atEnd = $.end($.depth) === $.pos;
+  const 段型 = state.schema.nodes.mdParagraph;
+  const 右型 = atEnd && 段型 ? 段型 : node.type;
+  const 规格 = [{ type: 右型, attrs: atEnd ? null : node.attrs }];
+  if (!canSplit(tr.doc, $.pos, 1, 规格)) return null;
+  tr.split($.pos, 1, 规格);
+  const 左 = tr.doc.nodeAt(块起点);
+  if (!左) return tr;
+  const 右起点 = 块起点 + 左.nodeSize;
+  校正拆分右半(tr, 块起点, 右起点);
+  tr.setSelection(TextSelection.create(tr.doc, Math.min(右起点 + 1, tr.doc.content.size)));
+  return tr;
 }
 
 /**
@@ -1516,6 +1574,23 @@ export function 选区可成结构块(state: EditorState): boolean {
   return 块们.length > 0 && 块们.every((b) => 是可转块(b.node));
 }
 
+/**
+ * 摘掉行尾的块锚，返回剩下的部分；这一行没有块锚时给 null。
+ *
+ * 判据照 md-kernel `trailing_id`：锚前面是空格 / 制表符（或者整行只有锚），锚后面
+ * 只允许行尾空白（内核先 `trim_end` 再认）。锚与它前面的分隔空白一起摘——内核交出来
+ * 的正文本来就把这段 `trim_end` 掉了，只摘 ` ^id` 会把制表符 / 多个空格留进引用正文。
+ */
+function 去尾锚(行: string, id: string): string | null {
+  const 尾 = `^${id}`;
+  const 位 = 行.lastIndexOf(尾);
+  if (位 < 0) return null;
+  if (/[^ \t]/.test(行.slice(位 + 尾.length))) return null;
+  const 前 = 行.slice(0, 位);
+  if (前 !== "" && !/[ \t]$/.test(前)) return null;
+  return 前.replace(/[ \t\r\n]+$/, "");
+}
+
 /** 块在文件里的源文本：没改过用 `raw`，改过用序列化；去掉结尾空行与块锚 */
 function 块原始源(node: PmNode): string {
   const a = node.attrs as Record<string, unknown>;
@@ -1525,16 +1600,17 @@ function 块原始源(node: PmNode): string {
   let 源 = (原样 ? raw : serializeNode(node)).replace(/[\r\n]+$/, "");
   const id = typeof a.mdId === "string" ? a.mdId : "";
   // 块锚跟着块走，不该被当成正文包进引用；转出来的新块没有可放的锚（多块时也放不下）。
-  // 段落 / 标题 / 列表项的锚是序列化器补的一个空格加 `^id`，只摘这一段
-  const 锚 = id ? ` ^${id}` : "";
-  if (锚 && 源.endsWith(锚)) {
-    源 = 源.slice(0, -锚.length);
-  } else if (锚) {
+  if (id) {
+    const 去 = 去尾锚(源, id);
+    if (去 !== null) return 去;
     // setext 标题的源是"标题行 + 下划线"，锚在**下划线前那一行**的末尾
     // （内核从下划线前的全文取 trailing_id，见 md-kernel `take_paragraph`）。
     // 只认可紧贴末行下划线的那一处，别把正文里的同名文字当锚摘掉
     const m = /^([\s\S]*?)(\r?\n)([ \t]*(?:=+|-+)[ \t]*\r?)$/.exec(源);
-    if (m && m[1]!.endsWith(锚)) 源 = m[1]!.slice(0, -锚.length) + m[2]! + m[3]!;
+    if (m) {
+      const 去行 = 去尾锚(m[1]!, id);
+      if (去行 !== null) return 去行 + m[2]! + m[3]!;
+    }
   }
   return 源;
 }
@@ -1985,17 +2061,27 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     // 内容，给它一个空行等于在开头凭空多一行（有 front-matter 时那个空行倒是必须）；
     // ② 回车拆在段首，前一半是空块、被下面那条规则整个跳过，此时"第二块"其实是第一
     // 个落笔的块，按 index 判就会给它补出前导空行。
-    // 新块一般现算一行空行；但**替换 / 转换出来的块**可能带着原块多留的空行
+    // 新块一般现算一行空行；但**替换 / 转换出来的结构块**可能带着原块多留的空行
     // （`"\n\n"` 及以上）。那是文件的排版，不该因为换了块类型就被压成一行。
-    // 只认"多出一行以上"的 gap：拆块复制来的 `""` / `"\n"` 仍按下面现算的规矩来，
-    // 否则从首块（gap `""`）拆出来的右半会紧贴新块，连原有的空行都没了。
+    // **只对结构块开放**：代码 / 引用 / callout / 公式 / 表格 / 分隔线是从原块整块换过来的，
+    // 空白属于那个位置；而文字块（段落 / 标题 / 列表项 / 图片）的 `mdGap` 只可能来自
+    // 拆块时 attrs 被整份复制——那不是排版，是两块之间本来只有一个空行，右半却把
+    // 左半与前驱之间的两行空白也带走了（探针：首块 gap `"\n\n"` 拆一次，
+    // 落盘 `甲\n\n\n乙\n\n\n丙\n`）。拆出来的新块按下面现算的规矩来。
+    const 结构块 =
+      kind === "code" ||
+      kind === "quote" ||
+      kind === "callout" ||
+      kind === "math" ||
+      kind === "table" ||
+      kind === "divider";
     const 存留空行 = String(a.mdGap ?? "");
     let gap =
       raw.length > 0
         ? 存留空行
         : continuesList || !out
           ? ""
-          : 存留空行.length > 1
+          : 结构块 && 存留空行.length > 1
             ? 存留空行
             : "\n";
     /**

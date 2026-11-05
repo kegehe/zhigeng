@@ -30,6 +30,7 @@ import {
   列表退格,
   引用回车,
   引用退格,
+  正文回车,
   列表跳过说明,
   点待办前缀,
   设列表,
@@ -1804,7 +1805,7 @@ export const BlockKeys = Extension.create({
             if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
             const 做 =
               event.key === "Enter"
-                ? (s: EditorState) => 列表回车(s) ?? 引用回车(s)
+                ? (s: EditorState) => 列表回车(s) ?? 引用回车(s) ?? 正文回车(s)
                 : event.key === "Backspace"
                   ? (s: EditorState) => 列表退格(s) ?? 引用退格(s)
                   : null;

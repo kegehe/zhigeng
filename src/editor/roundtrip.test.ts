@@ -1200,7 +1200,7 @@ describe("工具栏把选区转成结构块、按光标位置插入", () => {
     editor.destroy();
   });
 
-  it("行中插结构块不把行内字段复制给后半", () => {
+  it("行中插结构块：行内字段跟着后半走，不会两份", () => {
     const doc: EditDoc = {
       frontMatter: "",
       trailingGap: "",
@@ -1224,9 +1224,52 @@ describe("工具栏把选区转成结构块、按光标位置插入", () => {
     const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
     expect(tr).not.toBeNull();
     editor.view.dispatch(tr!);
-    // 字段属于被拆的原来那一块：右半再写一次就是凭空多出一条 k:: v
+    // 字段是块尾的灰字：右半还有字就跟着右半（仍在段落末尾），左半不再带一份
     expect(docToMarkdown(editor.state.doc, doc)).toBe(
-      "甲 k:: v\n\n```\n\n```\n\n乙\n"
+      "甲\n\n```\n\n```\n\n乙 k:: v\n"
+    );
+    editor.destroy();
+  });
+
+  it("编号项行中插结构块：原块多留的空行不跟着右半复制一份", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "甲\n",
+          gapBefore: "",
+          content: "甲",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "numbered",
+          id: null,
+          raw: "3. 项甲乙\n",
+          gapBefore: "\n\n",
+          content: "项甲乙",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    // 「项」与「甲」之间；拆块把 gap `"\n\n"` 复制给右半，右半不是结构块，必须现算
+    editor.commands.setTextSelection(5);
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "甲\n\n\n3. 项\n\n```\n\n```\n\n4. 甲乙\n"
     );
     editor.destroy();
   });
@@ -1257,6 +1300,54 @@ describe("工具栏把选区转成结构块、按光标位置插入", () => {
     editor.view.dispatch(tr!);
     expect(docToMarkdown(editor.state.doc, doc)).toBe("> 标题\n> ===\n");
     editor.destroy();
+  });
+
+  it("块锚前是制表符 / 多个空格、锚后还有行尾空白时同样摘干净", () => {
+    const 转 = (blocks: EditDoc["blocks"]) => {
+      const doc: EditDoc = { frontMatter: "", trailingGap: "", blocks };
+      const editor = createTestEditor(doc);
+      editor.commands.setTextSelection({ from: 1, to: 3 });
+      const tr = insertSourceBlockForSelection(editor.state, "quote", 骨架("quote"));
+      expect(tr).not.toBeNull();
+      editor.view.dispatch(tr!);
+      const out = docToMarkdown(editor.state.doc, doc);
+      editor.destroy();
+      return out;
+    };
+    const 段块 = (raw: string, content: string): EditDoc["blocks"] => [
+      {
+        kind: "paragraph",
+        id: "b-p1",
+        raw,
+        gapBefore: "",
+        content,
+        level: null,
+        checked: null,
+        align: null,
+        fields: [],
+        children: [],
+      },
+    ];
+    // 内核的 trailing_id 先 trim_end，分隔符认空格 / 制表符；只摘 ` ^id` 会把制表符和
+    // 锚后的空格一起包进引用正文（`> 标题\t  `）
+    expect(转(段块("标题\t^b-p1  \n", "标题"))).toBe("> 标题\n");
+    expect(转(段块("标题  ^b-p1\n", "标题"))).toBe("> 标题\n");
+
+    const setext: EditDoc["blocks"] = [
+      {
+        kind: "heading",
+        id: "b-p1",
+        raw: "标题\t^b-p1  \n===\n",
+        gapBefore: "",
+        content: "标题",
+        level: 1,
+        checked: null,
+        align: null,
+        fields: [],
+        children: [],
+      },
+    ];
+    expect(转(setext)).toBe("> 标题\n> ===\n");
   });
 
   it("转换成结构块沿用原块的 gap：作者多留的空行不被压掉", () => {
@@ -1622,7 +1713,7 @@ describe("回车拆段不许把原块的账本留给新块", () => {
     editor.destroy();
   });
 
-  it("列表项从中间拆开时行内字段不复制给新项", () => {
+  it("列表项从中间拆开时行内字段跟着后半走，不再复制一份", () => {
     const blocks: EditDoc["blocks"] = [
       { ...段("- 项甲 k:: v\n", "", "项甲"), kind: "bullet", fields: [["k", "v"]] },
     ];
@@ -1630,8 +1721,67 @@ describe("回车拆段不许把原块的账本留给新块", () => {
     const editor = createTestEditor(doc);
     editor.commands.setTextSelection(2);
     expect(按Enter(editor)).toBe(true);
-    // 字段属于被拆的原来那一项；复制给新项就是文件里凭空多出一条 k:: v
-    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 项 k:: v\n- 甲\n");
+    // 字段是块尾的灰字：拆开后仍守在段落末尾（右半）。两边各带一份 = 凭空多一条 k:: v
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 项\n- 甲 k:: v\n");
+    editor.destroy();
+  });
+
+  it("段落中间回车：字段跟着后半走；块尾回车：字段留在左半", () => {
+    const 中间块: EditDoc["blocks"] = [
+      { ...段("甲乙 k:: v\n", "", "甲乙"), kind: "paragraph", fields: [["k", "v"]] },
+    ];
+    const 中间装 = 装(中间块);
+    const 中间 = createTestEditor(中间装.doc);
+    中间.commands.setTextSelection(2);
+    expect(按Enter(中间)).toBe(true);
+    expect(docToMarkdown(中间.state.doc, 中间装.doc)).toBe("甲\n\n乙 k:: v\n");
+    中间.destroy();
+
+    const 块尾块: EditDoc["blocks"] = [
+      { ...段("甲 k:: v\n", "", "甲"), kind: "paragraph", fields: [["k", "v"]] },
+    ];
+    const 块尾装 = 装(块尾块);
+    const 块尾 = createTestEditor(块尾装.doc);
+    块端(块尾, 0, -1);
+    expect(按Enter(块尾)).toBe(true);
+    块尾.view.dispatch(块尾.state.tr.insertText("乙"));
+    // 右半是空的：字段原本就在段落末尾，留在左半，新段落不带
+    expect(docToMarkdown(块尾.state.doc, 块尾装.doc)).toBe("甲 k:: v\n\n乙\n");
+    块尾.destroy();
+  });
+
+  it("标题里回车：块尾续正文，段中仍拆成两个标题", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("## 标题\n", "", "标题"), kind: "heading", level: 2 },
+    ];
+    const { doc } = 装(blocks);
+    const 尾 = createTestEditor(doc);
+    块端(尾, 0, -1);
+    expect(按Enter(尾)).toBe(true);
+    尾.view.dispatch(尾.state.tr.insertText("正文"));
+    // 与 PM 默认的 `splitBlock` 同一条：在块尾回车，新块是正文，不是又一个标题
+    expect(docToMarkdown(尾.state.doc, doc)).toBe("## 标题\n\n正文\n");
+    尾.destroy();
+
+    const 中 = createTestEditor(doc);
+    中.commands.setTextSelection(2);
+    expect(按Enter(中)).toBe(true);
+    expect(docToMarkdown(中.state.doc, doc)).toBe("## 标\n\n## 题\n");
+    中.destroy();
+  });
+
+  it("段落中间回车：右半不继承原块与前驱之间的多行空行", () => {
+    const blocks: EditDoc["blocks"] = [
+      段("甲\n", "", "甲"),
+      段("乙\n", "\n\n", "乙"),
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    块端(editor, 1, -1);
+    expect(按Enter(editor)).toBe(true);
+    editor.view.dispatch(editor.state.tr.insertText("丙"));
+    // 守卫没拦住时右半带着 gap `"\n\n"`，落盘是 `乙\n\n\n丙`（两块之间凭空多一行）
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n\n乙\n\n丙\n");
     editor.destroy();
   });
 
