@@ -2433,6 +2433,22 @@ describe("自动识别语言：猜得出来，但不许偷改文件", () => {
     editor.destroy();
   });
 
+  it("只读：语言下拉也写不进文件（它的 change 不归 PM 管）", () => {
+    // 与图注框同一条缺口：`dispatch` 不看 `editable`。演示里下拉若还能被触发，
+    // 这一笔会绕过"只读"，而且 `onUpdate` 还会因为不在编辑态而不标脏。
+    const 源 = "```rust\nfn main() {}\n```\n";
+    const d = 文档(裸(源));
+    const editor = createTestEditor(d);
+    editor.setEditable(false);
+    const 牌 = (editor.view.nodeDOM(0) as HTMLElement).querySelector<HTMLSelectElement>(
+      "select.md-lang"
+    )!;
+    牌.value = "go";
+    牌.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(docToMarkdown(editor.state.doc, d)).toBe(源);
+    editor.destroy();
+  });
+
   it("下拉选「无」把开栏改回光秃秃的 ```，选「纯文本」写 text", () => {
     const d = 文档(裸("```js\nconst a = 1;\n```\n"));
     const editor = createTestEditor(d);

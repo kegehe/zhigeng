@@ -405,6 +405,9 @@ class OpaqueView implements NodeView {
       牌.className = "md-lang";
       牌.setAttribute("aria-label", "代码语言");
       牌.title = "代码语言（写进 ``` 后面）";
+      // 只读正文（浏览 / 演示）里这个下拉只是"语言是什么"的标签，不是可操作控件。
+      // 它不归 ProseMirror 管，`editable` 不会自动照顾它——真机点一下照样改文档。
+      牌.disabled = !this.view.editable;
       for (const 项 of 语言清单) {
         const o = document.createElement("option");
         o.value = 项.值;
@@ -598,6 +601,9 @@ class OpaqueView implements NodeView {
 
   /** 选语言 = 改开栏行的 info 首词，缩进、围栏长度、后面那串 `// 注释` 都原样留着 */
   private 改语言(值: string): void {
+    // 与 `改注` 同一条闸：`dispatch` 不看 `editable`，只读时这个下拉若还能被触发
+    // （禁用状态被绕过、或 NodeView 建在只读态），就会改到一篇"只是看看"的正文。
+    if (!this.view.editable) return;
     let pos: number | undefined;
     try {
       pos = this.位置();
@@ -1137,6 +1143,9 @@ class ImageView implements NodeView {
     注.setAttribute("aria-label", "图注");
     注.placeholder = "图注（可留空）";
     注.title = "图注：写进文件里 ![[…|这里]] 的那一段";
+    // 只读时不收字：只拦 `change` 不够——演示里打进去的字会留在框里，退出后再
+    // 触发一次 `change`（blur）就写进文件了。输入框不归 PM 的 `editable` 管。
+    注.readOnly = !this.视图.editable;
     // 用 change 而不是 input：只想聚焦看一眼不该改文件，也不该把整篇标成未保存
     注.addEventListener("change", () => this.改注(注.value));
     // 只有用户真打过字才算"框里有还没进文档的内容"。不记这一笔，撤销之后外部更新会被

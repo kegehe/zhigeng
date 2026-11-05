@@ -201,6 +201,23 @@ export function BlockEditor({
     extensions: mdExtensions,
     content: json,
     editable,
+    editorProps: {
+      handleDOMEvents: {
+        /**
+         * 只读正文里的 `<a href>` 会被浏览器当成普通链接：点一下整个 WebView 就跳到站外，
+         * 而这扇窗没有地址栏也没有后退。演示是只读场景，这一下必须拦在应用里。
+         * 以后要"点链接真打开"，走系统浏览器（opener），不能用 WebView 导航顶替。
+         */
+        click: (_view, ev) => {
+          if (!lockedRef.current) return false;
+          const 目标 = ev.target;
+          if (!(目标 instanceof Element) || !目标.closest("a[href]")) return false;
+          ev.preventDefault();
+          ev.stopPropagation();
+          return true;
+        },
+      },
+    },
     onCreate: ({ editor: e }) => {
       const tr = stampSignatures(e.state);
       if (tr) e.view.dispatch(tr);
@@ -214,7 +231,15 @@ export function BlockEditor({
   useEffect(() => {
     editableRef.current = editable;
     if (editor && editor.isEditable !== editable) editor.setEditable(editable);
-  }, [editor, editable]);
+    if (!editor) return;
+    // NodeView 里的原生控件不归 ProseMirror 的 `editable` 管：代码语言下拉在只读时
+    // 照样 `dispatch`，图注框照样收字。这两个闸要跟着开关一起拨，否则演示里能改文件。
+    const 只读 = !editable || locked;
+    for (const 牌 of editor.view.dom.querySelectorAll<HTMLSelectElement>("select.md-lang"))
+      牌.disabled = 只读;
+    for (const 框 of editor.view.dom.querySelectorAll<HTMLInputElement>(".md-img-alt"))
+      框.readOnly = 只读;
+  }, [editor, editable, locked]);
 
   // 实例出口。走 ref 而不直接用闭包：回调是 App 传来的 setState，本来就近乎稳定，
   // 但卸载那笔清理发生在最后一次渲染之后，读 ref 才不会把旧闭包里的旧 setter 放出来
@@ -670,7 +695,9 @@ export function BlockEditor({
   useEffect(() => {
     if (!editor) return;
     const on键 = (e: KeyboardEvent) => {
-      if (e.repeat) return;
+      // 演示锁：查找栏在壳里是收起来的，快捷键却还会把焦点塞进一个看不见的输入框，
+      // 退出后它再冒出来。演示期间这一路整个不响应。
+      if (e.repeat || lockedRef.current) return;
       const el = e.target instanceof HTMLElement ? e.target : null;
       const 在查找栏 = !!el?.closest(".find-bar");
       const 在别的输入 =
@@ -961,6 +988,12 @@ export function BlockEditor({
     };
     const up = (ev: PointerEvent) => {
       if (ev.pointerId !== 手势.指针) return;
+      // 拖到一半进了演示：这一下不能落块。手柄的 mousedown 只挡"在演示里起拖"，
+      // 挡不住"已经拖起来了，再把窗口切成演示"。
+      if (lockedRef.current) {
+        收场();
+        return;
+      }
       // 先量再拆：拆的时候会摘掉浮层。量的途中若视图已经卸了，也得把浮层摘掉。
       let 结果: ReturnType<typeof 松手势> = { 种类: "放弃" };
       try {

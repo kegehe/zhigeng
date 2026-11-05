@@ -2254,6 +2254,14 @@
 [data-present="1"] .drop-line {
   display: none;
 }
+/* 演示里还剩两处"编辑器的手"：图注工具条与 AI 坞。图注输入框在只读时已改成
+   `readOnly`，工具条本身没有观看价值，收走；AI 坞**不卸载**（对话轮次与草稿都在
+   组件里，重挂一次就丢），只用 CSS 收起。拖拽浮层是"拖到一半按了 F11"的残留。 */
+[data-present="1"] .md-img-bar,
+[data-present="1"] .ai-dock,
+[data-present="1"] .block-drag-ghost {
+  display: none;
+}
 /* 正文在演示里自己留白：不再借 `px-6 py-8`（那两个类在演示分支里已摘掉，
    这里补回更宽的一档）。字号必须落在 `present-surface` 上：body 的 15.5px 是
    在 body 上算好的，改根节点的 `--text-base` 不会让继承值跟着变。 */

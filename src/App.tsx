@@ -404,6 +404,15 @@ export function App() {
   const 演示Hud亮 = useRef(false);
   const 演示计时 = useRef<number | null>(null);
   const 演示Hud = useRef<HTMLDivElement>(null);
+  /**
+   * 进/退演示每渲染更新一份。键盘监听只建一次，不能让它抓住某个旧 `persist`：
+   * 自动保存成功后 `savedDraft` / `baseHash` 都换了，旧闭包再存一次就是拿旧哈希
+   * 去比新文件——同一份内容也会被判成冲突，F11 这条主入口就废了。
+   */
+  const 进演示用 = useRef<() => void>(() => {});
+  const 退演示用 = useRef<() => void>(() => {});
+  /** 进入演示的单飞锁。窗口调用是异步的，光靠 `presenting` 挡不住连按/连点。 */
+  const 进演示中 = useRef(false);
   const editing = mode === "inline";
   const dirty = inlineRev > 0;
   const unsaved = editing && dirty;
@@ -1522,27 +1531,38 @@ export function App() {
    * 全屏失败就什么都不改——屏幕四周还留着一圈窗口边框却叫"演示"，比不进去更让人困惑。
    */
   const enterPresent = async () => {
-    if (presenting || mode !== "inline" || !selected || !editDoc) return;
-    if (!(await persist())) {
-      setFlash("这篇还没保存——先处理冲突或错误提示");
-      return;
-    }
-    if (win) {
-      try {
-        演示窗前.current = {
-          fullscreen: await win.isFullscreen(),
-          maximized: await win.isMaximized(),
-        };
-        await win.setFullscreen(true);
-      } catch (e) {
-        setError(describeError(e).message);
+    if (进演示中.current || presenting || mode !== "inline" || !selected || !editDoc) return;
+    进演示中.current = true;
+    try {
+      // 停手 800ms 的自动保存可能还挂在计时器上。它和下面这次 persist 会拿同一个
+      // 旧哈希同时写盘，后到的那笔被后端判成冲突。这一笔由我们同步存掉，计时器撤掉。
+      if (saveTimer.current !== null) {
+        window.clearTimeout(saveTimer.current);
+        saveTimer.current = null;
+      }
+      if (!(await persist())) {
+        setFlash("这篇还没保存——先处理冲突或错误提示");
         return;
       }
-    } else if (document.documentElement.requestFullscreen) {
-      // 浏览器里没有 Tauri 窗口；能进 DOM 全屏就进，不能就只做窗口内演示
-      await document.documentElement.requestFullscreen().catch(() => {});
+      if (win) {
+        try {
+          演示窗前.current = {
+            fullscreen: await win.isFullscreen(),
+            maximized: await win.isMaximized(),
+          };
+          await win.setFullscreen(true);
+        } catch (e) {
+          setError(describeError(e).message);
+          return;
+        }
+      } else if (document.documentElement.requestFullscreen) {
+        // 浏览器里没有 Tauri 窗口；能进 DOM 全屏就进，不能就只做窗口内演示
+        await document.documentElement.requestFullscreen().catch(() => {});
+      }
+      setPresenting(true);
+    } finally {
+      进演示中.current = false;
     }
-    setPresenting(true);
   };
 
   /**
@@ -1568,6 +1588,11 @@ export function App() {
       setPresenting(false);
     }
   };
+
+  // 键盘监听只建一次，但这两个函数依赖 persist / presenting 等当次渲染的值：
+  // 每次渲染把最新一份挂到 ref 上，监听只调 ref（与 `落子用` 同一个理由）。
+  进演示用.current = () => void enterPresent();
+  退演示用.current = () => void exitPresent();
 
   // 演示浮层：指针 / 键盘一动就亮，停手 2.4 秒自己收。只在"亮→暗"交界处 setState，
   // 否则每一次 pointermove 都要把整个 App 重渲染一遍。
@@ -1630,20 +1655,32 @@ export function App() {
     // 浮层关掉要回到开它之前的地方，否则键盘用户每开一次都得重新找光标
     (焦点回.current as HTMLElement | null)?.focus?.();
   };
+  /**
+   * 演示的 Esc / F11 走**捕获**：格式刷、AI 坞、浮层都可能在自己的 Esc 上
+   * `stopPropagation`，退演出的这一键不能排在它们后面——否则第一下只收掉刷子，
+   * 用户以为演示卡住了。只拦这两键，其余照旧（正文已经被 locked 锁住）。
+   */
+  useEffect(() => {
+    if (!presenting) return;
+    const on键 = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" && e.key !== "F11") return;
+      e.preventDefault();
+      e.stopPropagation();
+      // 长按 F11 的重复要是放进来，退出后还会被下面那条监听当成"进入"
+      if (!e.repeat) 退演示用.current();
+    };
+    window.addEventListener("keydown", on键, true);
+    return () => window.removeEventListener("keydown", on键, true);
+  }, [presenting]);
+
   useEffect(() => {
     const on键 = (e: KeyboardEvent) => {
-      // 演示时整个键盘只认两件事：Esc / F11 退出。命令面板、设置页那些入口
-      // 都在收走的壳里，让它们继续响应等于给用户留一串看不见的开关。
-      if (presenting) {
-        if (e.key === "Escape" || e.key === "F11") {
-          e.preventDefault();
-          void exitPresent();
-        }
-        return;
-      }
+      // 演示时整个键盘只认两件事：Esc / F11 退出（见上一条捕获监听）。
+      // 命令面板、设置页那些入口都在收走的壳里，让它们继续响应等于给用户留一串看不见的开关。
+      if (presenting || e.repeat) return;
       if (e.key === "F11" && !palette && mode === "inline" && selected && editDoc) {
         e.preventDefault();
-        void enterPresent();
+        进演示用.current();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -3235,8 +3272,10 @@ export function App() {
               )}
             </main>
             {/* 底部 AI 对话框：悬浮在正文列下沿，**不随滚动移动**（它在 main 外面）。
-                只在"真的有一篇在编辑/浏览"时出现——别的页面没有正文可改。 */}
-            {!presenting && liveEditor && selected ? (
+                只在"真的有一篇在编辑/浏览"时出现——别的页面没有正文可改。
+                演示时**不卸载**、由 CSS 收起：对话轮次与未发送草稿都在组件内部，
+                为了收一层壳把用户聊到一半的内容扔掉，代价不对等。 */}
+            {liveEditor && selected ? (
               <AiDock
                 // 换一篇就重挂：上一轮的问答、钉住状态与草稿都不该跟到下一篇
                 key={selected.rel}
