@@ -1138,6 +1138,139 @@ describe("工具栏把选区转成结构块、按光标位置插入", () => {
     expect(docToMarkdown(editor.state.doc, doc)).toBe("## 甲\n\n## 乙\n\n## 丙\n");
     editor.destroy();
   });
+
+  it("编号项行中插结构块：拆出来的后半接着往下编号，不退回 1.", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "numbered",
+          id: null,
+          raw: "3. 项甲乙\n",
+          gapBefore: "",
+          content: "项甲乙",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2); // 项 | 甲乙
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    // 拆块把 attrs 整份复制给右半；不校正的话这里会是 `1. 甲乙`
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "3. 项\n\n```\n\n```\n\n4. 甲乙\n"
+    );
+    editor.destroy();
+  });
+
+  it("待办项行中插结构块：后半不带上一项的勾", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "todo",
+          id: null,
+          raw: "- [x] 项甲乙\n",
+          gapBefore: "",
+          content: "项甲乙",
+          level: null,
+          checked: true,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "- [x] 项\n\n```\n\n```\n\n- [ ] 甲乙\n"
+    );
+    editor.destroy();
+  });
+
+  it("行中插结构块不把行内字段复制给后半", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "甲乙 k:: v\n",
+          gapBefore: "",
+          content: "甲乙",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [["k", "v"]],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    // 字段属于被拆的原来那一块：右半再写一次就是凭空多出一条 k:: v
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "甲 k:: v\n\n```\n\n```\n\n乙\n"
+    );
+    editor.destroy();
+  });
+
+  it("setext 标题转引用：下划线前的块锚也得摘掉，不能漏进引用正文", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "heading",
+          id: "b-1",
+          raw: "标题 ^b-1\n===\n",
+          gapBefore: "",
+          content: "标题",
+          level: 1,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection({ from: 1, to: 3 });
+    const tr = insertSourceBlockForSelection(editor.state, "quote", 骨架("quote"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("> 标题\n> ===\n");
+    editor.destroy();
+  });
+
+  it("转换成结构块沿用原块的 gap：作者多留的空行不被压掉", () => {
+    const doc = 三块(["甲", "乙"]);
+    doc.blocks[1]!.gapBefore = "\n\n";
+    const editor = createTestEditor(doc);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n\n乙\n");
+    editor.commands.setTextSelection({ from: 4, to: 5 });
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n\n```\n乙\n```\n");
+    editor.destroy();
+  });
 });
 
 /**
@@ -1486,6 +1619,19 @@ describe("回车拆段不许把原块的账本留给新块", () => {
     editor.commands.setTextSelection(2);
     expect(按Enter(editor)).toBe(true);
     expect(docToMarkdown(editor.state.doc, doc)).toBe("3. 项\n4. 甲\n");
+    editor.destroy();
+  });
+
+  it("列表项从中间拆开时行内字段不复制给新项", () => {
+    const blocks: EditDoc["blocks"] = [
+      { ...段("- 项甲 k:: v\n", "", "项甲"), kind: "bullet", fields: [["k", "v"]] },
+    ];
+    const { doc } = 装(blocks);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2);
+    expect(按Enter(editor)).toBe(true);
+    // 字段属于被拆的原来那一项；复制给新项就是文件里凭空多出一条 k:: v
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("- 项 k:: v\n- 甲\n");
     editor.destroy();
   });
 

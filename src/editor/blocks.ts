@@ -980,6 +980,28 @@ export function 设首行缩进(state: EditorState): { tr: Transaction | null; �
 }
 
 /**
+ * `tr.split` 之后校正右半的记账属性。拆块把左半的 attrs 整份复制给了右半：
+ *
+ * - 右半是新的一项，编号得接着左半往下数（否则列表中间凭空出现一个 `1.`）；
+ * - 待办不带勾（否则拆一下"已完成"就多出一项已完成的）；
+ * - 行内字段只属于被拆的那一块本身，复制过去会让 `k:: v` 在文件里出现两次。
+ *
+ * `列表回车`与工具栏按光标拆块共用这一份，两处各写一份就会一边修好、一边继续错。
+ */
+function 校正拆分右半(tr: Transaction, 左起点: number, 右起点: number): void {
+  const 左 = tr.doc.nodeAt(左起点);
+  const 右 = tr.doc.nodeAt(右起点);
+  if (!左 || !右) return;
+  const 改: Record<string, unknown> = { mdFields: [] };
+  if (右.type.name === "mdItem") {
+    const 类 = String(右.attrs.mdKind ?? "");
+    if (类 === "numbered") 改.mdMarker = 下一项有序记号(左, Number(右.attrs.mdDepth ?? 0));
+    else if (类 === "todo") 改.mdChecked = false;
+  }
+  tr.setNodeMarkup(右起点, undefined, { ...右.attrs, ...改 });
+}
+
+/**
  * 列表项里的回车。有字就拆成下一项（类型、层级照抄，新项的账本由 `LedgerGuard` 清）；
  * 项里一个字都没有，再按一次就退回正文。跨块选区交回默认。
  */
@@ -1015,15 +1037,7 @@ export function 列表回车(state: EditorState): Transaction | null {
   const 右起点 = 块起点 + 左.nodeSize;
   const 右 = tr.doc.nodeAt(右起点);
   if (!右 || 右.type.name !== "mdItem") return tr;
-  if (String(右.attrs.mdKind) === "numbered") {
-    tr.setNodeMarkup(右起点, undefined, {
-      ...右.attrs,
-      mdMarker: 下一项有序记号(左, Number(右.attrs.mdDepth ?? 0)),
-    });
-  } else if (String(右.attrs.mdKind) === "todo") {
-    // 续出来的是新的一项，不把上一项的勾选带过去
-    tr.setNodeMarkup(右起点, undefined, { ...右.attrs, mdChecked: false });
-  }
+  校正拆分右半(tr, 块起点, 右起点);
   tr.setSelection(TextSelection.create(tr.doc, Math.min(右起点 + 1, tr.doc.content.size)));
   return tr;
 }
@@ -1513,7 +1527,15 @@ function 块原始源(node: PmNode): string {
   // 块锚跟着块走，不该被当成正文包进引用；转出来的新块没有可放的锚（多块时也放不下）。
   // 段落 / 标题 / 列表项的锚是序列化器补的一个空格加 `^id`，只摘这一段
   const 锚 = id ? ` ^${id}` : "";
-  if (锚 && 源.endsWith(锚)) 源 = 源.slice(0, -锚.length);
+  if (锚 && 源.endsWith(锚)) {
+    源 = 源.slice(0, -锚.length);
+  } else if (锚) {
+    // setext 标题的源是"标题行 + 下划线"，锚在**下划线前那一行**的末尾
+    // （内核从下划线前的全文取 trailing_id，见 md-kernel `take_paragraph`）。
+    // 只认可紧贴末行下划线的那一处，别把正文里的同名文字当锚摘掉
+    const m = /^([\s\S]*?)(\r?\n)([ \t]*(?:=+|-+)[ \t]*\r?)$/.exec(源);
+    if (m && m[1]!.endsWith(锚)) 源 = m[1]!.slice(0, -锚.length) + m[2]! + m[3]!;
+  }
   return 源;
 }
 
@@ -1578,7 +1600,9 @@ function 选区转结构块(state: EditorState, kind: "code" | "quote"): Transac
     kind === "code"
       ? 围栏包住(块们.map((b) => b.node.textContent).join("\n"))
       : 套引用(块们.map((b) => 块原始源(b.node)).join("\n\n"));
-  const 节点们 = sourceBlock(state, kind, 正文, "\n");
+  // 首块的 gap 是它与上一块之间的空行，属于文件里已有的排版：作者多留了一行，
+  // 转换不该顺手压成一行。首块（gap 空串）与带 front-matter 的首块（gap 换行）都照原样
+  const 节点们 = sourceBlock(state, kind, 正文, String(首.node.attrs.mdGap ?? "\n"));
   if (!节点们.length) return null;
   const tr = state.tr.replaceWith(首.pos, 末.pos + 末.node.nodeSize, 节点们);
   return 放在新块里(tr, kind, 首.pos);
@@ -1626,6 +1650,7 @@ function 在光标处插(state: EditorState, kind: string, source: string): Tran
   const 左 = tr.doc.nodeAt(起点);
   if (!左) return null;
   const 右起点 = 起点 + 左.nodeSize;
+  校正拆分右半(tr, 起点, 右起点);
   tr.insert(右起点, sourceBlock(state, kind, source, "\n"));
   return 放在新块里(tr, kind, 右起点);
 }
@@ -1960,8 +1985,19 @@ export function docToMarkdown(doc: PmNode, head: EditDoc): string {
     // 内容，给它一个空行等于在开头凭空多一行（有 front-matter 时那个空行倒是必须）；
     // ② 回车拆在段首，前一半是空块、被下面那条规则整个跳过，此时"第二块"其实是第一
     // 个落笔的块，按 index 判就会给它补出前导空行。
+    // 新块一般现算一行空行；但**替换 / 转换出来的块**可能带着原块多留的空行
+    // （`"\n\n"` 及以上）。那是文件的排版，不该因为换了块类型就被压成一行。
+    // 只认"多出一行以上"的 gap：拆块复制来的 `""` / `"\n"` 仍按下面现算的规矩来，
+    // 否则从首块（gap `""`）拆出来的右半会紧贴新块，连原有的空行都没了。
+    const 存留空行 = String(a.mdGap ?? "");
     let gap =
-      raw.length > 0 ? String(a.mdGap ?? "") : continuesList || !out ? "" : "\n";
+      raw.length > 0
+        ? 存留空行
+        : continuesList || !out
+          ? ""
+          : 存留空行.length > 1
+            ? 存留空行
+            : "\n";
     /**
      * **文件开头不许带前导空行**（与 D28「挪到文档开头的块不能带着 `gap=""` 以外的空白」同一条）。
      * 删掉原第一块后，新首块继承的 gap 原本是"与前任之间的一整行"；前面已经没有块了，
