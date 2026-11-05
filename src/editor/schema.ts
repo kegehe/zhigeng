@@ -7,7 +7,7 @@ import type { EditorView, NodeView, ViewMutationRecord } from "@tiptap/pm/view";
 import { history, redo, undo } from "@tiptap/pm/history";
 import {
   applyBlockType,
-  块转换起点,
+  applyBlockTypeToSelection,
   块转换位置,
   在引用里,
   enterCell,
@@ -1753,10 +1753,8 @@ export const BlockKeys = Extension.create({
   addKeyboardShortcuts() {
     const setType = (id: BlockTypeId) => ({ editor }: { editor: Editor }) => {
       const { state } = editor;
-      // 结构化引用里转的是光标所在的子块，不是整段引用（后者内容规不答应，见 D43）
-      const 位 = 块转换起点(state);
-      if (位 === null) return false;
-      const tr = applyBlockType(state, 位, id);
+      // 选区碰到的块一起改；结构化引用里只落到光标所在的子块（整段引用不能换类型，D43）
+      const tr = applyBlockTypeToSelection(state, id);
       if (!tr) return false;
       editor.view.dispatch(tr.scrollIntoView());
       return true;

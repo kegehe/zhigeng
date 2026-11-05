@@ -7,11 +7,10 @@ import {
   addColumn,
   addRow,
   applyBlockAlign,
-  applyBlockType,
-  块转换起点,
+  applyBlockTypeToSelection,
   cellAt,
   INSERTABLE,
-  insertSourceBlock,
+  insertSourceBlockForSelection,
   moveCurrentBlock,
   removeColumn,
   removeRow,
@@ -174,11 +173,30 @@ export function Toolbar({ editor }: { editor: Editor }) {
   };
 
   const setType = (id: BlockTypeId) => {
-    // 引用里改的是光标所在的子块；整段引用不能换类型（D43）
-    const 位 = 块转换起点(editor.state);
-    if (位 === null) return;
-    const tr = applyBlockType(editor.state, 位, id);
+    // 选区碰到的块一起改；引用里只落到光标所在的子块（整段引用不能换类型，D43）
+    const tr = applyBlockTypeToSelection(editor.state, id);
     if (tr) editor.view.dispatch(tr.scrollIntoView());
+  };
+
+  /**
+   * 结构块按钮。有选区时代码 / 引用**转**选中的文字；没有选区时按光标位置插在前面 /
+   * 中间 / 后面。返回 null 只有一种来历：选区里有代码 / 引用包不住的内容（图片、表格、
+   * 一整段引用），这时说一句，而不是默默又在下面插一个空块。
+   */
+  const 插结构 = (kind: string, 源文本: string, 标签: string) => {
+    const tr = insertSourceBlockForSelection(editor.state, kind, 源文本);
+    if (tr) {
+      editor.view.dispatch(tr);
+      return;
+    }
+    if (!editor.state.selection.empty && (kind === "code" || kind === "quote")) {
+      editor.view.dom.dispatchEvent(
+        new CustomEvent("md-notice", {
+          detail: `${标签}只能包住正文、标题和列表项——选中的块里有别的内容，这次没有转换`,
+          bubbles: true,
+        }),
+      );
+    }
   };
   const 做块对齐 = (对: BlockAlign) => {
     const { tr, 跳过 } = applyBlockAlign(editor.state, 对);
@@ -424,14 +442,13 @@ export function Toolbar({ editor }: { editor: Editor }) {
       {INSERTABLE.map((b) =>
         btn(
           "ins-" + b.kind,
-          `在下面插入${b.标签}`,
+          b.kind === "code" || b.kind === "quote"
+            ? `把选中的文字变成${b.标签}；没有选区时插在光标处（行首前插、行中拆分、行尾后插）`
+            : `插入${b.标签}（有选区时插在选区之后）`,
           // kind 与图标名同名（divider / quote / table）。对不上就是 undefined，React 当场炸，
           // 不静默画个加号——漏一个图标在界面上是"这个按钮没脸"，比编译失败更难查
           b.kind as 图标名,
-          () => {
-            const tr = insertSourceBlock(editor.state, b.kind, b.源文本);
-            if (tr) editor.view.dispatch(tr);
-          },
+          () => 插结构(b.kind, b.源文本, b.标签),
           false,
           !$from.depth,
         ),

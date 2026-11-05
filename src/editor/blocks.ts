@@ -765,6 +765,38 @@ export function applyBlockType(
   return 改块类型(tr, start, id) ? tr : null;
 }
 
+/**
+ * 把选区碰到的块都改成目标类型，**一笔事务**；改不动的块（图片、表格、本来就是这一型）
+ * 跳过，一块都没改就不返回事务。
+ *
+ * 多选时只改第一块是另一种撒谎：整段选好、点标题，屏幕上却只变了第一行。结构化引用里
+ * 仍只落到光标所在的子块——整段引用没有"换成标题"这条路（D43）。
+ */
+export function applyBlockTypeToSelection(
+  state: EditorState,
+  id: BlockTypeId,
+): Transaction | null {
+  const sel = state.selection;
+  if (sel instanceof NodeSelection) {
+    if (sel.$from.depth !== 0) return null;
+    const node = state.doc.nodeAt(sel.from);
+    if (!node || !是可转块(node)) return null;
+    const tr = state.tr;
+    return 改块类型(tr, sel.from, id) ? tr : null;
+  }
+  const { $from } = sel;
+  if (!$from.depth) return null;
+  const tr = state.tr;
+  if ($from.node(1).type.name === "mdQuote") {
+    return 改块类型(tr, 块转换位置($from), id) ? tr : null;
+  }
+  let 改了 = false;
+  for (const b of 所选顶层块(state)) {
+    if (是可转块(b.node) && 改块类型(tr, b.pos, id)) 改了 = true;
+  }
+  return 改了 ? tr : null;
+}
+
 /** 选区里有没有能改成列表的块（正文、标题、列表项）。代码 / 引用 / 表格 / 图片不算 */
 export function 能设列表(state: EditorState): boolean {
   return 所选顶层块(state).some((b) => 是可转块(b.node));
@@ -1456,6 +1488,168 @@ export function insertSourceBlock(
   const tr = state.tr.insert(块起点, sourceBlock(state, kind, source, "\n"));
   if (kind === "code") tr.setSelection(TextSelection.near(tr.doc.resolve(代码落点(块起点))));
   return tr.scrollIntoView();
+}
+
+/**
+ * 选区覆盖到的顶层块是否全是能转成结构块的文字块（段落 / 标题 / 列表项）。
+ *
+ * 代码块与引用是**块级**结构：能包住的只有这几种。选中图片 / 表格 / 分隔线 / 一整段
+ * 引用时不硬转——那要么把原子块吃成空代码块，要么在引用里塞一整块（D43 不允许）。
+ */
+export function 选区可成结构块(state: EditorState): boolean {
+  if (state.selection.empty) return false;
+  const 块们 = 所选顶层块(state);
+  return 块们.length > 0 && 块们.every((b) => 是可转块(b.node));
+}
+
+/** 块在文件里的源文本：没改过用 `raw`，改过用序列化；去掉结尾空行与块锚 */
+function 块原始源(node: PmNode): string {
+  const a = node.attrs as Record<string, unknown>;
+  const raw = typeof a.mdRaw === "string" ? a.mdRaw : "";
+  const 原样 = raw.length > 0 && sigOf(node) === String(a.mdSig ?? "");
+  // 只削换行，不削行尾的空格：正文末尾两个空格是硬换行，剥掉就等于改了内容
+  let 源 = (原样 ? raw : serializeNode(node)).replace(/[\r\n]+$/, "");
+  const id = typeof a.mdId === "string" ? a.mdId : "";
+  // 块锚跟着块走，不该被当成正文包进引用；转出来的新块没有可放的锚（多块时也放不下）。
+  // 段落 / 标题 / 列表项的锚是序列化器补的一个空格加 `^id`，只摘这一段
+  const 锚 = id ? ` ^${id}` : "";
+  if (锚 && 源.endsWith(锚)) 源 = 源.slice(0, -锚.length);
+  return 源;
+}
+
+/** 用足够长的围栏包住正文，正文里本来就有 ``` 行时也不会提前闭栏 */
+function 围栏包住(正文: string): string {
+  let 长 = 3;
+  for (const 行 of 正文.split("\n")) {
+    const m = /^(`{3,})/.exec(行.trimStart());
+    if (m) 长 = Math.max(长, m[1]!.length + 1);
+  }
+  const 栏 = "`".repeat(长);
+  return `${栏}\n${正文}\n${栏}`;
+}
+
+/** 与 `文档编辑` 那条 `规整源码("quote")` 同一口径：逐行补 `> `，空行只留 `>` */
+function 套引用(正文: string): string {
+  return 正文
+    .split(/\r?\n/)
+    .map((行) => {
+      const 缩 = 行.trimStart();
+      if (!缩) return ">";
+      return 缩.startsWith(">") ? 行 : `> ${行}`;
+    })
+    .join("\n");
+}
+
+/** 新块落点：代码 / 引用进正文，表格进第一格；分隔线保持映射后的位置 */
+function 放在新块里(tr: Transaction, kind: string, 块起点: number): Transaction {
+  let 落点: number | null = null;
+  if (kind === "code" || kind === "quote") 落点 = 块起点 + 1;
+  else if (kind === "table") {
+    const 表 = tr.doc.nodeAt(块起点);
+    if (表?.type.name === "mdTable") {
+      const 格 = 第n格(表, 块起点, 0);
+      if (格 !== null) 落点 = 格 + 1;
+    }
+  }
+  if (落点 !== null) {
+    tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(落点, tr.doc.content.size))));
+  }
+  return tr.scrollIntoView();
+}
+
+/**
+ * 把选中的文字**转成**代码块 / 引用。
+ *
+ * 与旧行为的分界：以前不管有没有选区都往当前块后面插一个空骨架，用户选了一段文字
+ * 点"代码块"，得到的是一段和选中内容无关的新块。现在选区覆盖到的文字块整体换成
+ * 结构块——代码取 `textContent`（所见即所得，行内 ** 不该变成代码里的星号），
+ * 引用取块源文本（行内样式与标题 / 列表记号都得原样保留）。
+ *
+ * **按整块算**：选中半行也转整块。Markdown 的块结构只认行，切开半行要么得把用户
+ * 一行拆成三段（账本、块锚与空行都要重算），要么就得丢格式；块级动作按块生效是与
+ * 列表 / 对齐同一条口径。
+ */
+function 选区转结构块(state: EditorState, kind: "code" | "quote"): Transaction | null {
+  const 块们 = 所选顶层块(state);
+  const 首 = 块们[0];
+  const 末 = 块们[块们.length - 1];
+  if (!首 || !末) return null;
+  const 正文 =
+    kind === "code"
+      ? 围栏包住(块们.map((b) => b.node.textContent).join("\n"))
+      : 套引用(块们.map((b) => 块原始源(b.node)).join("\n\n"));
+  const 节点们 = sourceBlock(state, kind, 正文, "\n");
+  if (!节点们.length) return null;
+  const tr = state.tr.replaceWith(首.pos, 末.pos + 末.node.nodeSize, 节点们);
+  return 放在新块里(tr, kind, 首.pos);
+}
+
+/** 有选区但目标块不吃选区（表格 / 分隔线）：插在**最后一块**后面，别落在选区块中间 */
+function 在选区块之后插(state: EditorState, kind: string, source: string): Transaction | null {
+  const 块们 = 所选顶层块(state);
+  const 末 = 块们[块们.length - 1];
+  if (!末) return insertSourceBlock(state, kind, source);
+  const 起点 = 末.pos + 末.node.nodeSize;
+  const tr = state.tr.insert(起点, sourceBlock(state, kind, source, "\n"));
+  return 放在新块里(tr, kind, 起点);
+}
+
+/**
+ * 光标在块里落点：行首 → 插在前面（原文字被挤到下一块）；行尾 → 插在后面；
+ * 行中 → 把这一块拆成两半，新块落在中间。空块直接换掉，不留一个空段落。
+ *
+ * 只对顶层的正文 / 标题 / 列表项做拆块：结构化引用里没有"插一整块结构块"的位置，
+ * 表格格子、代码块、图片这些不透明块也没有可拆的文字行——那几处仍按旧语义插在其后。
+ */
+function 在光标处插(state: EditorState, kind: string, source: string): Transaction | null {
+  const { $from } = state.selection;
+  if (!$from.depth) return null;
+  if ($from.depth !== 1) return insertSourceBlock(state, kind, source);
+  const 节点 = $from.parent;
+  const 起点 = $from.before(1);
+  if (!是可转块(节点)) return insertSourceBlock(state, kind, source);
+  if (节点.content.size === 0) {
+    const 换 = replaceBlockWithSource(state, 起点, kind, source);
+    return 换 ? 放在新块里(换, kind, 起点) : null;
+  }
+  const 偏移 = $from.parentOffset;
+  if (偏移 === 0) {
+    const tr = state.tr.insert(起点, sourceBlock(state, kind, source, "\n"));
+    return 放在新块里(tr, kind, 起点);
+  }
+  if (偏移 === 节点.content.size) {
+    const tr = insertSourceBlock(state, kind, source);
+    return tr ? 放在新块里(tr, kind, 起点 + 节点.nodeSize) : null;
+  }
+  const tr = state.tr;
+  tr.split($from.pos, 1, [{ type: 节点.type, attrs: 节点.attrs }]);
+  const 左 = tr.doc.nodeAt(起点);
+  if (!左) return null;
+  const 右起点 = 起点 + 左.nodeSize;
+  tr.insert(右起点, sourceBlock(state, kind, source, "\n"));
+  return 放在新块里(tr, kind, 右起点);
+}
+
+/**
+ * 工具栏那几枚"插入结构块"按钮的入口。
+ *
+ * 三条路：**有选区** → 代码 / 引用把选中的文字转成它（表格 / 分隔线没有"包住文字"
+ * 的写法，插在选区最后一块之后）；**没选区** → 按光标的行首 / 行尾 / 行中决定插在
+ * 哪；不能转的选区返回 null，由调用方说一句，而不是默默在下面又插一个空块。
+ */
+export function insertSourceBlockForSelection(
+  state: EditorState,
+  kind: string,
+  source: string,
+): Transaction | null {
+  const sel = state.selection;
+  if (!sel.empty) {
+    if (kind === "code" || kind === "quote") {
+      return 选区可成结构块(state) ? 选区转结构块(state, kind) : null;
+    }
+    return 在选区块之后插(state, kind, source);
+  }
+  return 在光标处插(state, kind, source);
 }
 
 /**

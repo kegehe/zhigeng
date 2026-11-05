@@ -15,6 +15,7 @@ import {
   addColumn,
   applyBlockAlign,
   applyBlockType,
+  applyBlockTypeToSelection,
   cellAt,
   docToMarkdown,
   enterCell,
@@ -29,6 +30,7 @@ import {
   exitTableDown,
   exitOpaqueDown,
   insertSourceBlock,
+  insertSourceBlockForSelection,
   带围栏,
   块内范围,
   全选档,
@@ -959,6 +961,181 @@ describe("工具栏的移动与分隔线", () => {
     editor.view.dispatch(tr!);
     // 写死 "" 会产出 `---\n乙\n`：frontmatter 与正文粘连，内核下一轮读不回 frontmatter
     expect(docToMarkdown(editor.state.doc, doc)).toBe("---\nid: n-x\n---\n\n乙\n\n甲\n");
+    editor.destroy();
+  });
+});
+
+/**
+ * 工具栏结构块按钮的两条语义（2026-11-05）：
+ * **有选区** → 代码 / 引用把选中的文字转过去，不再在下面另插一个空骨架；
+ * **没选区** → 按光标的行首 / 行中 / 行尾决定前插、拆分、后插。
+ *
+ * 判据全部看落盘字节：屏幕上"看起来换了"不算，重新读一遍文件还得是那几块。
+ */
+describe("工具栏把选区转成结构块、按光标位置插入", () => {
+  const 三块 = (内容们: string[] = ["甲", "乙", "丙"]): EditDoc => {
+    const blocks: EditBlock[] = 内容们.map((字, i) => ({
+      kind: "paragraph",
+      id: null,
+      raw: `${字}\n`,
+      gapBefore: i === 0 ? "" : "\n",
+      content: 字,
+      level: null,
+      checked: null,
+      align: null,
+      fields: [],
+      children: [],
+    }));
+    return { frontMatter: "", trailingGap: "", blocks };
+  };
+  const 骨架 = (kind: string) => INSERTABLE.find((b) => b.kind === kind)!.源文本;
+
+  it("选中半个段落点代码块：整块转成代码块，不再在下面另插一个空骨架", () => {
+    const doc = 三块(["甲乙", "丙"]);
+    const editor = createTestEditor(doc);
+    // 只选中「甲」一半：块级动作按整块生效，与列表 / 对齐同一条口径
+    editor.commands.setTextSelection({ from: 1, to: 2 });
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect([...editor.state.doc.children].map((n) => n.type.name)).toEqual([
+      "mdOpaque",
+      "mdParagraph",
+      "mdParagraph",
+    ]);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("```\n甲乙\n```\n\n丙\n");
+    // 光标落在代码正文开头：接着打字改的是代码，不是围栏
+    editor.view.dispatch(editor.state.tr.insertText("let a = 1;"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("```\nlet a = 1;甲乙\n```\n\n丙\n");
+    editor.destroy();
+  });
+
+  it("选中文字点引用：块源文本整段进引用，行内样式原样保留", () => {
+    const doc = 三块(["甲**粗**", "乙"]);
+    // 块锚跟在正文后面，是块自己的记号：转成引用之后不该被当成正文包进去
+    doc.blocks[0]!.id = "b-1";
+    doc.blocks[0]!.raw = "甲**粗** ^b-1\n";
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection({ from: 1, to: 2 });
+    const tr = insertSourceBlockForSelection(editor.state, "quote", 骨架("quote"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    // 引用取的是块在文件里的源文本：** 不是代码那样被 textContent 洗掉
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("> 甲**粗**\n\n乙\n");
+    editor.destroy();
+  });
+
+  it("选中跨两块点代码块：两块的内容按行进同一个代码块", () => {
+    const doc = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection({ from: 1, to: 5 }); // 甲 + 乙
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("```\n甲\n乙\n```\n\n丙\n");
+    editor.destroy();
+  });
+
+  it("光标在行首：结构块落在当前行，原文字被挤到下一块", () => {
+    const doc = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(1); // 甲 开头
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("```\n\n```\n甲\n\n乙\n\n丙\n");
+    editor.destroy();
+  });
+
+  it("光标在行尾：结构块落在这一块后面", () => {
+    const doc = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2); // 甲 末尾
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n```\n\n```\n\n乙\n\n丙\n");
+    editor.destroy();
+  });
+
+  it("光标在行中：拆开这一块，结构块落在两半中间", () => {
+    const doc = 三块(["甲乙丙", "后"]);
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection(2); // 甲 | 乙丙
+    const tr = insertSourceBlockForSelection(editor.state, "code", 骨架("code"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n```\n\n```\n\n乙丙\n\n后\n");
+    editor.view.dispatch(editor.state.tr.insertText("x"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("甲\n\n```\nx\n```\n\n乙丙\n\n后\n");
+    editor.destroy();
+  });
+
+  it("选区里混着代码块时转不了：返回 null，不在下面偷偷再插一个空块", () => {
+    const doc: EditDoc = {
+      frontMatter: "",
+      trailingGap: "",
+      blocks: [
+        {
+          kind: "code",
+          id: null,
+          raw: "```\nlet a = 1\n```\n",
+          gapBefore: "",
+          content: "",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+        {
+          kind: "paragraph",
+          id: null,
+          raw: "甲\n",
+          gapBefore: "\n",
+          content: "甲",
+          level: null,
+          checked: null,
+          align: null,
+          fields: [],
+          children: [],
+        },
+      ],
+    };
+    const editor = createTestEditor(doc);
+    const 前 = editor.state.doc;
+    editor.view.dispatch(
+      editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1, 10))
+    );
+    const tr = insertSourceBlockForSelection(editor.state, "quote", 骨架("quote"));
+    expect(tr).toBeNull();
+    expect(editor.state.doc.eq(前)).toBe(true);
+    editor.destroy();
+  });
+
+  it("表格 / 分隔线没有「包住文字」的写法：有选区时插在最后一块之后", () => {
+    const doc = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection({ from: 1, to: 5 }); // 甲 + 乙
+    const tr = insertSourceBlockForSelection(editor.state, "table", 骨架("table"));
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(docToMarkdown(editor.state.doc, doc)).toBe(
+      "甲\n\n乙\n\n| 列 | 列 |\n| --- | --- |\n|  |  |\n\n丙\n"
+    );
+    editor.destroy();
+  });
+
+  it("块类型下拉与 Ctrl+Alt+数字对整段选区一起生效", () => {
+    const doc = 三块();
+    const editor = createTestEditor(doc);
+    editor.commands.setTextSelection({ from: 1, to: 7 });
+    const tr = applyBlockTypeToSelection(editor.state, "heading2");
+    expect(tr).not.toBeNull();
+    editor.view.dispatch(tr!);
+    expect(editor.state.doc.childCount).toBe(3);
+    editor.state.doc.forEach((n) => expect(n.type.name).toBe("mdHeading"));
+    expect(docToMarkdown(editor.state.doc, doc)).toBe("## 甲\n\n## 乙\n\n## 丙\n");
     editor.destroy();
   });
 });
