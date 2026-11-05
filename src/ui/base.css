@@ -2229,3 +2229,86 @@
   white-space: pre;
   overflow-x: auto;
 }
+
+/* ── 演示模式（2026-11-05）──────────────────────────────────────────────
+   同窗全屏、只读、连续滚动。**不是另一个页面**：正文还是那一个 ProseMirror 实例，
+   所以滚动位置、图片解码与选区都不必重来。这里只做两件事——收走界面壳、把字放大。
+
+   这一段同样未分层：`aside` 身上带着 Tailwind 的 `flex` 工具类，工具类在 utilities
+   层，分层里的 `display:none` 压不过它（同上面 prosemirror 那段）。 */
+[data-present="1"] {
+  --text-base: var(--present-text-base);
+  --text-lg: var(--present-text-lg);
+  --text-xl: var(--present-text-xl);
+  --text-2xl: var(--present-text-2xl);
+  --text-mono: var(--present-text-mono);
+  --measure: var(--present-measure);
+}
+[data-present="1"] .titlebar,
+[data-present="1"] aside,
+[data-present="1"] .note-head,
+[data-present="1"] .editor-tools,
+[data-present="1"] .bubble,
+[data-present="1"] .handle,
+[data-present="1"] .slash,
+[data-present="1"] .drop-line {
+  display: none;
+}
+/* 正文在演示里自己留白：不再借 `px-6 py-8`（那两个类在演示分支里已摘掉，
+   这里补回更宽的一档）。字号必须落在 `present-surface` 上：body 的 15.5px 是
+   在 body 上算好的，改根节点的 `--text-base` 不会让继承值跟着变。 */
+.present-surface {
+  padding: var(--space-12) var(--space-8);
+  font-size: var(--present-text-base);
+}
+/* 第一块是标题时，`.prose-note h1` 的上边距（1.8em）会在页面顶部叠出一大块空白。
+   页面顶端已经有一圈 padding，这里不再要第二道。 */
+[data-present="1"] .present-surface > h1:first-child,
+[data-present="1"] .present-surface .ProseMirror > :first-child {
+  margin-top: 0;
+}
+/* 演示浮层：只在动手时现身，停手 2.4 秒自己收。只动 opacity / transform（[06] §动效）。 */
+.present-hud {
+  position: fixed;
+  inset-block-start: var(--space-4);
+  inset-inline-end: var(--space-4);
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-inline-size: min(36rem, calc(100% - 2 * var(--space-8)));
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-2);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  opacity: 0;
+  transform: translateY(calc(-1 * var(--space-2)));
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+  pointer-events: none;
+}
+.present-hud.is-on {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.present-hud-title {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.present-hud kbd {
+  margin-inline-start: var(--space-2);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}

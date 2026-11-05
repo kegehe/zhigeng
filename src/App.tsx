@@ -47,6 +47,7 @@ import {
   type DirBranch,
 } from "./ui/tree";
 import { 判落点, 算动作, type 行 as 拖行, type 落点 } from "./ui/dragdrop";
+import { 要补篇名 } from "./ui/present";
 import {
   目录菜单,
   笔记菜单,
@@ -299,6 +300,14 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
+  /**
+   * 演示态。**不是 Mode 的一档**：演示时打开的还是同一篇、同一个编辑器实例，
+   * 只是把窗口铺满、把界面壳收走、把正文锁成只读。做成 Mode 会逼编辑器重挂载，
+   * 长文的滚动位置、撤销栈与图片解码全丢——"切个外观"不该付这份钱。
+   */
+  const [presenting, setPresenting] = useState(false);
+  /** 演示浮层（篇名 + 退出）。指针/键盘动一下亮，停手 2.4 秒自己收 */
+  const [hud, setHud] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [newTitle, setNewTitle] = useState("");
   const [creating, setCreating] = useState(false);
@@ -390,6 +399,11 @@ export function App() {
   const saveTimer = useRef<number | null>(null);
   /** 行内模式的 Markdown 只在落盘那一刻取一次：整篇序列化是 O(块数) 的 */
   const editApi = useRef<(() => string) | null>(null);
+  /** 进演示前的窗口状态。退出时按它还原——用户本来就在全屏，就别顺手把他踢出全屏 */
+  const 演示窗前 = useRef({ fullscreen: false, maximized: false });
+  const 演示Hud亮 = useRef(false);
+  const 演示计时 = useRef<number | null>(null);
+  const 演示Hud = useRef<HTMLDivElement>(null);
   const editing = mode === "inline";
   const dirty = inlineRev > 0;
   const unsaved = editing && dirty;
@@ -1504,6 +1518,103 @@ export function App() {
   const win = inTauri() ? getCurrentWindow() : null;
 
   /**
+   * 进入演示：先把没落盘的字存掉，再铺满窗口。
+   * 全屏失败就什么都不改——屏幕四周还留着一圈窗口边框却叫"演示"，比不进去更让人困惑。
+   */
+  const enterPresent = async () => {
+    if (presenting || mode !== "inline" || !selected || !editDoc) return;
+    if (!(await persist())) {
+      setFlash("这篇还没保存——先处理冲突或错误提示");
+      return;
+    }
+    if (win) {
+      try {
+        演示窗前.current = {
+          fullscreen: await win.isFullscreen(),
+          maximized: await win.isMaximized(),
+        };
+        await win.setFullscreen(true);
+      } catch (e) {
+        setError(describeError(e).message);
+        return;
+      }
+    } else if (document.documentElement.requestFullscreen) {
+      // 浏览器里没有 Tauri 窗口；能进 DOM 全屏就进，不能就只做窗口内演示
+      await document.documentElement.requestFullscreen().catch(() => {});
+    }
+    setPresenting(true);
+  };
+
+  /**
+   * 退出演示并还原窗口状态。**窗口调用失败也要先把界面壳放回来**，否则用户被困在
+   * 一篇只读正文里、连侧栏都拿不到。用户本来就在全屏时，退出后仍留在全屏。
+   */
+  const exitPresent = async () => {
+    try {
+      if (win) {
+        // 本来就在全屏 = 用户要的就是全屏，退出演示后也仍在全屏，别去碰最大化状态
+        if (!演示窗前.current.fullscreen) {
+          await win.setFullscreen(false);
+          const 最大化 = await win.isMaximized();
+          if (演示窗前.current.maximized && !最大化) await win.maximize();
+          else if (!演示窗前.current.maximized && 最大化) await win.unmaximize();
+        }
+      } else if (document.fullscreenElement) {
+        await document.exitFullscreen().catch(() => {});
+      }
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      setPresenting(false);
+    }
+  };
+
+  // 演示浮层：指针 / 键盘一动就亮，停手 2.4 秒自己收。只在"亮→暗"交界处 setState，
+  // 否则每一次 pointermove 都要把整个 App 重渲染一遍。
+  useEffect(() => {
+    if (!presenting) {
+      演示Hud亮.current = false;
+      if (演示计时.current !== null) {
+        window.clearTimeout(演示计时.current);
+        演示计时.current = null;
+      }
+      return;
+    }
+    const 亮一下 = () => {
+      if (!演示Hud亮.current) {
+        演示Hud亮.current = true;
+        setHud(true);
+      }
+      if (演示计时.current !== null) window.clearTimeout(演示计时.current);
+      演示计时.current = window.setTimeout(收起, 2400);
+    };
+    const 收起 = () => {
+      // 焦点还停在「退出演示」上就别收：aria-hidden 不能盖住一个仍有焦点的按钮，
+      // 也不能让键盘用户眼看它消失、Tab 序却还停在上面。焦点离开后的下一拍再收。
+      if (演示Hud.current?.contains(document.activeElement)) {
+        演示计时.current = window.setTimeout(收起, 2400);
+        return;
+      }
+      演示Hud亮.current = false;
+      演示计时.current = null;
+      setHud(false);
+    };
+    亮一下();
+    window.addEventListener("pointermove", 亮一下);
+    window.addEventListener("pointerdown", 亮一下);
+    window.addEventListener("keydown", 亮一下);
+    return () => {
+      window.removeEventListener("pointermove", 亮一下);
+      window.removeEventListener("pointerdown", 亮一下);
+      window.removeEventListener("keydown", 亮一下);
+      if (演示计时.current !== null) {
+        window.clearTimeout(演示计时.current);
+        演示计时.current = null;
+      }
+    };
+  }, [presenting]);
+
+  /**
    * 命令面板。`Ctrl+K` 唤起（Cmd 一并认，Mac 用户也在）。
    *
    * 只放**不需要二次确认**的动作：改名 / 归档 / 删除在界面上都带着确认或冲突处理，
@@ -1521,6 +1632,20 @@ export function App() {
   };
   useEffect(() => {
     const on键 = (e: KeyboardEvent) => {
+      // 演示时整个键盘只认两件事：Esc / F11 退出。命令面板、设置页那些入口
+      // 都在收走的壳里，让它们继续响应等于给用户留一串看不见的开关。
+      if (presenting) {
+        if (e.key === "Escape" || e.key === "F11") {
+          e.preventDefault();
+          void exitPresent();
+        }
+        return;
+      }
+      if (e.key === "F11" && !palette && mode === "inline" && selected && editDoc) {
+        e.preventDefault();
+        void enterPresent();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         if (palette) closePalette();
@@ -1570,7 +1695,7 @@ export function App() {
     };
     window.addEventListener("keydown", on键);
     return () => window.removeEventListener("keydown", on键);
-  }, [palette, mode, selected, propsDirty]);
+  }, [palette, mode, selected, propsDirty, presenting, editDoc]);
   const 填回 = (v: AiView) => {
     setAiView(v);
     setAiForm({
@@ -1907,6 +2032,17 @@ export function App() {
             },
           ]
         : []),
+      // 演示只对"手里这一篇正文"成立：面板里按了没东西可铺满
+      ...(selected && mode === "inline" && editDoc
+        ? [
+            {
+              id: "a-present",
+              group: "动作",
+              label: "进入演示（全屏、只读）",
+              run: () => void enterPresent(),
+            },
+          ]
+        : []),
       {
         id: "a-ask",
         group: "动作",
@@ -1963,7 +2099,7 @@ export function App() {
   };
 
   return (
-    <div className="app-bg flex h-full flex-col text-fg">
+    <div className="app-bg flex h-full flex-col text-fg" data-present={presenting ? "1" : undefined}>
       {palette ? (
         <CommandPalette
           标题="命令面板"
@@ -2017,7 +2153,7 @@ export function App() {
         ) : null}
       </header>
 
-      {error ? (
+      {error && !presenting ? (
         <div className="border-b border-line bg-danger-soft px-4 py-2 text-sm text-fg">{error}</div>
       ) : null}
 
@@ -2901,10 +3037,16 @@ export function App() {
                   </div>
                 </div>
               ) : (
-                <div className="prose-note measure px-6 py-8">
+                <div
+                  className={
+                    presenting
+                      ? "prose-note measure present-surface"
+                      : "prose-note measure px-6 py-8"
+                  }
+                >
                   {selected ? (
                     <>
-                      <div className="mb-3 flex items-center gap-2 text-xs">
+                      <div className="note-head mb-3 flex items-center gap-2 text-xs">
                         {mode === "rename" ? (
                           <>
                             <input
@@ -2950,6 +3092,13 @@ export function App() {
                               平时半透明，指针靠近或拿到键盘焦点才实——它们不是正文的一部分，
                               但也不该在用户写字时占住注意力。 */}
                             <span className="ml-auto flex shrink-0 items-center gap-1 opacity-90 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
+                              <button
+                                className={btn}
+                                onClick={() => void enterPresent()}
+                                title="全屏演示（F11）"
+                              >
+                                演示
+                              </button>
                               <button className={btn} onClick={() => void openProps()}>
                                 属性
                               </button>
@@ -2989,7 +3138,14 @@ export function App() {
                           </div>
                         </div>
                       ) : null}
-                      {flash ? <p className="mb-4 text-xs text-fg-2">{flash}</p> : null}
+                      {flash && !presenting ? (
+                        <p className="mb-4 text-xs text-fg-2">{flash}</p>
+                      ) : null}
+
+                      {/* 正文平时不单独显示篇名（它多半已经写在第一块的一级标题里）。
+                          演示时若第一块不是标题，屏幕顶上就只剩一片没有名字的字——补一个。
+                          是标题就绝不重复补：同一句话出现两遍是排版事故，不是"更清楚"。 */}
+                      {presenting && 要补篇名(editDoc) ? <h1>{selected.title}</h1> : null}
 
                       {editDoc ? (
                         <div
@@ -3006,7 +3162,8 @@ export function App() {
                           <BlockEditor
                             key={`${selected.rel}:${editEpoch}`}
                             doc={editDoc}
-                            editable={mode === "inline"}
+                            editable={mode === "inline" && !presenting}
+                            locked={presenting}
                             onEditStart={() => setMode("inline")}
                             onEdit={() => setInlineRev((n) => n + 1)}
                             onNotice={(文) => setFlash(文)}
@@ -3025,7 +3182,7 @@ export function App() {
                           <div className="skeleton h-6 w-5/6" />
                         </div>
                       )}
-                      {links && selected ? (
+                      {!presenting && links && selected ? (
                         <LinkPanelView
                           panel={links}
                           onOpen={(rel, title) => void openNote(rel, title)}
@@ -3035,7 +3192,7 @@ export function App() {
                         和"完成"按钮一起把"我在编辑"念个不停——现在打开就是可编辑的，
                         没改动就不写盘，状态只需要在**真的存了东西**时说一声。
                         冲突不走这里：那是要用户做决定的，用上面那条横幅。 */}
-                      {saveState === "saving" || saveState === "saved" ? (
+                      {!presenting && (saveState === "saving" || saveState === "saved") ? (
                         <div
                           className="pointer-events-none fixed right-5 bottom-16 z-(--z-toast) rounded-full border border-line bg-raised px-3 py-1 text-xs text-fg-2 shadow-2"
                           aria-live="polite"
@@ -3044,7 +3201,7 @@ export function App() {
                         </div>
                       ) : null}
                       {/* 底部 AI 把手浮在正文上：尾部留出它的高度，最后一行才不会永远被压住 */}
-                      <div className="h-12" aria-hidden="true" />
+                      {!presenting ? <div className="h-12" aria-hidden="true" /> : null}
                     </>
                   ) : (
                     <div className="flex flex-col items-start gap-4 text-fg-2">
@@ -3079,7 +3236,7 @@ export function App() {
             </main>
             {/* 底部 AI 对话框：悬浮在正文列下沿，**不随滚动移动**（它在 main 外面）。
                 只在"真的有一篇在编辑/浏览"时出现——别的页面没有正文可改。 */}
-            {liveEditor && selected ? (
+            {!presenting && liveEditor && selected ? (
               <AiDock
                 // 换一篇就重挂：上一轮的问答、钉住状态与草稿都不该跟到下一篇
                 key={selected.rel}
@@ -3098,11 +3255,25 @@ export function App() {
                 一条把手 + 悬停滑出的浮层。**必须在 editor-pane 里面**：`.outline-edge`
                 的 `100%` 要按这个定位祖先算，落到别的祖先上就成了视口宽度（缩放时跟着漂、
                 窄窗时贴到整个窗口最左）。仍在 main 外面，所以不随正文滚动。 */}
-            {liveEditor ? <OutlineEdge editor={liveEditor} /> : null}
+            {!presenting && liveEditor ? <OutlineEdge editor={liveEditor} /> : null}
             </div>
           </div>
         </div>
       )}
+      {/* 演示浮层是**唯一的界面壳**。它在指到屏幕边缘时出现、停手自己收；
+          键盘用户也能 Tab 到「退出演示」（藏起来时把 tabIndex 撤掉）。 */}
+      {presenting ? (
+        <div ref={演示Hud} className={`present-hud${hud ? " is-on" : ""}`} aria-hidden={!hud}>
+          <span className="present-hud-title">{selected?.title ?? ""}</span>
+          <button
+            className={btn}
+            tabIndex={hud ? undefined : -1}
+            onClick={() => void exitPresent()}
+          >
+            退出演示 <kbd>Esc</kbd>
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

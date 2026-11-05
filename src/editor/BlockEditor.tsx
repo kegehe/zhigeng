@@ -105,6 +105,7 @@ function 不惊动观察器(view: object, 改: () => void) {
 export function BlockEditor({
   doc,
   editable,
+  locked = false,
   onEdit,
   onEditStart,
   onNotice,
@@ -114,6 +115,12 @@ export function BlockEditor({
 }: {
   doc: EditDoc;
   editable: boolean;
+  /**
+   * 演示锁：比"不可编辑"更强一层。只翻 `editable` 不够——这里还有两条"点正文就转编辑"
+   * 的入口（点按与拖拽手柄），它们会自己把 `setEditable(true)` 打开。演示时点一下就开始
+   * 改一篇正在投屏的文档，是最不该发生的事。
+   */
+  locked?: boolean;
   onEdit: () => void;
   /** 浏览态点正文就地转编辑。父组件要把 mode 跟上，否则界面与实例状态分叉 */
   onEditStart: () => void;
@@ -134,6 +141,7 @@ export function BlockEditor({
   // 装载时打签名的那笔事务会走 onUpdate，而它不是用户改的。`onUpdate` 的闭包只建一次，
   // 所以可编辑状态与 `onEdit` 都得从 ref 上读，不能靠闭包里的初值。
   const editableRef = useRef(editable);
+  const lockedRef = useRef(locked);
   const editRef = useRef(onEdit);
   const startRef = useRef(onEditStart);
   const noticeRef = useRef(onNotice);
@@ -142,6 +150,7 @@ export function BlockEditor({
   // 一次 persist（内容一致所以不会写坏文件，但那圈状态是错的）。
   const stamping = useRef(true);
   editRef.current = onEdit;
+  lockedRef.current = locked;
   startRef.current = onEditStart;
   noticeRef.current = onNotice;
   const wrap = useRef<HTMLDivElement>(null);
@@ -227,7 +236,7 @@ export function BlockEditor({
     // 只读时浏览器不会替用户落光标，所以自己算一次位置：点哪编辑哪，
     // 而不是"第一下解锁、第二下才放光标"
     const onMouseDown = (ev: MouseEvent) => {
-      if (ev.button !== 0 || editor.isEditable) return;
+      if (ev.button !== 0 || editor.isEditable || lockedRef.current) return;
       editor.setEditable(true);
       editableRef.current = true;
       const at = editor.view.posAtCoords({ left: ev.clientX, top: ev.clientY });
@@ -838,7 +847,7 @@ export function BlockEditor({
    * `pointercancel` 放弃（触摸被系统抢走时只有 cancel、没有 up），别的 `pointerId` 不理。
    */
   const onHandleDown = (e: React.PointerEvent, from: { index: number; start: number }) => {
-    if (e.button !== 0 || !e.isPrimary) return;
+    if (e.button !== 0 || !e.isPrimary || lockedRef.current) return;
     e.preventDefault();
     // 点正文会先进入编辑。手柄画在正文外面，不走那条 mousedown。
     // 不在这里打开编辑，onUpdate 看到 editableRef 仍是 false，拖完这篇不会标脏。
@@ -1121,7 +1130,7 @@ export function BlockEditor({
         ) : null}
       </div>
       <EditorContent editor={editor} />
-      {sel ? (
+      {!locked && sel ? (
         <div
           className="bubble"
           style={{ top: sel.top, left: sel.left }}
@@ -1251,7 +1260,7 @@ export function BlockEditor({
           ) : null}
         </div>
       ) : null}
-      {hover && !drop ? (
+      {!locked && hover && !drop ? (
         <div
           className="handle"
           style={{ top: hover.top }}
@@ -1268,7 +1277,7 @@ export function BlockEditor({
       {drop && drop.index >= 0 ? (
         <div className="drop-line" style={{ top: drop.top }} aria-hidden="true" />
       ) : null}
-      {menu ? (
+      {!locked && menu ? (
         <div
           className="slash"
           style={{ top: menu.top, left: menu.left }}

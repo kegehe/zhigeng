@@ -108,6 +108,14 @@
   /* 面板里那些 13px 的说明段与列表：照 72rem 排就是 88 字一行，比 [06] 要的 65–75 还宽。
      56rem = 896px，13px 的字一行约 69 字，落回同一个区间 */
   --measure-ui: min(56rem, 100%);
+  /* 演示：全屏投屏时离眼睛更远，字阶整体上提一档；行长反而收窄——65–75 字的规则
+     是按 15.5px 定的，19px 下同样 72rem 会排到 80 多字，投出来更难读 */
+  --present-text-base: 19px;
+  --present-text-lg: 22px;
+  --present-text-xl: 26px;
+  --present-text-2xl: 36px;
+  --present-text-mono: 16px;
+  --present-measure: min(64rem, 100%);
   --gap-para: 1.15em;
   --gap-list: 0.35em;
   --gap-h-top: 1.8em;
