@@ -14,6 +14,7 @@ pub mod hash;
 pub mod import;
 pub mod index;
 pub mod meta;
+pub mod meta_edit;
 pub mod rerank;
 pub mod retrieve;
 pub mod rewrite;

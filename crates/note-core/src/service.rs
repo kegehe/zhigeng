@@ -698,6 +698,42 @@ impl Hub {
         Ok(edit_doc_of(&src))
     }
 
+    /// 属性面板：front-matter 里用户能看懂的那几项（标签 / 属性 / AI 开关）。
+    /// 带盘上 hash，保存时原样带回做冲突判定。
+    pub fn note_meta(&self, rel: &str) -> Result<crate::meta_edit::MetaView> {
+        let bytes = self.vault.read(rel)?;
+        Ok(crate::meta_edit::view(
+            &String::from_utf8_lossy(&bytes),
+            &crate::hash::content_hash(&bytes),
+        ))
+    }
+
+    /// **同步那一半**：只改属性面板提交的那几行，其余字节原样保留。
+    ///
+    /// 冲突判定与普通保存同一条：`expect_hash` 对不上就拒绝，绝不静默覆盖。
+    /// 没有实际变化时连 `write_atomic` 都不走——面板上按一次「保存」不该产生一次
+    /// 版本快照，也不该刷新 mtime。
+    pub fn note_meta_save(
+        &mut self,
+        rel: &str,
+        patch: &crate::meta_edit::MetaPatch,
+        expect_hash: Option<&str>,
+    ) -> Result<String> {
+        let bytes = self.vault.read(rel)?;
+        let 当前 = crate::hash::content_hash(&bytes);
+        if let Some(want) = expect_hash {
+            if 当前 != want {
+                return Err(Error::Conflict(rel.to_string()));
+            }
+        }
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        let next = crate::meta_edit::apply(&content, patch)?;
+        if next == content {
+            return Ok(当前);
+        }
+        self.save_note_write(rel, &next, expect_hash, crate::versions::手工)
+    }
+
     /// **同步那一半**：校验 + 冲突判定 + 原子落盘，返回写后的 hash。
     ///
     /// `expect_hash` 是编辑器加载时拿到的 hash。磁盘上的已经变了就说明有人在外面

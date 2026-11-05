@@ -2,6 +2,7 @@
 //! 服务层端到端：README 里写的那条命令流程，这里跑一遍同样的路径。
 //! 手工跑一次才发现的"正文被写两遍"这类问题，必须留在测试里。
 
+use note_core::meta_edit::{MetaPatch, PropEdit};
 use note_core::service::{reindex_note, Hub};
 
 fn hub_in(dir: &std::path::Path) -> Hub {
@@ -64,6 +65,60 @@ fn 保存已有笔记会重索引并留下可搜的新内容() {
     let hits = hub.search_keyword("波浪号", 10).unwrap();
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hub.drift().unwrap(), 0);
+}
+
+#[test]
+fn 属性面板只改指定几行_并走与正文同一条冲突判定() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let c = hub.capture("一句话", None).unwrap();
+    let 前 = hub.read_raw(&c.rel).unwrap();
+    let v = hub.note_meta(&c.rel).unwrap();
+    assert!(v.tags.is_empty(), "{v:?}");
+    assert!(!v.private && !v.no_ai);
+
+    let patch = MetaPatch {
+        tags: Some(vec!["m5".into()]),
+        props: Some(vec![PropEdit {
+            key: "due".into(),
+            kind: "date".into(),
+            value: Some("2026-11-05".into()),
+        }]),
+        private: Some(true),
+        no_ai: None,
+    };
+    let h = hub.note_meta_save(&c.rel, &patch, Some(&v.hash)).unwrap();
+    let 后 = hub.read_raw(&c.rel).unwrap();
+    assert_eq!(后.hash, h);
+    assert!(后.content.contains("tags: [m5]\n"), "{}", 后.content);
+    assert!(
+        后.content.contains("props:\n  due: 2026-11-05\n"),
+        "{}",
+        后.content
+    );
+    assert!(
+        后.content.contains("ai:\n  private: true\n"),
+        "{}",
+        后.content
+    );
+    assert!(
+        后.content.contains("title: "),
+        "写了属性不能丢标题：{}",
+        后.content
+    );
+    assert!(后.content.contains("一句话"), "正文不能丢：{}", 后.content);
+
+    // 同一份意图再存一次：字节与 hash 都不动（不该产生版本快照）
+    let v2 = hub.note_meta(&c.rel).unwrap();
+    let h2 = hub.note_meta_save(&c.rel, &patch, Some(&v2.hash)).unwrap();
+    assert_eq!(h, h2);
+    assert_eq!(hub.read_raw(&c.rel).unwrap().content, 后.content);
+
+    // 旧 hash 来存 = 盘上已经变过，拒绝
+    let err = hub
+        .note_meta_save(&c.rel, &patch, Some(&前.hash))
+        .unwrap_err();
+    assert!(matches!(err, note_core::Error::Conflict(_)), "{err:?}");
 }
 
 #[test]

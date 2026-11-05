@@ -5,6 +5,8 @@ import type {
   CapturedOut,
   AiDiscovery,
   EditDoc,
+  MetaPatch,
+  MetaView,
   HybridResult,
   AiRun,
   Answer,
@@ -58,6 +60,11 @@ export const api = {
     ),
   /** 行内编辑器要的块结构：每块带精确源切片，未改动的块由前端原样回写 */
   noteEditDoc: (rel: string) => invoke<EditDoc>("note_edit_doc", { rel }),
+  /** 属性面板：标签 / 属性 / AI 开关，带盘上 hash */
+  noteMeta: (rel: string) => invoke<MetaView>("note_meta", { rel }),
+  /** 只改提交的那几行；`expectHash` 对不上就报冲突，绝不静默覆盖 */
+  noteMetaSave: (rel: string, patch: MetaPatch, expectHash?: string) =>
+    invoke<string>("note_meta_save", { rel, patch, expectHash: expectHash ?? null }),
   /** 反链面板：一篇的入链与出链（含悬空的，带原始写法） */
   noteLinks: (rel: string, limit = 40) => invoke<LinkPanel>("note_links", { rel, limit }),
   /** 原文 + hash。hash 要原样带回 saveNote，服务端才判得出"磁盘这份还是不是你看到的那份" */

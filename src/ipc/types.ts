@@ -133,6 +133,37 @@ export type EditDoc = {
   blocks: EditBlock[];
 };
 
+/** 属性面板里一行值的类型。`json` 是列表 / 映射这类复杂值，面板只读。 */
+export type MetaPropKind = "text" | "num" | "date" | "bool" | "json";
+
+export type MetaProp = { key: string; value: string; kind: MetaPropKind };
+
+/**
+ * 与 `note_core::meta_edit::MetaView` 对应。`hash` 是盘上那份的 hash，
+ * 保存时原样带回——属性面板与正文走同一条冲突判定。
+ */
+export type MetaView = {
+  hash: string;
+  tags: string[];
+  props: MetaProp[];
+  private: boolean;
+  noAi: boolean;
+  hasFrontMatter: boolean;
+  /** front-matter 不是合法 YAML 时为 false：面板只读，不猜改哪一行 */
+  yamlOk: boolean;
+};
+
+/** `value: null` = 删掉这一项。 */
+export type PropEdit = { key: string; kind: MetaPropKind; value: string | null };
+
+/** `undefined` = 这一栏没动；`props` 是逐项意图，没提到的属性原样保留。 */
+export type MetaPatch = {
+  tags?: string[];
+  props?: PropEdit[];
+  private?: boolean;
+  noAi?: boolean;
+};
+
 export type TrashRow = {
   batch: string;
   rel: string;
@@ -153,6 +184,8 @@ export type CommandName =
   | "dir_empty"
   | "note_create"
   | "note_edit_doc"
+  | "note_meta"
+  | "note_meta_save"
   | "note_move"
   | "note_rename"
   | "note_restore"

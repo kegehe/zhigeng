@@ -142,7 +142,7 @@ fn prop_value(v: &Value) -> PropValue {
 /// `2026-09-22` 与 `2026-09-22T20:41:07+08:00`。判据宁窄不宽：
 /// 把 "2026-计划" 认成日期，日历视图里就会多出一条假条目。
 /// 只按字节比较——按字符位置切片会在多字节中文上 panic（`2026-计划` 就踩到了）。
-fn is_date(s: &str) -> bool {
+pub(crate) fn is_date(s: &str) -> bool {
     let b = s.trim().as_bytes();
     if b.len() < 10 {
         return false;

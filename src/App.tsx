@@ -31,6 +31,7 @@ import type { Editor } from "@tiptap/core";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
 import { 可对话 } from "./ui/ai";
 import { btn, btnOn, btnPrimary } from "./ui/controls";
+import { PropsView } from "./ui/PropsView";
 import { SettingsView } from "./ui/SettingsView";
 import { 判备份, type AI忙, type AI表单 } from "./ui/settings";
 import { 来源徽章, 走了那句, 面板标题 } from "./ui/search";
@@ -72,6 +73,8 @@ import type {
   ImportReport,
   LinkPanel,
   ListNotes,
+  MetaPatch,
+  MetaView,
   SiblingOrder,
   SnapshotRow,
   TrashRow,
@@ -88,7 +91,15 @@ import { 读行距, 套行距, 写行距, 盯行距变化, type 行距 } from ".
  * 交给 `dirty` 判据守（没改过就不落盘），不再靠一个模式开关。
  */
 type Mode =
-  "view" | "inline" | "rename" | "trash" | "backup" | "import" | "settings" | "ask";
+  | "view"
+  | "inline"
+  | "rename"
+  | "trash"
+  | "backup"
+  | "import"
+  | "settings"
+  | "ask"
+  | "props";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
 /** 引用落点。nonce 让"同一块再点一次"也能重新滚动，而不是因为值没变被 React 忽略 */
@@ -295,6 +306,11 @@ export function App() {
   const [flash, setFlash] = useState<string | null>(null);
   const [baseHash, setBaseHash] = useState("");
   const [savedDraft, setSavedDraft] = useState("");
+  /** 属性面板。`meta.hash` 是打开时的盘上 hash，保存时原样带回做冲突判定 */
+  const [metaView, setMetaView] = useState<MetaView | null>(null);
+  const [propsBusy, setPropsBusy] = useState(false);
+  const [propsConflict, setPropsConflict] = useState(false);
+  const [propsError, setPropsError] = useState<string | null>(null);
   const [editDoc, setEditDoc] = useState<EditDoc | null>(null);
   /** 当前这次打开要把正文滚到哪一块（引用点击）；普通打开是 null */
   const [blockFocus, setBlockFocus] = useState<块定位 | null>(null);
@@ -1287,6 +1303,55 @@ export function App() {
     setImportResult(null);
   };
 
+  /** 属性面板：先把正文落盘（切走会卸载编辑器），再读盘上的 front-matter。 */
+  const openProps = async () => {
+    if (!selected) return;
+    if (editing && !(await persist())) return;
+    setPropsConflict(false);
+    setPropsError(null);
+    try {
+      setMetaView(await api.noteMeta(selected.rel));
+      setMode("props");
+    } catch (e) {
+      setError(describeError(e).message);
+    }
+  };
+
+  /**
+   * 保存属性。和正文保存同一条冲突判定；`force` 只从冲突横幅上的
+   * 「仍然存我这份」进来。存完必须 `loadNote`：编辑器的 `EditDoc.frontMatter`
+   * 还是旧的，不重载的话下一次正文保存会用旧 YAML 把刚写的属性盖回去。
+   */
+  const saveProps = async (patch: MetaPatch, force = false) => {
+    if (!selected || !metaView) return;
+    setPropsBusy(true);
+    setPropsError(null);
+    try {
+      await api.noteMetaSave(selected.rel, patch, force ? undefined : metaView.hash);
+      setPropsConflict(false);
+      await loadNote(selected.rel);
+      await refresh();
+      setMode("inline");
+    } catch (e) {
+      const { kind, message } = describeError(e);
+      if (kind === "conflict") setPropsConflict(true);
+      else setPropsError(message);
+    } finally {
+      setPropsBusy(false);
+    }
+  };
+
+  const reloadProps = async () => {
+    if (!selected) return;
+    try {
+      setMetaView(await api.noteMeta(selected.rel));
+      setPropsConflict(false);
+      setPropsError(null);
+    } catch (e) {
+      setPropsError(describeError(e).message);
+    }
+  };
+
   const previewImport = async () => {
     setImportBusy(true);
     setError(null);
@@ -1436,6 +1501,14 @@ export function App() {
       } else if (e.key === "Escape" && mode === "settings" && !palette) {
         // 设置页自己带一条回正文的路（标题栏那枚齿轮是**入口**不是开关，再按它不会关掉设置）。
         // 输入框里不抢这一键：那里 Esc 该管的是它自己那点内容，不是整页。
+        const t = e.target as HTMLElement | null;
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT"))
+          return;
+        e.preventDefault();
+        backToNote();
+      } else if (e.key === "Escape" && mode === "props" && !palette) {
+        // 属性面板是主区的一页，自己带「完成」出口；输入框里的 Esc 仍然归输入法 / 它自己
+        if (e.isComposing || e.keyCode === 229) return;
         const t = e.target as HTMLElement | null;
         if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT"))
           return;
@@ -1791,6 +1864,17 @@ export function App() {
         label: "打开设置（主题 / 备份 / 模型 / 库）",
         run: () => void openSettings(),
       },
+      // 没开笔记时没有"这一篇"可改，不摆一条按了会空转的动作
+      ...(selected
+        ? [
+            {
+              id: "a-props",
+              group: "动作",
+              label: "编辑这篇的属性（标签 / 属性 / AI 开关）",
+              run: () => void openProps(),
+            },
+          ]
+        : []),
       {
         id: "a-ask",
         group: "动作",
@@ -2736,6 +2820,22 @@ export function App() {
                     token 数按回包原样记，对方不给就记 0，不猜。
                   </p>
                 </div>
+              ) : mode === "props" ? (
+                selected && metaView ? (
+                  <PropsView
+                    // 换一篇或重新读盘都要重挂：面板里的草稿不能跟到下一份属性上
+                    key={`${selected.rel}:${metaView.hash}`}
+                    meta={metaView}
+                    busy={propsBusy}
+                    冲突={propsConflict}
+                    错误={propsError}
+                    onBack={backToNote}
+                    onSave={(patch, force) => void saveProps(patch, force)}
+                    onReload={() => void reloadProps()}
+                  />
+                ) : (
+                  <div className="measure-ui px-6 py-8 text-sm text-fg-2">正在读取属性…</div>
+                )
               ) : mode === "trash" ? (
                 <div className="measure-ui px-6 py-8">
                   <h2 className="text-xl text-fg">回收站</h2>
@@ -2813,6 +2913,9 @@ export function App() {
                               平时半透明，指针靠近或拿到键盘焦点才实——它们不是正文的一部分，
                               但也不该在用户写字时占住注意力。 */}
                             <span className="ml-auto flex shrink-0 items-center gap-1 opacity-90 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
+                              <button className={btn} onClick={() => void openProps()}>
+                                属性
+                              </button>
                               <button
                                 className={btn}
                                 onClick={() => {

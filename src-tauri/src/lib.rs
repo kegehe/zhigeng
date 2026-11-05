@@ -5,6 +5,7 @@ use note_core::assets;
 use note_core::capture::Captured;
 use note_core::import::{Entry as ImportEntry, Report as ImportReport};
 use note_core::index::Index;
+use note_core::meta_edit::{MetaPatch, MetaView};
 use note_core::service::{
     apply_external, reindex_captured, reindex_moved, reindex_note, snapshot_vault, unindex,
     AppInfo, EditDoc, HitRow, Hub, LinkPanel, NoteDetail, NoteList, NoteSource, SnapshotRow,
@@ -619,6 +620,30 @@ fn read_raw(state: State<'_, Shared>, rel: String) -> Result<NoteSource, String>
 #[tauri::command]
 fn note_edit_doc(state: State<'_, Shared>, rel: String) -> Result<EditDoc, String> {
     with_hub(&state, |h| h.note_edit_doc(&rel))
+}
+
+/// 属性面板要的那几项：标签、属性、AI 开关，带盘上 hash。
+#[tauri::command]
+fn note_meta(state: State<'_, Shared>, rel: String) -> Result<MetaView, String> {
+    with_hub(&state, |h| h.note_meta(&rel))
+}
+
+/// 属性面板的写路径。只改提交的那几行；落盘同步、索引后台，与 `save_note` 同形。
+#[tauri::command]
+fn note_meta_save(
+    app: AppHandle,
+    state: State<'_, Shared>,
+    rel: String,
+    patch: MetaPatch,
+    expect_hash: Option<String>,
+) -> Result<String, WriteErr> {
+    let hash = with_hub_write(&state, |h| {
+        h.note_meta_save(&rel, &patch, expect_hash.as_deref())
+    })?;
+    reindex_async(app, vec![rel.clone()], move |vault, index| {
+        reindex_note(vault, index, &rel)
+    });
+    Ok(hash)
 }
 
 #[tauri::command]
@@ -1254,6 +1279,8 @@ pub fn run() {
             read_note,
             read_raw,
             note_edit_doc,
+            note_meta,
+            note_meta_save,
             search_keyword,
             note_links,
             vault_default_path,
