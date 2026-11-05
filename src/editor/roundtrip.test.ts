@@ -1004,6 +1004,97 @@ describe("工具栏的移动与分隔线", () => {
       editor.destroy();
     });
 
+    it("结构化引用 / Callout 收尾同样补落脚点：点得到、打字落在引用外面", () => {
+      const d: EditDoc = {
+        frontMatter: "",
+        trailingGap: "",
+        blocks: [
+          段("开头\n", "", "开头"),
+          {
+            ...段("> 引用一段\n", "\n", ""),
+            kind: "quote",
+            // `引用接管` 只认"子块重新拼出的行与账本正文逐行相等"的形状
+            children: [段("", "", "引用一段")],
+          },
+        ],
+      };
+      const editor = createTestEditor(d);
+      expect(型们(editor), "mdQuote 是 isolating，同样接不到块后面的光标").toEqual([
+        "mdParagraph",
+        "mdQuote",
+        "mdParagraph",
+      ]);
+      // 落脚点不落盘：装载后逐字节仍等于源文件
+      expect(docToMarkdown(editor.state.doc, d)).toBe("开头\n\n> 引用一段\n");
+
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc))
+      );
+      editor.view.dispatch(editor.state.tr.insertText("外"));
+      expect(docToMarkdown(editor.state.doc, d), "字不许再被写成 `> 外`").toBe(
+        "开头\n\n> 引用一段\n\n外\n"
+      );
+      editor.destroy();
+    });
+
+    it("落脚点不参与换位：最后一块按 ↓ 是空操作，Ctrl+A 转列表也不多写 `- `", () => {
+      const d: EditDoc = {
+        frontMatter: "",
+        trailingGap: "",
+        blocks: [
+          段("甲\n", "", "甲"),
+          { ...段("```\ncode()\n```\n", "\n", ""), kind: "code" },
+        ],
+      };
+      const editor = createTestEditor(d);
+      expect(型们(editor)).toEqual(["mdParagraph", "mdOpaque", "mdParagraph"]);
+      // 光标在代码块里
+      const 代码起 = editor.state.doc.child(0).nodeSize;
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.near(editor.state.doc.resolve(代码起 + 1)))
+      );
+      expect(moveCurrentBlock(editor.state, 1), "下面只剩落脚点，没得可换").toBeNull();
+      // 光标落在落脚点里按 ↑ 也不能把这一行空白挪到代码上面
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc))
+      );
+      expect(moveCurrentBlock(editor.state, -1)).toBeNull();
+      expect(型们(editor), "不许出现夹在中间的空段").toEqual([
+        "mdParagraph",
+        "mdOpaque",
+        "mdParagraph",
+      ]);
+
+      editor.commands.setTextSelection({
+        from: 1,
+        to: editor.state.doc.content.size - 1,
+      });
+      const 列表 = 设列表(editor.state, "bullet");
+      editor.view.dispatch(列表.tr!);
+      expect(docToMarkdown(editor.state.doc, d), "文件里不许出现 `- ` 空项").toBe(
+        "- 甲\n\n```\ncode()\n```\n"
+      );
+      editor.destroy();
+    });
+
+    it("把真实块挪到最末：落在落脚点前面，落脚点仍在最后", () => {
+      const d: EditDoc = {
+        frontMatter: "",
+        trailingGap: "",
+        blocks: [
+          段("甲\n", "", "甲"),
+          { ...段("```\ncode()\n```\n", "\n", ""), kind: "code" },
+        ],
+      };
+      const editor = createTestEditor(d);
+      const tr = moveBlock(editor.state, 0, editor.state.doc.childCount);
+      expect(tr, "真实块之间确实换了位").not.toBeNull();
+      editor.view.dispatch(tr!);
+      expect(型们(editor)).toEqual(["mdOpaque", "mdParagraph", "mdParagraph"]);
+      expect(docToMarkdown(editor.state.doc, d)).toBe("```\ncode()\n```\n\n甲\n");
+      editor.destroy();
+    });
+
     it("光标单独停在落脚点里：设列表仍作用于它（用户点的就是这一行）", () => {
       const d = 一块({ kind: "code", raw: "```\ncode()\n```\n" });
       const editor = createTestEditor(d);

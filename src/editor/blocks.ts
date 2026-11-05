@@ -1378,6 +1378,20 @@ function continuesList(prev: PmNode | null, kind: string, depth: number): boolea
 }
 
 /**
+ * 文末落脚点的序号；不是落脚点给 -1。
+ *
+ * 判据与 `docToJson` / `TailGuard` 同源：最后一块是空段落，且它前面那块本来就需要
+ * 落脚点。它不是作者写的块，换位时既不能自己挪，也不能被真实块顶到正文中间——否则
+ * 代码块上面会凭空多一行空白，`Ctrl+A` 转列表还会把它写成 `- `。
+ */
+function 文末落脚点序号(doc: PmNode): number {
+  const 末 = doc.lastChild;
+  if (!末 || 末.type.name !== "mdParagraph" || 末.textContent) return -1;
+  const 前 = doc.childCount > 1 ? doc.child(doc.childCount - 2) : null;
+  return 前 && 要落脚(前.type.name) ? doc.childCount - 1 : -1;
+}
+
+/**
  * 把第 `from` 个顶层块挪到第 `to` 个位置（都是**块序号**，不是字符位置——位置在删插
  * 之间会漂，序号不会）。返回 null 表示原地不动。
  *
@@ -1394,11 +1408,17 @@ export function moveBlock(state: EditorState, from: number, to: number): Transac
   state.doc.forEach((n) => kids.push(n));
   if (from === to || from + 1 === to || from < 0 || to < 0 || from >= kids.length || to > kids.length)
     return null;
+  const 尾 = 文末落脚点序号(state.doc);
+  // 光标停在落脚点里按 ↑/↓（或拖它）：这一行是排版产物，挪走只会让正文多一行空白
+  if (from === 尾) return null;
   const list = [...kids];
   const moved = list.splice(from, 1)[0];
   if (!moved) return null;
-  const insertAt = from < to ? to - 1 : to;
+  // 真实块也不能落到落脚点后面：它必须始终留在文末当出口。夹回之后若顺序其实没变
+  // （最后一块按 ↓ 就是这种），下面按同一块发空事务会白标一次脏、800ms 后写一次盘。
+  const insertAt = from < to ? Math.min(to - 1, 尾 >= 0 ? 尾 - 1 : kids.length - 1) : to;
   list.splice(insertAt, 0, moved);
+  if (list.every((n, i) => n === kids[i])) return null;
 
   const 原前驱 = new Map<PmNode, PmNode | null>();
   kids.forEach((n, i) => 原前驱.set(n, i === 0 ? null : (kids[i - 1] ?? null)));
@@ -1847,11 +1867,15 @@ export function 落脚点(schema: Schema): PmNode | null {
 
 /**
  * 这些块**没法把光标放到自己后面**：代码 / 引用 / 公式 / HTML 那一类不透明块、
- * 表格、图片、分隔线。它们占住文末时，下面没有任何可点的位置——点卡片只拿到整块选中，
- * 点正文把插入符收回块里，按回车也只是在块内换行。所以文末要补一个空段落落脚点
- * （不落盘）；中途不用补，后面那块本身就是落点。
+ * 结构化引用与 Callout（`mdQuote`）、表格、图片、分隔线。它们占住文末时，下面没有
+ * 任何可点的位置——点卡片只拿到整块选中，点正文把插入符收回块里，按回车也只是在块内
+ * 换行（结构化引用是再加一行 `>`）。所以文末要补一个空段落落脚点（不落盘）；中途
+ * 不用补，后面那块本身就是落点。
+ *
+ * `mdQuote` 别漏：它虽然能装段落，但 isolating 让它同样接不到"块后面"的光标——
+ * 2026-11-05 复查真机实测，点引用下方仍落回引用里的段落，回车打字写进 `> `。
  */
-const 需落脚 = new Set(["mdOpaque", "mdTable", "mdImage", "mdDivider"]);
+const 需落脚 = new Set(["mdOpaque", "mdQuote", "mdTable", "mdImage", "mdDivider"]);
 
 export function 要落脚(typeName: string): boolean {
   return 需落脚.has(typeName);
