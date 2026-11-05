@@ -34,6 +34,8 @@ import {
   列表跳过说明,
   点待办前缀,
   设列表,
+  落脚点,
+  要落脚,
   type BlockTypeId,
 } from "./blocks";
 import { 可无损, 收图注, 是库内资产, 拆自attrs, 新引用, type 资产引用 } from "./asset";
@@ -1708,6 +1710,32 @@ export const CalloutGuard = Extension.create({
   },
 });
 
+/**
+ * 文末落脚点守卫。
+ *
+ * 载入时 `docToJson` 已经补了一个；这里兜住**后续改动**：把代码块 / 表格 / 图片拖到文末、
+ * 删掉最后那个空段落、或撤销到"不可落块收尾"的形状时，下面又会没有可点的位置。
+ * 补的空段落不落盘（`docToMarkdown` 不写空白块），文件一个字节都不变。
+ *
+ * 只在**真的改了文档**的事务上跑：只是点一下光标不该给它补出一个"未保存"。
+ */
+export const TailGuard = Extension.create({
+  name: "tailGuard",
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        appendTransaction: (steps, _old, state) => {
+          if (!steps.some((tr) => tr.docChanged)) return undefined;
+          const 末 = state.doc.lastChild;
+          if (!末 || !要落脚(末.type.name)) return undefined;
+          const 段 = 落脚点(state.schema);
+          return 段 ? state.tr.insert(state.doc.content.size, 段) : undefined;
+        },
+      }),
+    ];
+  },
+});
+
 /** 撤销栈直接用 ProseMirror 自己的 history，不经过任何第三方封装 */
 export const History = Extension.create({
   name: "history",
@@ -2506,6 +2534,7 @@ export const mdExtensions = [
   MdLink,
   BlockIdGuard,
   CalloutGuard,
+  TailGuard,
   BlockTools,
   BlockKeys,
   BlockSelectAll,

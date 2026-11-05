@@ -230,6 +230,19 @@ export function docToJson(doc: EditDoc): JsonNode {
   if (!content.length) {
     content.push({ type: "mdParagraph", attrs: attrsOf(EMPTY) });
   }
+  /**
+   * **以"光标进不到块后面"的块收尾时，补一个空段落落脚点**（见 `落脚点`）。
+   *
+   * 代码 / 引用 / 公式 / 表格 / 图片 / 分隔线占住了文末，下面就没有可点的位置：
+   * 点卡片只拿到整块选中，点正文会把插入符收回块里，按回车也只是在块内换行——
+   * 用户"想在代码块下面继续写"这件事没有任何入口（2026-11-05 报的）。
+   * 空段落不落盘（`docToMarkdown` 空块不写字节），所以补它**不改文件一个字**。
+   * 插入结构块走的是 `sourceBlock`，那里早就在补；载入这条路漏了同一件事。
+   */
+  const 末 = content[content.length - 1];
+  if (末 && 要落脚(末.type)) {
+    content.push({ type: "mdParagraph", attrs: { ...attrsOf(EMPTY), mdGap: "\n" } });
+  }
   return { type: "doc", content };
 }
 
@@ -1294,6 +1307,21 @@ function 所选顶层块(state: EditorState): { pos: number; node: PmNode }[] {
     if (parent === state.doc) out.push({ pos, node });
     return false;
   });
+  /**
+   * **文末那个空段落是落脚点，不是作者写的块**（`docToJson` / `TailGuard` 补的）。
+   * 跨块选区把它扫进来时不当成操作对象：`Ctrl+A` 后点列表 / 标题会把它从"不落盘的空段"
+   * 变成 `- ` / `## `，文件凭空多一行。光标单独停在它里面时照常算——那时用户点的就是这一行。
+   */
+  if (out.length > 1) {
+    const 末 = out[out.length - 1]!;
+    if (
+      末.node.type.name === "mdParagraph" &&
+      !末.node.textContent &&
+      末.pos + 末.node.nodeSize === state.doc.content.size
+    ) {
+      out.pop();
+    }
+  }
   return out;
 }
 
@@ -1812,9 +1840,21 @@ function 新块账本(gap: string) {
  * （2026-09-29 用户报的，真机与 jsdom 双层复现过）。空段落在 `docToMarkdown` 里
  * 不落任何字节（"重新产出后是空白的块不落任何字节"那条），所以加它**不改文件一个字**。
  */
-function 落脚点(schema: Schema): PmNode | null {
+export function 落脚点(schema: Schema): PmNode | null {
   const 段型 = schema.nodes.mdParagraph;
   return 段型 ? 段型.create(新块账本("\n")) : null;
+}
+
+/**
+ * 这些块**没法把光标放到自己后面**：代码 / 引用 / 公式 / HTML 那一类不透明块、
+ * 表格、图片、分隔线。它们占住文末时，下面没有任何可点的位置——点卡片只拿到整块选中，
+ * 点正文把插入符收回块里，按回车也只是在块内换行。所以文末要补一个空段落落脚点
+ * （不落盘）；中途不用补，后面那块本身就是落点。
+ */
+const 需落脚 = new Set(["mdOpaque", "mdTable", "mdImage", "mdDivider"]);
+
+export function 要落脚(typeName: string): boolean {
+  return 需落脚.has(typeName);
 }
 
 function sourceBlock(state: EditorState, kind: string, source: string, gap: string): PmNode[] {

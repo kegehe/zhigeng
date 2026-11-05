@@ -882,6 +882,142 @@ describe("工具栏的移动与分隔线", () => {
     editor.destroy();
   });
 
+  /**
+   * 文末落脚点（2026-11-05 用户报的："代码块选中永远只能是块本身，点不到它后面"）。
+   *
+   * 代码 / 表格 / 图片 / 分隔线 / 不透明引用占住文末时，插入符没有"块后面"可去：
+   * 点卡片拿到的是整块选中，点正文把插入符收回块里，回车也只是块内换行。
+   * 装载与后续改动都要保证文末有一个**不落盘**的空段落落脚点。
+   */
+  describe("以光标进不到后面的块收尾：文末落脚点", () => {
+    const 回车 = (editor: Editor) => {
+      const e = new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        bubbles: true,
+        cancelable: true,
+      });
+      editor.view.dom.dispatchEvent(e);
+      return e.defaultPrevented;
+    };
+    const 型们 = (editor: Editor) => {
+      const out: string[] = [];
+      editor.state.doc.forEach((n) => out.push(n.type.name));
+      return out;
+    };
+
+    it("代码块收尾：装载就补一个落脚点，回车与打字都落在围栏外面", () => {
+      const d = 一块({ kind: "code", raw: "```\ncode()\n```\n" });
+      const editor = createTestEditor(d);
+      expect(型们(editor)).toEqual(["mdOpaque", "mdParagraph"]);
+      // 落脚点是排版产物，不落盘：装载后逐字节仍等于源文件
+      expect(docToMarkdown(editor.state.doc, d)).toBe("```\ncode()\n```\n");
+
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc))
+      );
+      expect(回车(editor), "回车该由编辑器接住，拆出下一块").toBe(true);
+      editor.view.dispatch(editor.state.tr.insertText("下面"));
+      expect(docToMarkdown(editor.state.doc, d)).toBe("```\ncode()\n```\n\n下面\n");
+      editor.destroy();
+    });
+
+    it("表格收尾：落脚点让「表格下面写字」有地方落，且不多一个字节", () => {
+      const 表 = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+      const d: EditDoc = {
+        frontMatter: "",
+        trailingGap: "",
+        blocks: [
+          段("上面\n", "", "上面"),
+          { ...段(表, "\n", ""), kind: "table" },
+        ],
+      };
+      const editor = createTestEditor(d);
+      expect(型们(editor)).toEqual(["mdParagraph", "mdTable", "mdParagraph"]);
+      expect(docToMarkdown(editor.state.doc, d)).toBe("上面\n\n" + 表);
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc))
+      );
+      editor.view.dispatch(editor.state.tr.insertText("表下"));
+      expect(docToMarkdown(editor.state.doc, d)).toBe("上面\n\n" + 表 + "\n表下\n");
+      editor.destroy();
+    });
+
+    it("图片 / 分隔线收尾也补；后面还有块时不补第二个", () => {
+      const 图 = 一块({ kind: "image", raw: "![[attachments/a3/x.png]]\n" });
+      const 图编辑 = createTestEditor(图);
+      expect(型们(图编辑)).toEqual(["mdImage", "mdParagraph"]);
+      expect(docToMarkdown(图编辑.state.doc, 图)).toBe("![[attachments/a3/x.png]]\n");
+      图编辑.destroy();
+
+      const 线 = 一块({ kind: "divider", raw: "---\n" });
+      const 线编辑 = createTestEditor(线);
+      expect(型们(线编辑)).toEqual(["mdDivider", "mdParagraph"]);
+      线编辑.destroy();
+
+      // 代码块后面本来就有一段正文：那一段就是落点，别在它后面再补一个空行
+      const 后 = {
+        frontMatter: "",
+        trailingGap: "",
+        blocks: [
+          { ...段("```\ncode()\n```\n", "", ""), kind: "code" },
+          段("后一段\n", "\n", "后一段"),
+        ],
+      } as EditDoc;
+      const 后编辑 = createTestEditor(后);
+      expect(型们(后编辑)).toEqual(["mdOpaque", "mdParagraph"]);
+      expect(docToMarkdown(后编辑.state.doc, 后)).toBe("```\ncode()\n```\n\n后一段\n");
+      后编辑.destroy();
+    });
+
+    it("落脚点被删掉后，下一次文档变化由守卫补回来（字节不变）", () => {
+      const d = 一块({ kind: "code", raw: "```\ncode()\n```\n" });
+      const editor = createTestEditor(d);
+      const 落脚 = editor.state.doc.lastChild!;
+      const 起点 = editor.state.doc.content.size - 落脚.nodeSize;
+      editor.view.dispatch(editor.state.tr.delete(起点, 起点 + 落脚.nodeSize));
+      expect(型们(editor), "守卫要把它补回来，否则文末又没有落点").toEqual([
+        "mdOpaque",
+        "mdParagraph",
+      ]);
+      expect(docToMarkdown(editor.state.doc, d)).toBe("```\ncode()\n```\n");
+      editor.destroy();
+    });
+
+    it("跨块选区不把落脚点当成要转换的块：Ctrl+A 后设列表不多写一行 `- `", () => {
+      const d: EditDoc = {
+        frontMatter: "",
+        trailingGap: "",
+        blocks: [
+          段("甲\n", "", "甲"),
+          { ...段("```\ncode()\n```\n", "\n", ""), kind: "code" },
+        ],
+      };
+      const editor = createTestEditor(d);
+      expect(型们(editor)).toEqual(["mdParagraph", "mdOpaque", "mdParagraph"]);
+      editor.commands.setTextSelection({ from: 1, to: editor.state.doc.content.size - 1 });
+      const 一次 = 设列表(editor.state, "bullet");
+      expect(一次.跳过).toBe(1); // 代码块跳过；落脚点压根不算操作对象
+      editor.view.dispatch(一次.tr!);
+      expect(docToMarkdown(editor.state.doc, d)).toBe("- 甲\n\n```\ncode()\n```\n");
+      editor.destroy();
+    });
+
+    it("光标单独停在落脚点里：设列表仍作用于它（用户点的就是这一行）", () => {
+      const d = 一块({ kind: "code", raw: "```\ncode()\n```\n" });
+      const editor = createTestEditor(d);
+      editor.view.dispatch(
+        editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc))
+      );
+      const tr = 设列表(editor.state, "bullet");
+      expect(tr.跳过).toBe(0);
+      editor.view.dispatch(tr.tr!);
+      expect(docToMarkdown(editor.state.doc, d)).toBe("```\ncode()\n```\n\n- \n");
+      editor.destroy();
+    });
+  });
+
   it("行首 ``` + 空格 → 代码块，与斜杠菜单产出同一份字节", () => {
     const doc: EditDoc = {
       frontMatter: "",
@@ -4299,7 +4435,8 @@ describe("图片块的整块移动", () => {
     editor.view.dispatch(tr!);
     const 型们: string[] = [];
     editor.state.doc.forEach((n) => 型们.push(n.type.name));
-    expect(型们).toEqual(["mdImage", "mdParagraph"]);
+    // 图片是原子块，本来就该带着文末落脚点一起搬（装载时就补了一个，见 `docToJson`）
+    expect(型们).toEqual(["mdImage", "mdParagraph", "mdParagraph"]);
     const 选 = editor.state.selection;
     expect(选 instanceof NodeSelection, "选区要跟着块走，连按两次移的才是同一块").toBe(true);
     expect((选 as NodeSelection).node.type.name).toBe("mdImage");
