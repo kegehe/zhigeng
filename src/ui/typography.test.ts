@@ -141,8 +141,6 @@ describe("接线真的在，而不是只写了函数", () => {
     expect(主窗).toContain("正文行高：紧凑");
     expect(主窗).toContain("正文行高：标准");
     expect(主窗).toContain("正文行高：宽松");
-    // 源码框也是正文，跟同一档
-    expect(主窗).toContain("leading-note text-fg");
   });
 
   it("焦点竖线听行距事件，且仍然不发事务", () => {

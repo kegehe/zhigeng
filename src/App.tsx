@@ -88,7 +88,7 @@ import { 读行距, 套行距, 写行距, 盯行距变化, type 行距 } from ".
  * 交给 `dirty` 判据守（没改过就不落盘），不再靠一个模式开关。
  */
 type Mode =
-  "view" | "inline" | "source" | "rename" | "trash" | "backup" | "import" | "settings" | "ask";
+  "view" | "inline" | "rename" | "trash" | "backup" | "import" | "settings" | "ask";
 /** 打开着的那一篇。正文由块编辑器自己渲染，所以这里只留标识与标题，不再带块列表 */
 type Opened = { rel: string; title: string };
 /** 引用落点。nonce 让"同一块再点一次"也能重新滚动，而不是因为值没变被 React 忽略 */
@@ -288,7 +288,6 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
-  const [draft, setDraft] = useState("");
   const [nameDraft, setNameDraft] = useState("");
   const [newTitle, setNewTitle] = useState("");
   const [creating, setCreating] = useState(false);
@@ -373,8 +372,8 @@ export function App() {
   const saveTimer = useRef<number | null>(null);
   /** 行内模式的 Markdown 只在落盘那一刻取一次：整篇序列化是 O(块数) 的 */
   const editApi = useRef<(() => string) | null>(null);
-  const editing = mode === "source" || mode === "inline";
-  const dirty = inlineRev > 0 || draft !== savedDraft;
+  const editing = mode === "inline";
+  const dirty = inlineRev > 0;
   const unsaved = editing && dirty;
   /** 备份那一格的判据只有一份（`判备份`）：设置页与备份面板都从它取 */
   const 备份格 = 判备份(info);
@@ -663,7 +662,7 @@ export function App() {
   const sidebarRows = useMemo(() => flatten(tree, collapsed), [tree, collapsed]);
   /**
    * 布局三的大纲栏要一份**活的编辑器实例**：BlockEditor 挂载时交出来、
-   * 卸载（换篇 / 进源码态）时收回 null——别的模式下面板自然不出现，
+   * 卸载（换篇 / 切到别的面板）时收回 null——别的模式下面板自然不出现，
    * 不需要再按 mode 判第二遍。
    */
   const [liveEditor, setLiveEditor] = useState<Editor | null>(null);
@@ -878,7 +877,7 @@ export function App() {
   });
 
   /**
-   * 把当前草稿写盘。自动保存、Ctrl+S、失焦、切笔记前都走这一个入口。
+   * 把当前正文写盘。自动保存、Ctrl+S、失焦、切笔记前都走这一个入口。
    * 带 `baseHash` 去存，磁盘上已经不是那份就报冲突——**冲突时不覆盖**，
    * 让用户选留哪份（docs/02 §写入与外部修改：绝不静默覆盖）。
    */
@@ -886,17 +885,17 @@ export function App() {
     async (force = false): Promise<boolean> => {
       // 浏览态永不落盘：打开一篇看看就写文件，等于把"看"变成"改"。读一篇笔记永远不该动它
       if (mode === "view") return true;
-      // 行内模式现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）
-      const md = mode === "inline" && editApi.current ? editApi.current() : draft;
+      // 现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）。
+      // 编辑器还没挂上时退回上一次落盘的字节——没有源码框之后，屏幕上没有第二份可写的草稿。
+      const md = editApi.current ? editApi.current() : savedDraft;
       if (!selected) return true;
       if (md === savedDraft) {
         /**
          * 要写的字节与盘上那份一模一样 = **没有东西要存**，把状态归零。不归零就出不来：
-         * `dirty` 判的是 `inlineRev > 0 || draft !== savedDraft`，走到这条分支说明只剩
-         * `inlineRev` 在响，而它清不掉。真测过两例——文末的代码块按 `↓` 会补一个**不落盘**的
-         * 空段落、纯光标移动会被账本守卫改一下邻居块的属性，两例字节都没变。
-         * 卡住的不只是那一行保存状态：`unsaved` 还挡着外部改动重载（Obsidian / 同步盘改这篇
-         * 永远看不见）。
+         * `dirty` 只剩 `inlineRev > 0` 在响，而它清不掉。真测过两例——文末的代码块按 `↓`
+         * 会补一个**不落盘**的空段落、纯光标移动会被账本守卫改一下邻居块的属性，两例字节
+         * 都没变。卡住的不只是那一行保存状态：`unsaved` 还挡着外部改动重载（Obsidian /
+         * 同步盘改这篇永远看不见）。
          */
         setInlineRev(0);
         setSaveState("clean");
@@ -915,7 +914,6 @@ export function App() {
         setBaseHash(h);
         // 只在真落成功之后清：冲突/出错时那一笔还挂在文档里，下次重试仍算 AI 落的
         AI落笔待存.current = false;
-        setDraft(md);
         setSavedDraft(md);
         setInlineRev(0);
         setSaveState("saved");
@@ -927,7 +925,7 @@ export function App() {
         return false;
       }
     },
-    [selected, mode, draft, savedDraft, baseHash],
+    [selected, mode, savedDraft, baseHash],
   );
 
   // 停手 800ms 就存。手动 Ctrl+S 仍然留着——有人不信自动保存
@@ -938,7 +936,7 @@ export function App() {
     return () => {
       if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     };
-  }, [inlineRev, draft, dirty, editing, persist]);
+  }, [inlineRev, dirty, editing, persist]);
 
   // "已自动保存"是一次性反馈，不是常驻状态：1.5s 后回 clean，右下角那条提示自己走
   useEffect(() => {
@@ -964,7 +962,6 @@ export function App() {
       rel,
       title: title ?? (selected?.rel === rel ? selected.title : undefined) ?? stemOf(rel),
     });
-    setDraft(src.content);
     setSavedDraft(src.content);
     setBaseHash(src.hash);
     setSaveState("clean");
@@ -1016,14 +1013,13 @@ export function App() {
    * 这时**不能只把 baseHash 更新成新值**——那等于让过期的一份盖掉外部改动，
    * 违反 docs/02 的"绝不静默覆盖"。浏览态没有用户写的东西可丢，所以直接重装载。
    */
-  const startEdit = async (rel?: string, surface: "inline" | "source" = "inline") => {
+  const startEdit = async (rel?: string) => {
     const target = rel ?? selected?.rel;
     if (!target) return;
     try {
-      if (surface === "inline" && editDoc && selected?.rel === target) {
+      if (editDoc && selected?.rel === target) {
         const src = await api.readRaw(target);
         if (src.hash === baseHash) {
-          setDraft(src.content);
           setSavedDraft(src.content);
           setBaseHash(src.hash);
           setSaveState("clean");
@@ -1032,23 +1028,10 @@ export function App() {
         }
       }
       await loadNote(target);
-      setMode(surface);
+      setMode("inline");
     } catch (e) {
       setError(describeError(e).message);
     }
-  };
-
-  /** 行内 ↔ 源码：同一个草稿、同一条自动保存链路，只是换个写法。存不下就不切。 */
-  const switchSurface = async () => {
-    if (!(await persist())) return;
-    if (mode === "inline") {
-      setMode("source");
-      return;
-    }
-    if (!selected) return;
-    // 源码框那份刚落过盘：块树得按磁盘上的新内容重算，不能拿旧的挂载顶着
-    await loadNote(selected.rel);
-    setMode("inline");
   };
 
   const reloadDisk = async () => {
@@ -1400,16 +1383,12 @@ export function App() {
   };
 
   /**
-   * 正文区的两个键。Esc **不再"退出编辑"**——现在没有编辑态可退出（打开就是可编辑的），
-   * 把它做成"从源码框回到所见即所得"才是这个键在这里的含义。
+   * 正文区的键。Esc 不做事——没有编辑态可退出，也没有源码框可回；打开就是所见即所得。
    */
   const bodyKeys = <T extends HTMLElement>(e: ReactKeyboardEvent<T>) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       void persist();
-    } else if (e.key === "Escape" && mode === "source") {
-      e.preventDefault();
-      void switchSurface();
     }
   };
 
@@ -1638,7 +1617,7 @@ export function App() {
 
   /**
    * 换库。设置页里唯一会把**整个界面**换掉的动作，所以它自己清旧库的编辑态：
-   * `apply` 只管 info 与列表，`selected` / `draft` / `links` 揣的还是上一篇，
+   * `apply` 只管 info 与列表，`selected` / `savedDraft` / `links` 揣的还是上一篇，
    * 不清就是"在新库里显示旧库那一篇"——标题对不上路径，一保存还会写回旧目录。
    */
   const 打开库 = async (路径: string) => {
@@ -1649,7 +1628,6 @@ export function App() {
       const 新 = await api.vaultOpen(路径);
       setSelected(null);
       setEditDoc(null);
-      setDraft("");
       setSavedDraft("");
       setBaseHash("");
       setLinks(null);
@@ -1856,15 +1834,6 @@ export function App() {
         run: () => set行距("loose"),
       },
     ];
-    if (selected) {
-      动作.unshift({
-        id: "a-surface",
-        group: "动作",
-        label: mode === "source" ? "回到正文编辑" : "看这篇的源文本",
-        hint: mode === "source" ? "Esc" : undefined,
-        run: () => void switchSurface(),
-      });
-    }
     return [
       ...动作,
       ...list.map((n) => ({
@@ -2410,7 +2379,7 @@ export function App() {
 
           {/* 布局三（2026-10-30 起，方案 G）：主区只剩正文列。大纲不再是右侧常驻栏，
               改成正文列**左缘**的把手 + 悬停浮层（OutlineEdge，也挂在 editor-pane 里）；
-              空文档没有大纲。liveEditor 为 null（其它面板 / 源码态 / 装载中）时正文列整个不渲染 */}
+              空文档没有大纲。liveEditor 为 null（其它面板 / 装载中）时正文列整个不渲染 */}
           <div className="flex min-w-0 flex-1">
             {/* 正文列自己夹一层：底部 AI 对话框要挂在**滚动容器之外**，否则它跟着正文一起滚走 */}
             <div className="editor-pane relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2844,9 +2813,6 @@ export function App() {
                               平时半透明，指针靠近或拿到键盘焦点才实——它们不是正文的一部分，
                               但也不该在用户写字时占住注意力。 */}
                             <span className="ml-auto flex shrink-0 items-center gap-1 opacity-90 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
-                              <button className={btn} onClick={() => void switchSurface()}>
-                                {mode === "source" ? "所见即所得" : "源码"}
-                              </button>
                               <button
                                 className={btn}
                                 onClick={() => {
@@ -2885,7 +2851,7 @@ export function App() {
                       ) : null}
                       {flash ? <p className="mb-4 text-xs text-fg-2">{flash}</p> : null}
 
-                      {mode !== "source" && editDoc ? (
+                      {editDoc ? (
                         <div
                           className="block-editor"
                           onBlur={(e) => {
@@ -2909,16 +2875,6 @@ export function App() {
                             onEditorChange={setLiveEditor}
                           />
                         </div>
-                      ) : mode === "source" ? (
-                        <textarea
-                          autoFocus
-                          spellCheck={false}
-                          value={draft}
-                          onChange={(e) => setDraft(e.target.value)}
-                          onBlur={() => void persist()}
-                          onKeyDown={bodyKeys}
-                          className="h-[60vh] w-full resize-y rounded-md border border-line bg-sunken p-4 font-mono text-mono leading-note text-fg"
-                        />
                       ) : (
                         // 装载中：既不给上一篇留着，也不闪一个空框——骨架意味着"路上有东西"。
                         // 尺寸照真实内容：一级标题 28px×1.3≈36px → h-9，正文行 23.25px → h-6，
@@ -2982,8 +2938,8 @@ export function App() {
               )}
             </main>
             {/* 底部 AI 对话框：悬浮在正文列下沿，**不随滚动移动**（它在 main 外面）。
-                只在"真的有一篇在编辑/浏览"时出现——源码态与别的页面没有正文可改。 */}
-            {liveEditor && selected && mode !== "source" ? (
+                只在"真的有一篇在编辑/浏览"时出现——别的页面没有正文可改。 */}
+            {liveEditor && selected ? (
               <AiDock
                 // 换一篇就重挂：上一轮的问答、钉住状态与草稿都不该跟到下一篇
                 key={selected.rel}
