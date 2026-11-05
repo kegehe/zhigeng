@@ -142,6 +142,11 @@ fn ai_flag(yaml: &str, key: &str) -> bool {
 
 /// 应用一次面板提交。没有任何实际变化时返回**原串**（调用方据此不写盘）。
 pub fn apply(content: &str, patch: &MetaPatch) -> Result<String> {
+    // 校验放在两条分支之前：新建 front-matter 与已有 front-matter 共用同一份判据，
+    // 否则"没有 front-matter"这条路上重复键会被原样写进文件，整篇从此读不出来。
+    if let Some(edits) = &patch.props {
+        校验属性编辑(edits)?;
+    }
     let doc = md_kernel::parse(content);
     let Some(fm) = doc.front_matter else {
         return 新建并写(content, patch);
@@ -170,7 +175,6 @@ pub fn apply(content: &str, patch: &MetaPatch) -> Result<String> {
     }
 
     if let Some(edits) = &patch.props {
-        校验属性编辑(edits)?;
         let mut 删过 = HashSet::new();
         for e in edits.iter().filter(|e| e.value.is_none()) {
             if 当前.props.iter().any(|p| p.key == e.key) {
@@ -184,6 +188,17 @@ pub fn apply(content: &str, patch: &MetaPatch) -> Result<String> {
         {
             if e.kind == "json" {
                 continue; // 复杂值只读；前端不该发，发了也不猜
+            }
+            if !删过.contains(&e.key)
+                && 当前
+                    .props
+                    .iter()
+                    .any(|p| p.key == e.key && p.kind == "json")
+            {
+                return Err(Error::Invalid(format!(
+                    "属性「{}」是列表 / 映射，属性面板不能改写；要换成普通值请先删掉它",
+                    e.key
+                )));
             }
             if !删过.contains(&e.key) {
                 if let Some(old) = 当前.props.iter().find(|p| p.key == e.key) {
@@ -1168,5 +1183,73 @@ mod tests {
             清洗标签(&["#a".into(), " a ".into(), "b".into(), "#b".into()]),
             vec!["a", "b"]
         );
+    }
+
+    #[test]
+    fn 新建_front_matter_也校验属性键() {
+        let e = apply(
+            "正文\n",
+            &MetaPatch {
+                props: Some(vec![
+                    PropEdit {
+                        key: "a".into(),
+                        kind: "text".into(),
+                        value: Some("1".into()),
+                    },
+                    PropEdit {
+                        key: "a".into(),
+                        kind: "text".into(),
+                        value: Some("2".into()),
+                    },
+                ]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(e, Err(Error::Invalid(_))), "{e:?}");
+    }
+
+    #[test]
+    fn 不能把普通属性改名成复杂属性的键_删了再写可以() {
+        let src = "---\nprops:\n  范围:\n    - a\n  x: 1\n---\n\n正文\n";
+        let 改名 = apply(
+            src,
+            &MetaPatch {
+                props: Some(vec![
+                    PropEdit {
+                        key: "x".into(),
+                        kind: "text".into(),
+                        value: None,
+                    },
+                    PropEdit {
+                        key: "范围".into(),
+                        kind: "text".into(),
+                        value: Some("y".into()),
+                    },
+                ]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(改名, Err(Error::Invalid(_))), "{改名:?}");
+        // 删除 + 同名新值是同一次提交里的组合意图，不该被上面那条挡住
+        let 重写 = 改(
+            src,
+            MetaPatch {
+                props: Some(vec![
+                    PropEdit {
+                        key: "范围".into(),
+                        kind: "json".into(),
+                        value: None,
+                    },
+                    PropEdit {
+                        key: "范围".into(),
+                        kind: "text".into(),
+                        value: Some("y".into()),
+                    },
+                ]),
+                ..Default::default()
+            },
+        );
+        assert!(重写.contains("  范围: y\n"), "{重写}");
+        assert!(!重写.contains("- a"), "{重写}");
     }
 }

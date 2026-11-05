@@ -311,6 +311,8 @@ export function App() {
   const [propsBusy, setPropsBusy] = useState(false);
   const [propsConflict, setPropsConflict] = useState(false);
   const [propsError, setPropsError] = useState<string | null>(null);
+  /** 属性面板里有没有未保存的改动。离开这一页的入口在侧栏 / 命令面板，得由 App 拦 */
+  const [propsDirty, setPropsDirty] = useState(false);
   const [editDoc, setEditDoc] = useState<EditDoc | null>(null);
   /** 当前这次打开要把正文滚到哪一块（引用点击）；普通打开是 null */
   const [blockFocus, setBlockFocus] = useState<块定位 | null>(null);
@@ -962,6 +964,20 @@ export function App() {
   }, [saveState]);
 
   /**
+   * 离开属性页前唯一一道确认。
+   *
+   * 切走的入口不只在面板里（侧栏笔记、搜索命中、命令面板、底栏四格都能走），
+   * 所以拦在 App 这一层。用原生 `confirm` 是因为这次导航由页面外的控件发起，
+   * 没有可以挂内联确认的地方；「取消」那枚按钮是用户明确要丢，走另一条路不进这里。
+   */
+  const 可弃属性 = () => {
+    if (mode !== "props" || !propsDirty) return true;
+    if (!window.confirm("属性里还有未保存的改动，确定丢掉？")) return false;
+    setPropsDirty(false);
+    return true;
+  };
+
+  /**
    * 打开一篇要备齐两样：正文要的块树，与落盘要的 `baseHash`。
    *
    * 浏览用的就是块编辑器本身（同一份渲染、同一套排版），所以块树不能等点"编辑"时才现取——
@@ -988,6 +1004,7 @@ export function App() {
   };
 
   const openNote = async (rel: string, title?: string, blockOrdinal?: number) => {
+    if (!可弃属性()) return;
     if (editing && !(await persist())) {
       setFlash("这篇还没保存——先处理冲突或错误提示");
       return;
@@ -1008,7 +1025,10 @@ export function App() {
   };
 
   /** 关掉面板回正文：开着笔记就回到可编辑，没开才是空态 */
-  const backToNote = () => setMode(selected ? "inline" : "view");
+  const backToNote = () => {
+    if (!可弃属性()) return;
+    setMode(selected ? "inline" : "view");
+  };
 
   /** 管理动作之后：列表 + 当前篇都要跟着变（改名会换 rel，所以传进来） */
   const afterChange = async (rel?: string | null) => {
@@ -1287,6 +1307,7 @@ export function App() {
   }, [searching, 收起菜单]);
 
   const openTrash = async () => {
+    if (!可弃属性()) return;
     if (editing && !(await persist())) return;
     try {
       setTrash(await api.listTrash());
@@ -1297,6 +1318,7 @@ export function App() {
   };
 
   const openImport = async () => {
+    if (!可弃属性()) return;
     if (editing && !(await persist())) return;
     setMode("import");
     setImportPlan(null);
@@ -1307,6 +1329,7 @@ export function App() {
   const openProps = async () => {
     if (!selected) return;
     if (editing && !(await persist())) return;
+    setPropsDirty(false);
     setPropsConflict(false);
     setPropsError(null);
     try {
@@ -1329,6 +1352,7 @@ export function App() {
     try {
       await api.noteMetaSave(selected.rel, patch, force ? undefined : metaView.hash);
       setPropsConflict(false);
+      setPropsDirty(false);
       await loadNote(selected.rel);
       await refresh();
       setMode("inline");
@@ -1384,6 +1408,7 @@ export function App() {
 
   /** 备份面板：状态 + 最近几份 + 当前这篇的历史，一次拉齐 */
   const openBackup = async () => {
+    if (!可弃属性()) return;
     if (editing && !(await persist())) return;
     setMode("backup");
     setBackupDraft(info?.backupDir ?? "");
@@ -1540,7 +1565,7 @@ export function App() {
     };
     window.addEventListener("keydown", on键);
     return () => window.removeEventListener("keydown", on键);
-  }, [palette, mode, selected]);
+  }, [palette, mode, selected, propsDirty]);
   const 填回 = (v: AiView) => {
     setAiView(v);
     setAiForm({
@@ -1554,6 +1579,7 @@ export function App() {
   const openAsk = async () => {
     // 与其他面板同一条规矩：切走会卸载编辑器，自动保存那条 effect 在 `editing` 变假的
     // 那一刻就撤了待发的定时器——不先 persist，最后那几笔字要等回到正文才重新排上队
+    if (!可弃属性()) return;
     if (editing && !(await persist())) return;
     setMode("ask");
     try {
@@ -1621,6 +1647,7 @@ export function App() {
    * 备份 / 回收站 / 导入那三个入口早就是这么做的。
    */
   const openSettings = async () => {
+    if (!可弃属性()) return;
     if (editing && !(await persist())) return;
     setMode("settings");
     setBackupDraft(info?.backupDir ?? "");
@@ -2830,8 +2857,13 @@ export function App() {
                     冲突={propsConflict}
                     错误={propsError}
                     onBack={backToNote}
+                    onCancel={() => {
+                      setPropsDirty(false);
+                      setMode(selected ? "inline" : "view");
+                    }}
                     onSave={(patch, force) => void saveProps(patch, force)}
                     onReload={() => void reloadProps()}
+                    onDirty={setPropsDirty}
                   />
                 ) : (
                   <div className="measure-ui px-6 py-8 text-sm text-fg-2">正在读取属性…</div>

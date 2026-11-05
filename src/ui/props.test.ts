@@ -49,10 +49,14 @@ describe("面板状态 → 补丁", () => {
   it("只改标签时不动属性", () => {
     expect(算补丁(元, "a, c", 原样(), false, false)).toEqual({
       tags: ["a", "c"],
-      props: [],
-      private: false,
-      noAi: false,
     });
+  });
+
+  it("含逗号的标签没被编辑时整栏不进补丁（文本输入框表达不了它，重解析会拆成两个）", () => {
+    const 逗号元: MetaView = { ...元, tags: ["a,b"] };
+    expect(算补丁(逗号元, "a,b", 行来自(逗号元), true, false)).toEqual({ private: true });
+    // 只差空格 / 井号这类写法，也不算改动
+    expect(算补丁(元, "a,b", 原样(), false, false)).toBeNull();
   });
 
   it("改名按删旧键 + 写新键两笔表达", () => {
@@ -81,8 +85,7 @@ describe("面板状态 → 补丁", () => {
   });
 
   it("AI 开关变了只带开关", () => {
-    const patch = 算补丁(元, "a, b", 原样(), true, false);
-    expect(patch).toMatchObject({ private: true, noAi: false, props: [] });
+    expect(算补丁(元, "a, b", 原样(), true, false)).toEqual({ private: true });
   });
 
   it("新加一行写进去", () => {
@@ -101,11 +104,21 @@ describe("面板自己先拦下的问题", () => {
     expect(问题行(行)).toBe("属性键「priority」重复");
     expect(问题行(原样())).toBeNull();
   });
+
+  it("复杂属性的键也占位：改名撞上它会覆盖掉那份列表 / 映射", () => {
+    const 行 = 原样();
+    行[0] = { ...行[0]!, 键: "范围" };
+    expect(问题行(行)).toBe("属性键「范围」重复");
+    // 删掉 json 那一行之后，这个名字就能用了
+    行[2] = { ...行[2]!, 删除: true };
+    expect(问题行(行)).toBeNull();
+  });
 });
 
 describe("接线守卫", () => {
   const 主窗 = fs.readFileSync("src/App.tsx", "utf8");
   const 命令 = fs.readFileSync("src/ipc/commands.ts", "utf8");
+  const 面板 = fs.readFileSync("src/ui/PropsView.tsx", "utf8");
 
   it("标题栏有入口，主区有这一页", () => {
     expect(主窗).toContain("void openProps()");
@@ -121,6 +134,13 @@ describe("接线守卫", () => {
 
   it("Esc 能出这一页，但输入框里的 Esc 归输入法 / 它自己", () => {
     expect(主窗).toMatch(/e\.key === "Escape" && mode === "props"/);
+  });
+
+  it("带未保存改动切走要先问一句", () => {
+    expect(面板).toContain("props.onDirty(dirty)");
+    expect(主窗).toContain("window.confirm");
+    // 入口都从这一处过：search 命中、侧栏、底栏四格与命令面板
+    expect(主窗).toMatch(/if \(!可弃属性\(\)\) return;/);
   });
 
   it("IPC 两条命令都通到 Rust", () => {

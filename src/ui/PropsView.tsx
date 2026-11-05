@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { MetaPatch, MetaView } from "../ipc/types";
 import { btn, btnPrimary } from "./controls";
 import { 推断类型, 问题行, 算补丁, 行来自, type 属性行 } from "./props";
@@ -20,16 +20,26 @@ export function PropsView(props: {
   busy: boolean;
   冲突: boolean;
   错误: string | null;
+  /** 「完成」/ Esc：有未保存改动时由 App 先问一句 */
   onBack: () => void;
+  /** 「取消」：明确丢弃，不再问 */
+  onCancel: () => void;
   /** force=true 是"仍然存我这份"：跳过 expectHash，只在冲突横幅上出现 */
   onSave: (patch: MetaPatch, force: boolean) => void;
   onReload: () => void;
+  /** 只把"有没有未保存改动"说给 App：离开这一页的入口不在面板里（侧栏、命令面板） */
+  onDirty: (dirty: boolean) => void;
 }) {
   const { meta } = props;
   const [标签, set标签] = useState(meta.tags.join(", "));
   const [行, set行] = useState<属性行[]>(() => 行来自(meta));
   const [私密, set私密] = useState(meta.private);
   const [停用, set停用] = useState(meta.noAi);
+
+  const dirty = 算补丁(meta, 标签, 行, 私密, 停用) !== null;
+  useEffect(() => {
+    props.onDirty(dirty);
+  }, [dirty, props.onDirty]);
 
   const 可编辑 = meta.yamlOk;
   const 问题 = 问题行(行);
@@ -40,7 +50,7 @@ export function PropsView(props: {
     const patch = 补丁();
     // 没改就直接回去：按一次"保存"不该白落一次盘
     if (!patch) {
-      props.onBack();
+      props.onCancel();
       return;
     }
     props.onSave(patch, force);
@@ -81,10 +91,10 @@ export function PropsView(props: {
         <div className="mt-4 rounded-md border border-danger bg-danger-soft px-3 py-2 text-sm">
           这篇在你打开属性期间被别处改过（Obsidian、另一个窗口，或同步）。你的改动还在下面，还没保存：
           <div className="mt-3 flex gap-2">
-            <button className={btn} onClick={props.onReload}>
+            <button className={btn} onClick={props.onReload} disabled={props.busy}>
               丢掉我的，读磁盘版本
             </button>
-            <button className={btn} onClick={() => 保存(true)}>
+            <button className={btn} onClick={() => 保存(true)} disabled={props.busy}>
               仍然存我这份
             </button>
           </div>
@@ -209,7 +219,7 @@ export function PropsView(props: {
         >
           {props.busy ? "保存中…" : "保存属性"}
         </button>
-        <button className={btn} onClick={props.onBack}>
+        <button className={btn} onClick={props.onCancel}>
           取消
         </button>
         {!meta.hasFrontMatter ? (
