@@ -1235,6 +1235,8 @@ export function App() {
   const createNote = async (标题?: string, parent?: string): Promise<boolean> => {
     const title = (标题 ?? newTitle).trim();
     if (!title) return false;
+    // 建完就 `startEdit(rel)`，属性页会跟着卸载；没保存的草稿得先问一句
+    if (!可弃属性()) return false;
     if (editing && !(await persist())) return false;
     try {
       const rel = await api.noteCreate(title, parent);
@@ -1327,6 +1329,9 @@ export function App() {
 
   /** 属性面板：先把正文落盘（切走会卸载编辑器），再读盘上的 front-matter。 */
   const openProps = async () => {
+    // 已经在这一页了（命令面板还能再点一次）：重读只会把未保存标记清掉，
+    // 而面板不会因此重挂，草稿留在屏幕上却再也不拦离开
+    if (mode === "props") return;
     if (!selected) return;
     if (editing && !(await persist())) return;
     setPropsDirty(false);

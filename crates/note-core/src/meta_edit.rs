@@ -170,6 +170,7 @@ pub fn apply(content: &str, patch: &MetaPatch) -> Result<String> {
     if let Some(want) = &patch.tags {
         let want = 清洗标签(want);
         if want != 当前.tags {
+            确保标签段可改写(&fm.yaml)?;
             设置标签(&mut lines, &want, eol);
         }
     }
@@ -225,6 +226,14 @@ pub fn apply(content: &str, patch: &MetaPatch) -> Result<String> {
     let 新 = 拼行(&lines);
     if 新 == 原始 {
         return Ok(content.to_string());
+    }
+    // 兜底：行级替换拼出来的 YAML 必须仍然可解析。原 front-matter 在进到这里之前
+    // 已经确认能解析，解析不了只可能是插错了位置（例如 `props:` / `ai:` 其实是
+    // 块序列）——宁可整次拒绝，也不把坏 front-matter 落盘。
+    if serde_yaml::from_str::<Value>(&新).is_err() {
+        return Err(Error::Invalid(
+            "这次修改会写出不合法的 YAML，已取消；`props` / `ai` 段可能不是键值结构".into(),
+        ));
     }
     let new_raw = format!("{}{}{}", &fm.raw[..pos], 新, &fm.raw[pos + fm.yaml.len()..]);
     Ok(format!("{new_raw}{}", &content[fm.raw.len()..]))
@@ -492,6 +501,23 @@ fn flow标签(tags: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("tags: [{内}]")
+}
+
+/// `tags` 只能是列表（或单个标量）。映射这类结构面板表达不了，整段重写等于把它
+/// 吃掉——宁可不改，让用户先在外部编辑器里整理。
+fn 确保标签段可改写(yaml: &str) -> Result<()> {
+    let Ok(root) = serde_yaml::from_str::<Value>(yaml) else {
+        return Ok(());
+    };
+    let Some(tags) = root.as_mapping().and_then(|m| m.get("tags")) else {
+        return Ok(());
+    };
+    if tags.is_mapping() {
+        return Err(Error::Invalid(
+            "`tags` 不是列表，属性面板不改写它；先在外部编辑器里整理".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn 设置标签(lines: &mut Vec<行>, want: &[String], eol: &str) {
@@ -791,7 +817,13 @@ fn 设置ai标志(lines: &mut Vec<行>, key: &str, want: bool, eol: &str) -> Res
         let parsed = serde_yaml::from_str::<Value>(&rest).unwrap_or(Value::Null);
         let m = match parsed {
             Value::Mapping(m) => m,
-            _ => Mapping::new(),
+            Value::Null => Mapping::new(),
+            // `ai: 5` 这类标量：展开会把它整段吃掉，不猜
+            _ => {
+                return Err(Error::Invalid(
+                    "`ai` 段不是键值映射，属性面板改不了；先在外部编辑器里整理".into(),
+                ))
+            }
         };
         let 行eol = if lines[s].eol.is_empty() {
             eol.to_string()
@@ -1251,5 +1283,61 @@ mod tests {
         );
         assert!(重写.contains("  范围: y\n"), "{重写}");
         assert!(!重写.contains("- a"), "{重写}");
+    }
+
+    #[test]
+    fn props_是块序列时拒绝写入而不是拼出坏_yaml() {
+        let src = "---\nprops:\n  - a\n---\n\n正文\n";
+        let e = apply(
+            src,
+            &MetaPatch {
+                props: Some(vec![PropEdit {
+                    key: "due".into(),
+                    kind: "text".into(),
+                    value: Some("x".into()),
+                }]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(e, Err(Error::Invalid(_))), "{e:?}");
+    }
+
+    #[test]
+    fn ai_是块序列时拒绝写入() {
+        let src = "---\nai:\n  - x\n---\n\n正文\n";
+        let e = apply(
+            src,
+            &MetaPatch {
+                private: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(e, Err(Error::Invalid(_))), "{e:?}");
+    }
+
+    #[test]
+    fn tags_是映射时拒绝整段重写() {
+        let src = "---\ntags: {a: 1}\n---\n\n正文\n";
+        let e = apply(
+            src,
+            &MetaPatch {
+                tags: Some(vec!["x".into()]),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(e, Err(Error::Invalid(_))), "{e:?}");
+    }
+
+    #[test]
+    fn ai_是标量时拒绝改写() {
+        let src = "---\nai: 5\n---\n\n正文\n";
+        let e = apply(
+            src,
+            &MetaPatch {
+                private: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(e, Err(Error::Invalid(_))), "{e:?}");
     }
 }

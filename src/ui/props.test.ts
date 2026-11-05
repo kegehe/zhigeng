@@ -143,6 +143,20 @@ describe("接线守卫", () => {
     expect(主窗).toMatch(/if \(!可弃属性\(\)\) return;/);
   });
 
+  it("新建笔记也会离开属性页，同样要先问", () => {
+    const 段 = 主窗.slice(主窗.indexOf("const createNote"), 主窗.indexOf("const 收起菜单"));
+    expect(段).toContain("可弃属性()");
+  });
+
+  it("重开属性页不会把未保存标记清掉：同页重入是空转", () => {
+    const 段 = 主窗.slice(主窗.indexOf("const openProps"), 主窗.indexOf("const saveProps"));
+    expect(段).toContain('mode === "props"');
+  });
+
+  it("重名没解决时「仍然存我这份」也不该发", () => {
+    expect(面板).toContain("disabled={props.busy || !!问题}");
+  });
+
   it("IPC 两条命令都通到 Rust", () => {
     expect(命令).toContain('invoke<MetaView>("note_meta"');
     expect(命令).toContain('invoke<string>("note_meta_save"');

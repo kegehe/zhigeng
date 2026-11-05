@@ -94,7 +94,7 @@ export function PropsView(props: {
             <button className={btn} onClick={props.onReload} disabled={props.busy}>
               丢掉我的，读磁盘版本
             </button>
-            <button className={btn} onClick={() => 保存(true)} disabled={props.busy}>
+            <button className={btn} onClick={() => 保存(true)} disabled={props.busy || !!问题}>
               仍然存我这份
             </button>
           </div>
