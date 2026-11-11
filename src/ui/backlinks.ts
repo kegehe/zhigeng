@@ -1,6 +1,6 @@
 import type { LinkRow } from "../ipc/types";
 
-/** 反链面板一行的三条判定。 */
+/** 反链面板一行的判定。 */
 export type 面板判定 = {
   /** 这一行能不能当"打开那一篇笔记"来点 */
   可打开: boolean;
@@ -10,6 +10,8 @@ export type 面板判定 = {
   尾注: string | null;
   /** 对方是文件不是笔记。组件靠它决定第二行写路径还是写块内文字，不在 JSX 里重算 */
   是资产: boolean;
+  /** 悬空的笔记写法能就地补一篇；新建时用的标题就是 `target` */
+  可新建: boolean;
 };
 
 /**
@@ -25,12 +27,20 @@ export type 面板判定 = {
  * 3. 附件丢了说"文件丢了"，不说"链空了"：用户写下的不是一个笔记名，那句谎他一眼能看穿。
  */
 export function 面板判定(
-  l: Pick<LinkRow, "kind" | "rel" | "broken" | "toNote">,
+  l: Pick<LinkRow, "kind" | "rel" | "broken" | "toNote" | "target">,
 ): 面板判定 {
   const 是资产 = l.kind === "asset" && !l.toNote;
   const 可打开 = !l.broken && !!l.rel && l.toNote;
+  /**
+   * 悬空的笔记写法可以就地补一篇：`target` 就是用户写下的原文，交给 `note_create`
+   * 当标题；索引落地时 `resolve_broken_to` 按标题把这条接回来。
+   *
+   * **资产不算**：它没有"对方的笔记名"可拿去建，建出来只会是一篇叫 `photo.png`
+   * 的空笔记。这和"资产行不许点开成一篇笔记"是同一条口径。
+   */
+  const 可新建 = l.broken && !l.toNote && !是资产 && l.target.trim().length > 0;
   if (是资产) {
-    return { 可打开, 标红: l.broken, 尾注: l.broken ? "文件丢了" : "附件在库内", 是资产 };
+    return { 可打开, 标红: l.broken, 尾注: l.broken ? "文件丢了" : "附件在库内", 是资产, 可新建 };
   }
-  return { 可打开, 标红: l.broken, 尾注: l.broken ? "链空了" : null, 是资产 };
+  return { 可打开, 标红: l.broken, 尾注: l.broken ? "链空了" : null, 是资产, 可新建 };
 }

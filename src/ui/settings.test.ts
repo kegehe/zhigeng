@@ -10,7 +10,6 @@ const 事实 = (过: Partial<AppInfo>): AppInfo => ({
   schemaVersion: 1,
   backupDir: null,
   backupDisabled: false,
-  backupUnconfigured: true,
   backupLastAt: null,
   ...过,
 });
@@ -18,7 +17,7 @@ const 事实 = (过: Partial<AppInfo>): AppInfo => ({
 describe("备份那一格只有一个判据", () => {
   it("显式选了不备份，与还没配置是两句话", () => {
     // docs/03：前者不再骚扰，后者每次启动都该提醒。合成一句"没开"就把这条产品决定抹掉了
-    const 关 = 判备份(事实({ backupDisabled: true, backupUnconfigured: false }));
+    const 关 = 判备份(事实({ backupDisabled: true }));
     const 空 = 判备份(事实({}));
     expect(关.档).toBe("关着");
     expect(空.档).toBe("没配");
@@ -33,22 +32,22 @@ describe("备份那一格只有一个判据", () => {
   });
 
   it("关着优先于没配：用户答过'不备份'就别再问他要目录", () => {
-    const s = 判备份(事实({ backupDisabled: true, backupUnconfigured: true }));
+    const s = 判备份(事实({ backupDisabled: true }));
     expect(s.档).toBe("关着");
   });
 
   it("目录是空白 = 没配，不许报成'备份到 '", () => {
     // Rust 侧 BackupConfig::target() 把 trim 后为空算成 None。界面照字段原样拼就会
     // 说出半句话，而这一档的全部意义是"屏幕上说的是盘上的事实"
-    expect(判备份(事实({ backupDir: "   ", backupUnconfigured: false })).档).toBe("没配");
+    expect(判备份(事实({ backupDir: "   " })).档).toBe("没配");
     expect(判备份(null).档).toBe("没配");
   });
 
   it("开着时给出目录与最近一次", () => {
-    const s = 判备份(事实({ backupDir: "E:\\笔记备份", backupUnconfigured: false, backupLastAt: "2026-10-01T08:00:00Z" }));
+    const s = 判备份(事实({ backupDir: "E:\\笔记备份", backupLastAt: "2026-10-01T08:00:00Z" }));
     expect(s).toEqual({ 档: "开着", 目录: "E:\\笔记备份", 时刻: "2026-10-01T08:00:00Z" });
     // 没做过快照时时刻是 null，由界面说"还没做过快照"——这里不替它编一个时间
-    const 首回 = 判备份(事实({ backupDir: "E:\\x", backupUnconfigured: false }));
+    const 首回 = 判备份(事实({ backupDir: "E:\\x" }));
     expect(首回.档 === "开着" && 首回.时刻).toBe(null);
   });
 });
@@ -84,6 +83,7 @@ describe("设置页说清哪些偏好跟着库走", () => {
     expect(不随库.join("")).toContain("API Key");
     expect(不随库.join("")).toContain("主题");
     expect(不随库.join("")).toContain("行高");
+    expect(不随库.join("")).toContain("侧栏");
     expect(配置归属.find((x) => x.随库走)?.落在哪).toContain(".note/config.toml");
   });
 });
@@ -97,7 +97,9 @@ describe("判据真的接在界面上", () => {
   it("两处面板都走 判备份，没有第二份拼法", () => {
     expect(主窗).toContain("判备份");
     expect(设置).toContain("判备份");
-    expect(主窗).not.toMatch(/backupUnconfigured \|\| .*backupDisabled/);
+    // 备份判据只有一份：App 不许自己拼目录 / 开关
+    expect(主窗).not.toMatch(/backupDisabled\s*\|\|/);
+    expect(主窗).toContain("判备份(info)");
   });
 
   it("标题栏不再有主题下拉，设置页成了唯一那处", () => {

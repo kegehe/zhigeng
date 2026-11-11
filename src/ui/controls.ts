@@ -8,10 +8,22 @@
  * [06] §3 那张"Button 变体体系"的欠账就从"两份"变成"三份"。尺寸与变体仍未成体系，
  * 这一层只保证**同一副按钮在两个文件里是同一串字**。
  */
-export const btn =
-  "rounded-md border border-line px-2 py-1 text-xs text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover active:translate-y-px disabled:opacity-55";
+const btnBase =
+  "cursor-pointer rounded-md border border-line px-2 py-1 text-xs transition-colors duration-(--dur-1) hover:bg-hover active:translate-y-px disabled:cursor-default disabled:opacity-55";
+
+export const btn = btnBase + " text-fg-2";
+
+/**
+ * 危险动作（永久删除 / 移进回收站）。
+ *
+ * **不能写成 `btn + " text-danger"`**：两者都是同层单类 utility，生成顺序里
+ * `text-fg-2` 排在 `text-danger` 之后，红色会被压回次要色。基线只留一份，
+ * 颜色在这里分叉。
+ */
+export const btnDanger = btnBase + " text-danger";
+
 export const btnPrimary =
-  "rounded-md bg-accent px-3 py-1 text-xs text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover active:translate-y-px disabled:opacity-55";
+  "cursor-pointer rounded-md bg-accent px-3 py-1 text-xs text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover active:translate-y-px disabled:cursor-default disabled:opacity-55";
 /**
  * 侧栏底栏那一排入口的"当前开着哪一格"。选中那一格连字一起提到主色：
  * 底色加深之后次要色压上去实测 6.2:1、主色 14.5:1——过线是过线，但"这一格开着"

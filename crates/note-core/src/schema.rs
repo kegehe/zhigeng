@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS notes (
 -- title 没有索引，而链接可以只按标题写（[[某笔记的标题]]）。
 -- path 已由 UNIQUE 建了隐式索引，再建一个是白付写放大。
 CREATE INDEX IF NOT EXISTS notes_title_idx ON notes(title);
+-- 侧栏列表（`Index::list_notes`）的排序：非视图在前、更新时间倒序，取前 N 篇。
+-- 表达式必须与那条 ORDER BY **逐字一致**，查询规划器才肯拿这个顺序直接截断；
+-- 否则每次保存后的刷新都要把所有笔记排一遍再取 300 条，库越大越慢。
+CREATE INDEX IF NOT EXISTS notes_recent_idx ON notes((note_kind='view'), updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS blocks (
   id            TEXT PRIMARY KEY,
@@ -40,6 +44,11 @@ CREATE TABLE IF NOT EXISTS blocks (
   props_json    TEXT
 );
 CREATE INDEX IF NOT EXISTS blocks_note_idx ON blocks(note_id, ordinal);
+-- 搜索结果与引用落点要的是**顶层块序号**：数本笔记里 ordinal 不超过命中块的根块。
+-- 不带这条偏索引时，那个子查询沿 `(note_id, ordinal)` 扫到每块再回表看 `parent_id`：
+-- 最坏形状（30 篇 × 1000 个顶层块、命中在文末）实测这趟同步查询 6.0ms p50 / 6.9 p95，
+-- 已经贴着 8ms 红线；带上根块过滤后只扫根块且不回表，回到 1.4ms / 2.0ms。
+CREATE INDEX IF NOT EXISTS blocks_note_root_idx ON blocks(note_id, ordinal) WHERE parent_id IS NULL;
 -- 外键列在**被引用侧删行**时是要查的：没有索引，SQLite 就对每个被删的块全表扫一次。
 -- 增量索引一篇 3000 块的笔记 = 先删 2999 行，于是 2999 × 全表扫。实测（release，
 -- 2026-09-24）一次保存后第一个同步读命令要等 22.5 秒；8 块的短笔记只有 126 毫秒。

@@ -45,8 +45,8 @@ export type 备份状态 =
   | { 档: "开着"; 目录: string; 时刻: string | null };
 
 /**
- * 判备份。**判据只有一份**：备份面板与设置页两处都从这里取，
- * 谁都不许自己再拼一次 `backupUnconfigured || backupDisabled`。
+ * 判备份。**判据只有一份**：备份面板、设置页与首启向导三处都从这里取，
+ * 谁都不许自己再拼一次 `backupDir` / `backupDisabled`。
  *
  * 最后那条分支看着多余（目录空着时 `app_info` 本就该报"没配置"），但界面说的是
  * "盘上有没有第二个目录"这件事——只照标志位拼，就会在目录字段为空时说出"备份到 "
@@ -68,6 +68,6 @@ export function 判备份(info: 备份事实 | null): 备份状态 {
  */
 export const 配置归属: { 项: string; 落在哪: string; 随库走: boolean }[] = [
   { 项: "备份目录、AI 端点与模型名", 落在哪: ".note/config.toml", 随库走: true },
-  { 项: "主题、正文行高", 落在哪: "本机设置", 随库走: false },
+  { 项: "主题、正文行高、侧栏宽度", 落在哪: "本机设置", 随库走: false },
   { 项: "API Key", 落在哪: "Windows 凭据管理器", 随库走: false },
 ];

@@ -122,6 +122,30 @@ fn 属性面板只改指定几行_并走与正文同一条冲突判定() {
 }
 
 #[test]
+fn 正好一页不算截断多一篇才算() {
+    // 曾经按 `rows.len() == limit` 猜：库里正好 limit 篇时，侧栏会说"只列出了最近
+    // N 篇（库里共 N 篇）"——一篇没少却说自己被截断了。
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    for i in 0..3 {
+        hub.capture(&format!("第 {i} 条"), None).unwrap();
+    }
+
+    let 两篇 = hub.list_notes(2).unwrap();
+    assert_eq!(两篇.notes.len(), 2);
+    assert!(两篇.truncated, "库里 3 篇只取 2 篇，后面确实还有");
+    assert_eq!(两篇.indexed, 3);
+
+    let 三篇 = hub.list_notes(3).unwrap();
+    assert_eq!(三篇.notes.len(), 3);
+    assert!(!三篇.truncated, "正好一页不该说自己被截断");
+
+    let 四篇 = hub.list_notes(4).unwrap();
+    assert_eq!(四篇.notes.len(), 3, "取不满时也不能补空行");
+    assert!(!四篇.truncated);
+}
+
+#[test]
 fn 空内容不落盘() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
@@ -144,7 +168,7 @@ fn 索引一次都不落在启动路径之外() {
 }
 
 #[test]
-fn 新建改名归档删除恢复全程索引不漂() {
+fn 新建改名移动删除恢复全程索引不漂() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
 
@@ -162,19 +186,19 @@ fn 新建改名归档删除恢复全程索引不漂() {
     assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1, "改名后多出一篇");
 
     let file = renamed.rsplit('/').next().unwrap().to_string();
-    let archived = format!("archive/{file}");
-    hub.note_move(&renamed, &archived).unwrap();
+    let moved = format!("整理/{file}");
+    hub.note_move(&renamed, &moved).unwrap();
     let row = hub.list_notes(10).unwrap().notes.remove(0);
     assert_eq!(
         (row.rel.as_str(), row.status.as_str()),
-        (archived.as_str(), "archived")
+        (moved.as_str(), "active")
     );
 
-    hub.note_trash(&archived).unwrap();
+    hub.note_trash(&moved).unwrap();
     assert_eq!(hub.list_notes(10).unwrap().notes.len(), 0);
     let trash = hub.list_trash().unwrap();
     assert_eq!(trash.len(), 1, "{trash:?}");
-    assert_eq!(trash[0].rel, archived, "回收站要记得恢复目标路径");
+    assert_eq!(trash[0].rel, moved, "回收站要记得恢复目标路径");
 
     hub.note_restore(&trash[0].batch, &trash[0].rel).unwrap();
     assert_eq!(hub.list_notes(10).unwrap().notes.len(), 1);
@@ -215,6 +239,26 @@ fn 删掉被引用的笔记时入链退回悬空而不是静默消失() {
     let trash = hub.list_trash().unwrap();
     hub.note_restore(&trash[0].batch, &trash[0].rel).unwrap();
     assert_eq!(link_stats(&conn), (1, 0), "恢复后链接要重新接上");
+}
+
+#[test]
+fn 悬空的笔记链接靠新建同名笔记接得回来() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.save_note("notes/引用者.md", "看 [[下周要写的]]。\n")
+        .unwrap();
+    let conn = open_index(&hub);
+    assert_eq!(link_stats(&conn), (1, 1), "前置：这条链接是悬空的");
+
+    // 面板上「新建这篇并打开」走的就是这一步：链接原文当标题建一篇。
+    // 落点会带日期前缀，但 `resolve_broken_to` 按**标题**接回来——标题改一个字就接不上，
+    // 所以前端传的必须是 target 原文，不能顺手清理成文件名。
+    let rel = hub.note_create("下周要写的", None).unwrap();
+    assert!(
+        rel.ends_with("-下周要写的.md"),
+        "落点应当带上日期前缀，链接却仍按标题接回来: {rel}"
+    );
+    assert_eq!(link_stats(&conn), (1, 0), "新建之后链接应当接回来");
 }
 
 #[test]
@@ -261,12 +305,92 @@ fn 同名笔记删两次在回收站里不互相覆盖() {
 }
 
 #[test]
+fn 回收站可预览正文也可永久删除() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    let rel = hub.note_create("要删的", None).unwrap();
+    hub.note_trash(&rel).unwrap();
+    let t = hub.list_trash().unwrap().remove(0);
+
+    // 删之前写了什么，读盘就能看见——这正是"确认删的是哪一版"要的东西
+    assert!(hub
+        .read_trash(&t.batch, &t.rel)
+        .unwrap()
+        .content
+        .contains("要删的"));
+    // 删除时刻来自批次名，不是文件 mtime（rename 会把 mtime 原样留下来）
+    let now = note_core::versions::现在();
+    assert!(
+        (now - t.deleted_ms).abs() < 60_000,
+        "删除时刻不对: deleted={} now={now}",
+        t.deleted_ms
+    );
+
+    // 原位又写了一篇同名：永久删除回收件不能把它一起带走
+    hub.save_note(
+        &rel,
+        "---\nid: n-reborn01\ntitle: \"新写的\"\n---\n\n新写的正文\n",
+    )
+    .unwrap();
+
+    hub.note_purge(&t.batch, &t.rel).unwrap();
+    assert!(hub.list_trash().unwrap().is_empty());
+    assert!(hub.read_trash(&t.batch, &t.rel).is_err());
+    let alive = String::from_utf8(hub.vault().read(&rel).unwrap()).unwrap();
+    assert!(
+        alive.contains("新写的正文"),
+        "永久删除回收件误伤了原位的新笔记: {alive}"
+    );
+
+    // 清空是另一条路：还剩几条就删几条，返回删掉的文件数
+    let rel2 = hub.note_create("另一篇", None).unwrap();
+    hub.note_trash(&rel2).unwrap();
+    assert_eq!(hub.empty_trash().unwrap(), 1);
+    assert!(hub.list_trash().unwrap().is_empty());
+    assert_eq!(
+        hub.list_notes(10).unwrap().notes.len(),
+        1,
+        "原位那篇新笔记还在"
+    );
+}
+
+#[test]
+fn 回收站预览超过服务端上限要标截断() {
+    let d = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    // 直接落盘绕过索引：这份用例只关心预览读了多少钱
+    let 大 = "a".repeat(note_core::service::TRASH_PREVIEW_BYTES as usize + 100);
+    hub.vault()
+        .write_atomic("notes/大.md", 大.as_bytes())
+        .unwrap();
+    hub.note_trash("notes/大.md").unwrap();
+    let t = hub.list_trash().unwrap().remove(0);
+
+    let p = hub.read_trash(&t.batch, &t.rel).unwrap();
+    assert!(p.truncated, "大文件预览没标截断");
+    assert_eq!(
+        p.content.len(),
+        note_core::service::TRASH_PREVIEW_BYTES as usize,
+        "预览不该把整份文件都读出来"
+    );
+}
+
+#[test]
 fn 回收站的恢复参数不能越出Vault() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
-    // batch 与 rel 都是从 UI 来的，拼进 trash 路径之前必须过边界校验
-    assert!(hub.note_restore("..", "../outside.md").is_err());
-    assert!(hub.note_restore("a/../../b", "notes/甲.md").is_err());
+    // batch 与 rel 都是从 UI 来的，拼进 trash 路径之前必须过边界校验。
+    // 只断言 `is_err` 不够：旧实现把 `a/../../b` 切成 `b`，最后是因为文件不存在
+    // 才报错——校验其实没拦住。这里钉住**类型**必须是 OutsideVault。
+    for batch in ["..", "a/../../b", "a/b", ".", "", "C:probe.txt"] {
+        assert!(
+            matches!(
+                hub.note_restore(batch, "notes/甲.md"),
+                Err(note_core::Error::OutsideVault(_))
+            ),
+            "batch={batch:?} 没有被路径校验拒绝"
+        );
+    }
 }
 
 #[test]
@@ -571,6 +695,11 @@ fn 从快照恢复一篇被改坏的笔记() {
     let original = "# 周记\n\n第一版内容。\n";
     hub.save_note("notes/周记.md", original).unwrap();
     let first = hub.snapshot_now(true).unwrap().expect("该做出第一份");
+    assert_eq!(
+        hub.app_info().unwrap().backup_last_at.as_deref(),
+        Some(first.taken_at.as_str()),
+        "界面刷新拿的上次备份时间要走小账本"
+    );
 
     hub.save_note("notes/周记.md", "# 周记\n\n被我改坏了。\n")
         .unwrap();
@@ -598,6 +727,70 @@ fn 从快照恢复一篇被改坏的笔记() {
 }
 
 #[test]
+fn 换到已有备份目录时把最近时间的账本对齐() {
+    // 换机 / 换盘时指向的是一个已经有快照的目录：这里不补账本的话，界面从下一次
+    // 刷新起每次都要解析整份清单（两万篇 × 30 份是几十兆），直到下一次快照。
+    let d = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.set_backup(Some(backup.path().to_str().unwrap()), false)
+        .unwrap();
+    hub.save_note("notes/周记.md", "第一版\n").unwrap();
+    let first = hub.snapshot_now(true).unwrap().unwrap();
+
+    let dir = note_core::snapshot::vault_dir(hub.vault(), backup.path().to_str().unwrap())
+        .expect("备份目录应当在库外面");
+    std::fs::remove_file(dir.join("last.json")).unwrap();
+    // 账本不在时读命令靠清单兜底，答案仍然对
+    assert_eq!(
+        hub.app_info().unwrap().backup_last_at.as_deref(),
+        Some(first.taken_at.as_str())
+    );
+    assert!(!dir.join("last.json").exists(), "读命令不该去写账本");
+
+    // 重新选一次同一个（已有快照的）目录 = 对齐账本
+    hub.set_backup(Some(backup.path().to_str().unwrap()), false)
+        .unwrap();
+    assert!(dir.join("last.json").exists(), "换目录时应当把账本对齐");
+    assert_eq!(
+        hub.app_info().unwrap().backup_last_at.as_deref(),
+        Some(first.taken_at.as_str())
+    );
+}
+
+#[test]
+fn 从快照恢复的编号不能越出备份目录() {
+    // 恢复入口拿的是界面/CLI 给的编号，不能直接拼路径：`..` 或绝对路径
+    // 会读到备份目录以外。编号与 rel 两道都要挡。
+    let d = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let mut hub = hub_in(d.path());
+    hub.set_backup(Some(backup.path().to_str().unwrap()), false)
+        .unwrap();
+    hub.save_note("notes/周记.md", "第一版\n").unwrap();
+    let first = hub.snapshot_now(true).unwrap().unwrap();
+
+    for bad in [
+        "..",
+        "../..",
+        "..\\..",
+        &backup.path().join("别处").display().to_string(),
+    ] {
+        assert!(
+            hub.snapshot_restore("notes/周记.md", bad).is_err(),
+            "{bad:?} 被当成快照编号读出去了"
+        );
+    }
+    assert!(
+        hub.snapshot_restore("../外面.md", &first.id).is_err(),
+        "rel 爬出快照目录同样要拒绝"
+    );
+    // 合法的恢复仍然走得通
+    hub.snapshot_restore("notes/周记.md", &first.id).unwrap();
+    assert_eq!(hub.read_raw("notes/周记.md").unwrap().content, "第一版\n");
+}
+
+#[test]
 fn 备份目录没配置时相关命令都是空操作而不是报错() {
     let d = tempfile::tempdir().unwrap();
     let mut hub = hub_in(d.path());
@@ -605,11 +798,11 @@ fn 备份目录没配置时相关命令都是空操作而不是报错() {
     assert!(hub.snapshot_now(true).unwrap().is_none());
     assert!(hub.snapshots_recent(10).unwrap().is_empty());
     assert!(hub.snapshots_of("inbox/x.md").unwrap().is_empty());
-    // 显式关掉之后，"还没引导过"这个提醒位就该熄灭
-    assert!(hub.app_info().unwrap().backup_unconfigured);
+    // 显式关掉之后 disabled 为真；"还没配 / 已关掉"由前端从 dir + disabled 推出
     hub.set_backup(None, true).unwrap();
     let info = hub.app_info().unwrap();
-    assert!(info.backup_disabled && !info.backup_unconfigured);
+    assert!(info.backup_disabled);
+    assert!(info.backup_dir.is_none());
 }
 
 #[test]

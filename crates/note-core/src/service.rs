@@ -25,11 +25,11 @@ pub struct AppInfo {
     pub vault_path: Option<String>,
     pub index_notes: i64,
     pub schema_version: i64,
-    /// 备份三态：目录 / 显式关掉 / 还没引导过（前端据此决定要不要提醒）。
-    /// 判据来自 docs/03 §备份——"唯一副本 = 没有副本"。
+    /// 备份三态由 `backup_dir` / `backup_disabled` 推出（前端 `判备份` 唯一判据）：
+    /// 目录 / 显式关掉 / 还没引导过。别再加一个"没配置"布尔位——盘上空白目录
+    /// 与显式关掉的口径会各说各话（docs/03 §备份）。
     pub backup_dir: Option<String>,
     pub backup_disabled: bool,
-    pub backup_unconfigured: bool,
     pub backup_last_at: Option<String>,
 }
 
@@ -44,7 +44,6 @@ impl AppInfo {
             schema_version: 0,
             backup_dir: None,
             backup_disabled: false,
-            backup_unconfigured: false,
             backup_last_at: None,
         }
     }
@@ -92,6 +91,8 @@ pub struct NoteDetail {
 #[serde(rename_all = "camelCase")]
 pub struct HitRow {
     pub block_id: String,
+    /// 命中块所在的**顶层块**序号（1-based）。界面拿它接引用落点，打开就跳到那一块
+    pub block_ordinal: i64,
     pub note_id: String,
     pub path: String,
     pub title: String,
@@ -131,7 +132,7 @@ pub struct LinkRow {
     /// 对方笔记的路径。悬空出链没有对方 → 空串
     pub rel: String,
     pub title: String,
-    /// 对方的状态：active / inbox / archived；悬空出链是 "missing"
+    /// 对方的状态：active / inbox；悬空出链是 "missing"
     pub status: String,
     /// 发起这条链的那个块的文字（已剥语法），面板拿它当上下文
     pub snippet: String,
@@ -182,8 +183,24 @@ pub struct TrashRow {
     pub batch: String,
     pub rel: String,
     pub size: u64,
+    /// 文件自己的 mtime（最后编辑时间）。`rename` 会保留它。
     pub updated_ms: i64,
+    /// 移进回收站的时刻（批次名里带着）。
+    pub deleted_ms: i64,
 }
+
+/// 回收站预览。`truncated` 是服务端按字节先截过一次的标记——
+/// 前端那个 64 KB 是显示上限，不能代替这里的读盘上限。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashPreview {
+    pub content: String,
+    pub truncated: bool,
+}
+
+/// 预览最多读多少字节。512 KB 足够让前端截出 64 K 个字符（即使全是 4 字节
+/// 字符也还有 128 K），又不至于把一份超大文件整份搬进内存和 IPC。
+pub const TRASH_PREVIEW_BYTES: u64 = 512 * 1024;
 
 /// 编辑器的输入：整篇源文本 + 它的 hash。hash 要原样带回来才能做冲突判定。
 #[derive(Debug, Clone, Serialize)]
@@ -364,19 +381,23 @@ pub struct EditDoc {
 pub fn reindex_note(vault: &Vault, index: &Index, rel: &str) -> Result<()> {
     let file = vault.note_file(rel)?;
     let content = String::from_utf8_lossy(&vault.read(rel)?).to_string();
-    index.in_tx(|| {
-        // 版本快照先落：它是"那次保存之前"的那一版，与索引重建无关，
-        // 但得在同一趟里做完——不然同步那一半排进队列的东西没人认领。
-        crate::versions::落待落(vault, index, rel)?;
-        index.index_file(&file, &content)?;
-        index.rebuild_links_of_note(rel)?;
-        // 这篇新写出来的链接里，可能有别人早就悬空指向它的
-        index.resolve_broken_to(rel)?;
-        Ok(())
+    // 版本写事务要罩到**提交**为止：清扫在另一条连接上按"行里有没有人指着"
+    // 判孤儿，看不见未提交的行（versions::写闸）。
+    crate::versions::写事务(|| {
+        index.in_tx(|| {
+            // 版本快照先落：它是"那次保存之前"的那一版，与索引重建无关，
+            // 但得在同一趟里做完——不然同步那一半排进队列的东西没人认领。
+            crate::versions::落待落(vault, index, rel)?;
+            index.index_file(&file, &content)?;
+            index.rebuild_links_of_note(rel)?;
+            // 这篇新写出来的链接里，可能有别人早就悬空指向它的
+            index.resolve_broken_to(rel)?;
+            Ok(())
+        })
     })
 }
 
-/// 换路径（改名 / 归档 / 从回收站放回）。旧行先摘，再按新路径补。
+/// 换路径（改名 / 从回收站放回）。旧行先摘，再按新路径补。
 pub fn reindex_moved(vault: &Vault, index: &Index, rel: &str, new_rel: &str) -> Result<()> {
     if rel == new_rel {
         return reindex_note(vault, index, new_rel);
@@ -389,13 +410,16 @@ pub fn reindex_moved(vault: &Vault, index: &Index, rel: &str, new_rel: &str) -> 
 
 /// 把一篇从索引里摘掉，并把它人的入链退回悬空（不随 `ON DELETE CASCADE` 静默消失）。
 pub fn unindex(vault: &Vault, index: &Index, rel: &str) -> Result<()> {
-    index.in_tx(|| {
-        // 快照要在 `notes` 行被删**之前**落：那一行是"这篇当时叫什么"的唯一来源。
-        // 落下来的版本本身不挂外键，所以删行之后它照样在（docs/02 §回收站的索引处理）。
-        crate::versions::落待落(vault, index, rel)?;
-        index.break_incoming_links(rel)?;
-        index.drop_note(rel)?;
-        Ok(())
+    // 与 `reindex_note` 同一个理由：落快照的行要等事务提交才对清扫可见。
+    crate::versions::写事务(|| {
+        index.in_tx(|| {
+            // 快照要在 `notes` 行被删**之前**落：那一行是"这篇当时叫什么"的唯一来源。
+            // 落下来的版本本身不挂外键，所以删行之后它照样在（docs/02 §回收站的索引处理）。
+            crate::versions::落待落(vault, index, rel)?;
+            index.break_incoming_links(rel)?;
+            index.drop_note(rel)?;
+            Ok(())
+        })
     })
 }
 
@@ -418,23 +442,32 @@ impl Hub {
         if index.count_notes()? == 0 {
             index.rebuild_all(&vault)?;
         }
-        // 后台那条连接先 fork 出来：版本历史的清理要**写库**（删行、删 blob），
+        // 后台那条连接先 fork 出来：索引重建与版本落库要**写库**（删行、删 blob），
         // 而 GUI 里**主连接只读**——写一律走后台那条，前台那条一笔都不写。
         let bg = index.fork()?;
-        // 版本历史的清理放在开库这一刻：那时没有前台命令在等，做点清理不占谁的 8ms。
-        // 失败只记日志——历史多了几条不影响别的功能，清理失败不该挡住开库。
-        if let Err(e) = crate::versions::清理(&bg, crate::versions::手工保留上限) {
-            tracing::warn!("清理版本历史失败：{e}");
-        }
-        if let Err(e) = crate::versions::清孤儿(&bg) {
-            tracing::warn!("清理版本残留失败：{e}");
-        }
+        // **开库不扫版本历史**：`清孤儿` 要遍历整个 `.note/versions/`，每篇最多
+        // 留上百份，用久了是成千上万个文件，冷启动会被它明显拖长。扫不扫也不影响
+        // 正确性（多留几份快照、几个没人指着的 blob 只是占盘），所以交给
+        // `清扫版本历史` 在界面起来之后按需跑。
         Ok(Self {
             vault,
             bg: std::sync::Arc::new(std::sync::Mutex::new(bg)),
             index,
             root: opened,
         })
+    }
+
+    /// 版本历史的空闲清扫：`manual` 快照按篇留上限，没有行指着的 blob 删掉。
+    ///
+    /// **不在 `open()` 里跑**（理由见 `open`）。这一趟可能是全库最重的一次目录
+    /// 遍历，所以它开一条**自己的连接**：后台那条正在补索引，清扫不该排在那后面，
+    /// 也不该把后台连接锁住整趟。
+    ///
+    /// 调用方（壳）在界面起来之后丢进 `spawn_blocking`；失败只记日志——
+    /// 历史多了几份不影响任何功能，清扫失败不该冒泡成用户可见的错误。
+    pub fn 清扫版本历史(&self) -> Result<(usize, usize)> {
+        let 连接 = self.index.fork()?;
+        crate::versions::清扫(&连接)
     }
 
     /// 后台索引的句柄。给 `spawn_blocking` 之前先拿这个，**拿完就把主锁还回去**——
@@ -463,11 +496,13 @@ impl Hub {
 
     pub fn app_info(&self) -> Result<AppInfo> {
         let cfg = snapshot::load_config(&self.vault)?;
+        // 只要"上次备份时间"，所以走小账本 `last.json`，不解析 manifest：后者每行
+        // 都带全库清单，两万篇 × 30 份是几十兆，而这个函数每存一篇都会被刷新调一次。
         let last = match cfg.target() {
             Some(dir) => snapshot::vault_dir(&self.vault, dir)
                 .ok()
-                .and_then(|d| snapshot::list(&d).ok())
-                .and_then(|v| v.last().map(|s| s.taken_at.clone())),
+                .and_then(|d| snapshot::last_taken_at(&d).ok())
+                .flatten(),
             None => None,
         };
         Ok(AppInfo {
@@ -477,8 +512,6 @@ impl Hub {
             schema_version: self.index.schema_version()?,
             backup_dir: cfg.dir.clone(),
             backup_disabled: cfg.disabled,
-            // 既没选目录也没显式关掉 = 还没引导过，界面该提醒而不是安静地不备份
-            backup_unconfigured: cfg.dir.is_none() && !cfg.disabled,
             backup_last_at: last,
         })
     }
@@ -497,6 +530,10 @@ impl Hub {
                 path: per_vault.display().to_string(),
                 source: e,
             })?;
+            // 指向的是一个已有备份目录（换机、换盘）时，把"最近一次备份时间"的
+            // 账本对齐一次；不然界面从下一次刷新起每次都要解析整份清单，直到下一次
+            // 快照。失败不影响设置本身——`app_info` 会回落到清单。
+            let _ = snapshot::backfill_last(&per_vault);
         }
         snapshot::save_config(&self.vault, &cfg)
     }
@@ -565,9 +602,13 @@ impl Hub {
     }
 
     pub fn list_notes(&self, limit: usize) -> Result<NoteList> {
-        let rows = self.index.list_notes(limit)?;
+        // 多取一条只为了知道"后面还有没有"——与 `note_links` 同一个判据。
+        // 用 `rows.len() == limit` 来猜会把"正好写满一页"说成截断，界面于是谎报少列了。
+        let mut rows = self.index.list_notes(limit.saturating_add(1))?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
         Ok(NoteList {
-            truncated: rows.len() == limit,
+            truncated,
             notes: rows,
             vault_path: self.root.display().to_string(),
             indexed: self.index.count_notes()?,
@@ -894,7 +935,7 @@ impl Hub {
         reindex_moved(&self.vault, &self.index, rel, new_rel)
     }
 
-    /// 移动或换目录（`notes/甲.md` → `archive/甲.md`），落盘 + 索引一起做。
+    /// 移动或换目录（`notes/甲.md` → `整理/甲.md`），落盘 + 索引一起做。
     pub fn note_move(&mut self, rel: &str, new_rel: &str) -> Result<()> {
         self.note_move_file(rel, new_rel)?;
         self.index_moved(rel, new_rel)
@@ -966,6 +1007,7 @@ impl Hub {
                 rel: t.rel,
                 size: t.size,
                 updated_ms: t.mtime_ms,
+                deleted_ms: t.deleted_ms,
             })
             .collect())
     }
@@ -979,6 +1021,33 @@ impl Hub {
     pub fn note_restore(&mut self, batch: &str, rel: &str) -> Result<()> {
         self.note_restore_file(batch, rel)?;
         self.index_one(rel)
+    }
+
+    /// 回收站里那一份的正文预览。要"删之前到底写了什么"只需读盘，不碰索引。
+    ///
+    /// 只读前 [`TRASH_PREVIEW_BYTES`] 字节：大文件不该整份进内存、过 IPC。
+    pub fn read_trash(&self, batch: &str, rel: &str) -> Result<TrashPreview> {
+        let (bytes, truncated) =
+            self.vault
+                .read_from_trash_prefix(batch, rel, TRASH_PREVIEW_BYTES)?;
+        Ok(TrashPreview {
+            content: String::from_utf8_lossy(&bytes).into_owned(),
+            truncated,
+        })
+    }
+
+    /// 永久删除回收站里的一份。原位若有同名笔记不受影响。
+    ///
+    /// **版本快照不清**：`before_delete` 是历史与撤销的落点，"清空回收站"
+    /// 删的是文件本身（docs/02 §回收站的索引处理）。索引早在入站时已摘除，
+    /// 这里不用再碰 DB。
+    pub fn note_purge(&mut self, batch: &str, rel: &str) -> Result<()> {
+        self.vault.purge_from_trash(batch, rel)
+    }
+
+    /// 清空回收站，返回删掉的文件数。
+    pub fn empty_trash(&mut self) -> Result<u64> {
+        self.vault.empty_trash()
     }
 
     /// 自检：md 与 db 是否一致。UI 的"索引健康"与 CI 都读这两个。
@@ -999,6 +1068,7 @@ impl From<KeywordHit> for HitRow {
     fn from(h: KeywordHit) -> Self {
         Self {
             block_id: h.block_id,
+            block_ordinal: h.block_ordinal,
             note_id: h.note_id,
             path: h.path,
             title: h.title,
@@ -1012,7 +1082,6 @@ pub fn status_label(s: NoteStatus) -> &'static str {
     match s {
         NoteStatus::Inbox => "inbox",
         NoteStatus::Active => "active",
-        NoteStatus::Archived => "archived",
     }
 }
 

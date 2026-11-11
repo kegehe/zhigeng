@@ -5,6 +5,7 @@
 //! ```text
 //! <备份目录>/<库名-路径hash>/
 //!   manifest.jsonl                 每行一份快照，按时间递增
+//!   last.json                      "最近一份"的一行小账本（界面刷新只读它）
 //!   20260926-091500/               一份快照一个目录
 //!     notes/甲.md                  只放这份里**变化过**的文件（增量）
 //! ```
@@ -146,6 +147,102 @@ fn manifest_path(dir: &Path) -> PathBuf {
     dir.join("manifest.jsonl")
 }
 
+/// manifest 旁边的一行小账本：最近一份快照的编号与时间。
+///
+/// 界面每次刷新（每存一篇都会来一趟）只想知道"上次备份是什么时候"，而 manifest
+/// 每行都带着当次**全库清单**，保留 30 份就是 30 份全量表——为拿一个时间戳去解析
+/// 几十兆 JSON，保存和启动都会被它拖慢。账本只是缓存：manifest 仍是唯一事实来源，
+/// 账本丢了/坏了都能从它重算（见 [`last_taken_at`]）。
+const LAST_FILE: &str = "last.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LastBackup {
+    id: String,
+    taken_at: String,
+}
+
+fn last_path(dir: &Path) -> PathBuf {
+    dir.join(LAST_FILE)
+}
+
+/// 读账本。不在 / 内容坏 / 编号不是本模块产出的那一种 ⇒ `None`（调用方回落到清单）。
+/// 编号也校验，是因为账本同样可能被手工改过，而它会被当作"最近一份"报给界面。
+fn read_last(dir: &Path) -> Option<LastBackup> {
+    let text = fs::read_to_string(last_path(dir)).ok()?;
+    let r: LastBackup = serde_json::from_str(&text).ok()?;
+    snapshot_id_ok(&r.id).then_some(r)
+}
+
+fn write_last(dir: &Path, snap: &Snapshot) -> Result<()> {
+    let text = serde_json::to_string(&LastBackup {
+        id: snap.id.clone(),
+        taken_at: snap.taken_at.clone(),
+    })
+    .map_err(|e| Error::Io {
+        path: last_path(dir).display().to_string(),
+        source: std::io::Error::other(e),
+    })?;
+    // 同目录写临时文件再改名：读方（界面刷新）可能正读着，不能让它撞见半截 JSON。
+    let tmp = dir.join(format!("{LAST_FILE}.tmp"));
+    fs::write(&tmp, text).map_err(|e| Error::Io {
+        path: tmp.display().to_string(),
+        source: e,
+    })?;
+    fs::rename(&tmp, last_path(dir)).map_err(|e| Error::Io {
+        path: last_path(dir).display().to_string(),
+        source: e,
+    })
+}
+
+/// 写不进去就删掉旧账本：留着它会让界面一直显示上一份的时间，删掉之后
+/// `last_taken_at` 回落到清单，答案仍然对。备份/设置本身不因这份缓存失败而报错。
+fn 记下最近一份(dir: &Path, snap: &Snapshot) {
+    if write_last(dir, snap).is_err() {
+        let _ = fs::remove_file(last_path(dir));
+    }
+}
+
+/// 最近一次快照的时间（RFC3339）。有账本就只读那一行小文件；没有（老备份目录、
+/// 账本被手工删掉/改坏）才回落到整份清单。
+///
+/// 这是界面刷新那条路上的 O(1) 入口：`app_info` 每存一篇都会被调一次，不能让它
+/// 解析 manifest 里的全库清单。需要完整清单的调用方仍走 [`list`]。
+///
+/// **这里只读不写**。补账本的事归写入口（[`run`]、[`backfill_last`]）：
+/// `app_info` 握着 Hub 锁调它，在这里补记要么去抢 `run` 的锁（一次整库备份
+/// 几十秒，所有读命令一起冻住），要么引入一套额外的竞争处理，都不值得。
+pub fn last_taken_at(dir: &Path) -> Result<Option<String>> {
+    if let Some(r) = read_last(dir) {
+        return Ok(Some(r.taken_at));
+    }
+    // 读清单本身不用锁：`prune` 的清单重写走临时文件 + 改名，读者要么看到旧的全量，
+    // 要么看到新的全量，不会撞见半截。
+    Ok(list(dir)?.pop().map(|s| s.taken_at))
+}
+
+/// 把账本对齐到清单里最新的一份。给"换成已有备份目录"（换机、换盘）用：
+/// 不补的话，界面从下一次刷新起每次都要解析整份清单，直到下一次快照。
+///
+/// 账本有效时直接返回——`run` 每次都写它，有效就说明是对齐的；清单是不是被
+/// 手工改过这种事，不值得为它每次都解析几十兆。
+pub fn backfill_last(dir: &Path) -> Result<()> {
+    if read_last(dir).is_some() {
+        return Ok(());
+    }
+    let Some(last) = list(dir)?.pop() else {
+        return Ok(());
+    };
+    // 解析清单要一会儿，期间可能刚有一份快照记上了账本：看到了就不覆盖。
+    // 与正在跑的 `run` 并发（用户一边备份一边换目录）时，最坏结果也只是把账本
+    // 写成稍旧的一份，下一次快照会纠正。不为这点竞争去抢快照锁：`set_backup`
+    // 握着 Hub 锁，等一次整库备份会把读命令一起冻住。
+    if read_last(dir).is_some() {
+        return Ok(());
+    }
+    记下最近一份(dir, &last);
+    Ok(())
+}
+
 /// 读某个库的全部快照（按时间递增）。目录或清单不存在 ⇒ 空（从没备份过）。
 pub fn list(dir: &Path) -> Result<Vec<Snapshot>> {
     let text = match fs::read_to_string(manifest_path(dir)) {
@@ -160,9 +257,13 @@ pub fn list(dir: &Path) -> Result<Vec<Snapshot>> {
     };
     let mut out = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        // 一行坏掉不能带走整份清单：跳过它，其余仍可恢复
+        // 一行坏掉不能带走整份清单：跳过它，其余仍可恢复。
+        // 编号不合法的行同样是坏行——`prune` 会拿它去拼删除路径，
+        // 放进来的话 `../..` 就能借清理删掉备份目录以外的东西。
         if let Ok(s) = serde_json::from_str::<Snapshot>(line) {
-            out.push(s);
+            if snapshot_id_ok(&s.id) {
+                out.push(s);
+            }
         }
     }
     // 按 taken_at 排而不是按目录名排：同一秒内撞名会加 -01/-02 后缀，字典序在跨过
@@ -230,6 +331,9 @@ pub fn run(vault: &Vault, force: bool) -> Result<Option<Snapshot>> {
     if !force {
         if let Some(last) = done.last() {
             if last.day() == today {
+                // 今天已经做过：顺手把账本对齐。老备份目录第一次被这个版本打开、
+                // 或账本被删/改坏时，不补的话界面每次刷新都要解析整份清单。
+                记下最近一份(&dir, last);
                 return Ok(None);
             }
         }
@@ -325,6 +429,8 @@ pub fn run(vault: &Vault, force: bool) -> Result<Option<Snapshot>> {
     })?;
     drop(f);
 
+    // 账本记在清单之后：先有登记，才有"最近一份"。
+    记下最近一份(&dir, &snap);
     prune(&dir)?;
     Ok(Some(snap))
 }
@@ -373,11 +479,40 @@ pub fn history_of(dir: &Path, rel: &str) -> Result<Vec<Snapshot>> {
     Ok(out)
 }
 
+/// 快照编号只能是**机器生成的那一种**：`YYYYMMDD-HHMMSS-mmm` 加可选的 `-NN` 后缀
+/// （本模块只产出这种，见 `run` 的 `format!`）。它会被直接拼进路径（恢复、清理都
+/// 这么做），所以按格式卡死，而不是只挡 `..`：`NUL` / `CON` 这类设备名、任意字母
+/// 串、分隔符、盘符与空格都进不来。
+fn snapshot_id_ok(id: &str) -> bool {
+    let b = id.as_bytes();
+    let 数字 = |起: usize, 止: usize| b[起..止].iter().all(|c| c.is_ascii_digit());
+    match b.len() {
+        // 20261108-123456-789
+        19 => 数字(0, 8) && b[8] == b'-' && 数字(9, 15) && b[15] == b'-' && 数字(16, 19),
+        // 20261108-123456-789-01（同一毫秒撞名时往后让）
+        22 => {
+            数字(0, 8)
+                && b[8] == b'-'
+                && 数字(9, 15)
+                && b[15] == b'-'
+                && 数字(16, 19)
+                && b[19] == b'-'
+                && 数字(20, 22)
+        }
+        _ => false,
+    }
+}
+
 /// 取出某份快照里那个文件的字节。
+///
+/// `snapshot_id` 与 `rel` 都可能来自界面/CLI，不能直接拿去拼路径：
+/// `..` 或绝对路径会把这步读取带出备份目录（项目里"路径边界必须焊死"的同一条规矩）。
 pub fn read_file(dir: &Path, snapshot_id: &str, rel: &str) -> Result<Vec<u8>> {
-    let p = dir
-        .join(snapshot_id)
-        .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if !snapshot_id_ok(snapshot_id) {
+        return Err(Error::Invalid(format!("快照编号不合法：{snapshot_id}")));
+    }
+    // 相对路径沿用 Vault 的同一份判据：前导 `/` 视为快照根相对，`..`/盘符一律拒绝
+    let p = crate::vault::resolve_in(&dir.join(snapshot_id), rel)?;
     fs::read(&p).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => Error::NotFound(format!("{snapshot_id} 里没有 {rel}")),
         _ => Error::Io {
@@ -470,6 +605,138 @@ mod tests {
     }
 
     #[test]
+    fn 最近备份时间读小账本而不是整份清单() {
+        let d = tempfile::tempdir().unwrap();
+        let (v, dir) = configured(d.path());
+        write(&v, "notes/甲.md", "a\n");
+        let snap = run(&v, false).unwrap().unwrap();
+
+        let 账本 = fs::read_to_string(last_path(&dir)).unwrap();
+        assert!(
+            账本.contains(&snap.taken_at),
+            "账本里没有刚做的那一份: {账本}"
+        );
+        assert_eq!(
+            last_taken_at(&dir).unwrap().as_deref(),
+            Some(snap.taken_at.as_str())
+        );
+
+        // 往清单里追加一份"更新"的快照行：若实现还去解析清单，答案会被它带偏。
+        let mut 假 = snap.clone();
+        假.id = "20260101-000000-000".into();
+        假.taken_at = "2099-01-01T00:00:00+08:00".into();
+        let mut line = serde_json::to_string(&假).unwrap();
+        line.push('\n');
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(manifest_path(&dir))
+            .unwrap();
+        f.write_all(line.as_bytes()).unwrap();
+        drop(f);
+
+        assert_eq!(
+            last_taken_at(&dir).unwrap().as_deref(),
+            Some(snap.taken_at.as_str()),
+            "账本在时不该再去读清单"
+        );
+    }
+
+    #[test]
+    fn 账本缺失或损坏时最近时间从清单重算() {
+        let d = tempfile::tempdir().unwrap();
+        let (v, dir) = configured(d.path());
+        write(&v, "notes/甲.md", "a\n");
+        let snap = run(&v, false).unwrap().unwrap();
+
+        // 老备份目录（这个账本是后加的），或账本被手工删掉
+        fs::remove_file(last_path(&dir)).unwrap();
+        assert_eq!(
+            last_taken_at(&dir).unwrap().as_deref(),
+            Some(snap.taken_at.as_str())
+        );
+        // 内容坏掉时同样要能回落，而不是把界面的备份时间变成空/报错
+        fs::write(last_path(&dir), "{ 半截").unwrap();
+        assert_eq!(
+            last_taken_at(&dir).unwrap().as_deref(),
+            Some(snap.taken_at.as_str())
+        );
+    }
+
+    #[test]
+    fn 账本缺失时由写入口补上而不是读的时候补() {
+        let d = tempfile::tempdir().unwrap();
+        let (v, dir) = configured(d.path());
+        write(&v, "notes/甲.md", "a\n");
+        let snap = run(&v, false).unwrap().unwrap();
+        fs::remove_file(last_path(&dir)).unwrap();
+
+        // "今天已经备份过"的那次启动也会补：否则界面要等到下一次真的做快照才快起来
+        assert!(run(&v, false).unwrap().is_none(), "同一天不该再做一份");
+        assert_eq!(
+            read_last(&dir).map(|r| r.taken_at),
+            Some(snap.taken_at.clone())
+        );
+
+        // 换到已有备份目录那条路（service::set_backup 调的就是它）
+        fs::remove_file(last_path(&dir)).unwrap();
+        backfill_last(&dir).unwrap();
+        assert_eq!(
+            read_last(&dir).map(|r| r.taken_at),
+            Some(snap.taken_at.clone())
+        );
+
+        // 账本已经有效时不再为它解析清单：往清单里塞一份时间更晚的合法快照行，
+        // 若实现仍去 list，就会拿它把账本覆盖掉。
+        let mut 假 = snap.clone();
+        假.taken_at = "2099-01-01T00:00:00+08:00".into();
+        let mut line = serde_json::to_string(&假).unwrap();
+        line.push('\n');
+        fs::write(manifest_path(&dir), line).unwrap();
+        backfill_last(&dir).unwrap();
+        assert_eq!(
+            read_last(&dir).map(|r| r.taken_at),
+            Some(snap.taken_at.clone())
+        );
+    }
+
+    #[test]
+    fn 读最近时间不抢快照锁也不写盘() {
+        // `app_info` 握着 Hub 锁调这个函数：回落到清单时若去抢 `run` 的锁（或顺手补记），
+        // 一次整库备份（几十秒）期间所有读命令都会被冻住。
+        let d = tempfile::tempdir().unwrap();
+        let (v, dir) = configured(d.path());
+        write(&v, "notes/甲.md", "a\n");
+        let snap = run(&v, false).unwrap().unwrap();
+        fs::remove_file(last_path(&dir)).unwrap();
+
+        let 持锁 = 快照串行.lock().unwrap_or_else(|e| e.into_inner());
+        // 在另一条线程上读并加超时：实现若退回阻塞锁，这里会干净地报失败，
+        // 而不是把测试进程整个挂死。
+        let 目标 = dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let 读 = std::thread::spawn(move || {
+            let _ = tx.send(last_taken_at(&目标));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("读最近时间不该等备份的锁");
+        assert_eq!(got.unwrap().as_deref(), Some(snap.taken_at.as_str()));
+        assert!(!last_path(&dir).exists(), "读的时候不该写账本");
+        读.join().unwrap();
+        drop(持锁);
+    }
+
+    #[test]
+    fn 从没备份过的目录没有最近时间() {
+        let d = tempfile::tempdir().unwrap();
+        let (_v, dir) = configured(d.path());
+        assert_eq!(last_taken_at(&dir).unwrap(), None);
+        backfill_last(&dir).unwrap();
+        assert!(!last_path(&dir).exists(), "没有快照就不该凭空记账本");
+    }
+
+    #[test]
     fn 删掉的笔记能从它消失前的那份里取回() {
         // 验收 ⑨：从快照里能完整恢复一篇被误删改的文件
         let d = tempfile::tempdir().unwrap();
@@ -487,6 +754,91 @@ mod tests {
         assert_eq!(hist.len(), 1);
         let got = read_file(&dir, &hist[0].id, "notes/重要.md").unwrap();
         assert_eq!(std::str::from_utf8(&got).unwrap(), original);
+    }
+
+    #[test]
+    fn 恢复时快照编号与相对路径都不许越出备份目录() {
+        let d = tempfile::tempdir().unwrap();
+        let (v, dir) = configured(d.path());
+        write(&v, "notes/甲.md", "内容甲\n");
+        let snap = run(&v, false).unwrap().unwrap();
+        assert_eq!(
+            read_file(&dir, &snap.id, "notes/甲.md").unwrap(),
+            "内容甲\n".as_bytes(),
+            "正常那一路不能被校验挡掉"
+        );
+
+        // 备份目录旁边放一份"秘密"：编号若能爬出去，这里就会被读到
+        let secret = dir.parent().unwrap().join("秘密.md");
+        fs::write(&secret, "不该被读到").unwrap();
+        for bad in [
+            "..",
+            ".",
+            "",
+            "../秘密",
+            ".. ",
+            "a b",
+            &secret.display().to_string(),
+        ] {
+            let err = read_file(&dir, bad, "秘密.md").unwrap_err();
+            assert!(err.to_string().contains("快照编号"), "{bad:?}: {err}");
+        }
+        // Windows 上反斜杠与正斜杠同样分层；这里按平台拼，Unix 上也是 ParentDir
+        let nested = format!("..{}秘密", std::path::MAIN_SEPARATOR);
+        assert!(read_file(&dir, &nested, "秘密.md").is_err(), "{nested:?}");
+
+        // 编号合法、rel 想爬出去：同样拒绝（备份目录里那层"秘密"也不许读）
+        fs::write(dir.join("秘密.md"), "也不该被读到").unwrap();
+        for bad in ["../秘密.md", "notes/../../秘密.md"] {
+            assert!(read_file(&dir, &snap.id, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn 快照编号只认时间戳与可选后缀() {
+        for ok in ["20261108-123456-789", "20261108-123456-789-01"] {
+            assert!(snapshot_id_ok(ok), "{ok} 应该通过");
+        }
+        for bad in [
+            "",
+            "NUL",
+            "CON",
+            "AAAA",
+            "../..",
+            "20261108-123456-78",
+            "2026110-123456-789",
+            "20261108_123456_789",
+            "20261108-123456-789-1",
+            "20261108-123456-789-001",
+            "20261108-123456-789 ",
+        ] {
+            assert!(!snapshot_id_ok(bad), "{bad:?} 不该通过");
+        }
+    }
+
+    #[test]
+    fn 清单里带路径的编号不是快照() {
+        // 清单在备份目录里，可能被手工改过；`prune` 会拿编号去拼删除路径，
+        // 所以这种行必须当成坏行跳过，而不是留给清理去执行 `../..`
+        let d = tempfile::tempdir().unwrap();
+        let (v, dir) = configured(d.path());
+        write(&v, "notes/甲.md", "a\n");
+        let snap = run(&v, false).unwrap().unwrap();
+
+        let mut bad = snap.clone();
+        bad.id = "../..".into();
+        let mut line = serde_json::to_string(&bad).unwrap();
+        line.push('\n');
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(manifest_path(&dir))
+            .unwrap();
+        f.write_all(line.as_bytes()).unwrap();
+
+        let snaps = list(&dir).unwrap();
+        assert_eq!(snaps.len(), 1, "{snaps:?}");
+        assert_eq!(snaps[0].id, snap.id);
     }
 
     #[test]

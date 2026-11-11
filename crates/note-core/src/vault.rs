@@ -5,6 +5,7 @@
 //! 1. **Markdown 是唯一真相源**，本模块只读写 Vault 内的文件；
 //! 2. **`.note/` 之下除 trash/conflicts/versions 外都可再生**，扫描器永不进入。
 
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use crate::hash::content_hash;
@@ -14,7 +15,6 @@ use crate::{Error, Result};
 pub const META_DIR: &str = ".note";
 pub const INBOX_DIR: &str = "inbox";
 pub const NOTES_DIR: &str = "notes";
-pub const ARCHIVE_DIR: &str = "archive";
 pub const VIEWS_DIR: &str = "views";
 pub const ATTACHMENTS_DIR: &str = "attachments";
 
@@ -23,7 +23,6 @@ pub const ATTACHMENTS_DIR: &str = "attachments";
 pub enum NoteStatus {
     Inbox,
     Active,
-    Archived,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +51,10 @@ pub struct TrashEntry {
     pub batch: String,
     pub rel: String,
     pub size: u64,
+    /// 文件自己的 mtime。`rename` 会保留它，所以这是**最后编辑**时间。
     pub mtime_ms: i64,
+    /// 移进回收站的时刻，从批次名里解析。旧布局/手工目录解析不出时退回 `mtime_ms`。
+    pub deleted_ms: i64,
 }
 
 /// 一个打开的 Vault。root 必须已存在。
@@ -504,7 +506,8 @@ impl Vault {
         // `/notes/甲.md` 与 `notes\甲.md` 会存成清单里对不上的位置，恢复就找不到原件。
         let norm = self.relative(&src)?;
         let dst = self
-            .trash_dir(&trash_batch())
+            .checked_trash_root()?
+            .join(trash_batch())
             .join(norm.replace('/', std::path::MAIN_SEPARATOR_STR));
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io {
@@ -519,14 +522,25 @@ impl Vault {
         Ok(dst)
     }
 
-    fn trash_dir(&self, batch: &str) -> PathBuf {
-        self.meta_dir().join("trash").join(batch)
+    /// 回收站根路径，且必须是 Vault 里的**真实目录**。
+    ///
+    /// **链接（junction / symlink）一律拒绝**：`is_dir` / `read_dir` / `remove_dir_all`
+    /// 都会跟着链接走，清空一个链到别处的回收站等于递归删掉链接目标。
+    fn checked_trash_root(&self) -> Result<PathBuf> {
+        let root = self.meta_dir().join("trash");
+        match std::fs::symlink_metadata(&root) {
+            Ok(md) if md.file_type().is_symlink() => Err(Error::Invalid(
+                "回收站目录是链接，拒绝在这个位置上读写或清空".into(),
+            )),
+            Ok(md) if !md.is_dir() => Err(Error::Invalid("回收站不是目录".into())),
+            _ => Ok(root),
+        }
     }
 
     /// 回收站清单：扫目录得出，不存 DB（docs/02 §回收站的索引处理）。
     /// 返回的 `rel` 是**恢复目标路径**，`batch` 定位它在哪一批。
     pub fn list_trash(&self) -> Result<Vec<TrashEntry>> {
-        let root = self.meta_dir().join("trash");
+        let root = self.checked_trash_root()?;
         if !root.is_dir() {
             return Ok(Vec::new());
         }
@@ -539,11 +553,25 @@ impl Vault {
                 path: root.display().to_string(),
                 source: e,
             })?;
-            if !batch.path().is_dir() {
+            // 用目录项自己的类型判：`path().is_dir()` 会跟着 junction 走，
+            // 于是链接目标里的文件会被列成回收站条目，预览/永久删除就作用到库外。
+            let is_dir = batch
+                .file_type()
+                .map_err(|e| Error::Io {
+                    path: batch.path().display().to_string(),
+                    source: e,
+                })?
+                .is_dir();
+            if !is_dir {
                 continue;
             }
             let name = batch.file_name().to_string_lossy().to_string();
-            for entry in walkdir::WalkDir::new(batch.path()).follow_links(false) {
+            // `follow_root_links(false)` 是第二道保险：批次目录已排掉链接，
+            // 但遍历本身也不该在任何情况下把根上的链接跟着走。
+            for entry in walkdir::WalkDir::new(batch.path())
+                .follow_links(false)
+                .follow_root_links(false)
+            {
                 let entry = entry.map_err(|e| Error::Io {
                     path: name.clone(),
                     source: std::io::Error::other(e),
@@ -562,36 +590,83 @@ impl Vault {
                 else {
                     continue;
                 };
+                let mtime_ms = md
+                    .as_ref()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
                 out.push(TrashEntry {
                     batch: name.clone(),
                     rel: orig,
                     size: md.as_ref().map(|m| m.len()).unwrap_or(0),
-                    mtime_ms: md
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0),
+                    mtime_ms,
+                    // 批次名带着删除时刻；解析不出来（旧布局/手工目录）才退回 mtime
+                    deleted_ms: batch_deleted_ms(&name).unwrap_or(mtime_ms),
                 });
             }
         }
-        out.sort_by_key(|n| std::cmp::Reverse(n.mtime_ms));
+        // 按"什么时候删的"排，不按文件最后编辑时间：同一天删的旧笔记，
+        // mtime 可能比后来删的新笔记还晚，列表顺序会跟用户的记忆打架。
+        out.sort_by_key(|n| std::cmp::Reverse(n.deleted_ms));
         Ok(out)
+    }
+
+    /// 批次目录的绝对路径。
+    ///
+    /// `batch` 来自 UI，**只能是一个普通路径段**。不能只取最后一段：Windows 上
+    /// `Path::join("C:probe.txt")` 会把整个基路径换成盘符相对路径，于是 IPC 传一个
+    /// `C:` 开头的字符串就能读到 / 删掉库外文件（docs/02 §路径安全）。
+    fn trash_batch_dir(&self, batch: &str) -> Result<PathBuf> {
+        let mut parts = Path::new(batch).components();
+        let 名 = match (parts.next(), parts.next()) {
+            (Some(Component::Normal(s)), None) => s,
+            _ => return Err(Error::OutsideVault(batch.to_string())),
+        };
+        let 名 = 名.to_string_lossy();
+        // 冒号在 Windows 上还意味着驱动器相对路径或 NTFS 数据流；应用自己
+        // 生成的批次名不含它，这里一律拒掉。
+        if 名.is_empty() || 名.contains(':') {
+            return Err(Error::OutsideVault(batch.to_string()));
+        }
+        let dir = self.checked_trash_root()?.join(名.as_ref());
+        // 批次目录是链接时也拒绝：读 / 恢复 / 删除都会顺着链接作用到库外。
+        match std::fs::symlink_metadata(&dir) {
+            Ok(md) if md.file_type().is_symlink() => {
+                Err(Error::Invalid("回收站批次目录是链接，拒绝操作".into()))
+            }
+            _ => Ok(dir),
+        }
     }
 
     /// 回收站里某个条目的绝对路径。`batch`/`rel` 来自 UI，必须先过一遍 `resolve`
     /// 的边界校验再拼接，否则 `../..` 就能借恢复操作往 Vault 外写文件。
+    ///
+    /// **中间目录也可能是链接**：批次目录本身已由 `trash_batch_dir` 挡掉，但
+    /// `.note/trash/<批次>/notes` 仍可能是指向库外的 junction。这里用
+    /// `canonicalize` 把整条路径解析成真实位置，再确认它没有跑出批次目录。
     fn trash_path(&self, batch: &str, rel: &str) -> Result<PathBuf> {
         let checked = self.resolve(rel)?;
         let rel = self.relative(&checked)?;
-        let batch = batch
-            .split(['/', '\\'])
-            .next_back()
-            .filter(|s| !s.is_empty() && *s != "." && *s != "..")
-            .ok_or_else(|| Error::OutsideVault(batch.to_string()))?;
-        Ok(self
-            .trash_dir(batch)
-            .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
+        let batch_dir = self.trash_batch_dir(batch)?;
+        let src = batch_dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // 不存在的条目（已被删/恢复）交给调用方的 `is_file` / `open` 报 NotFound；
+        // 只在确实有东西时做真实路径校验，避免把"文件不存在"说成路径越界。
+        if src.exists() {
+            let 真实批次 = std::fs::canonicalize(&batch_dir).map_err(|e| Error::Io {
+                path: batch_dir.display().to_string(),
+                source: e,
+            })?;
+            let 真实条目 = std::fs::canonicalize(&src).map_err(|e| Error::Io {
+                path: src.display().to_string(),
+                source: e,
+            })?;
+            if !真实条目.starts_with(&真实批次) {
+                return Err(Error::OutsideVault(rel));
+            }
+        }
+        Ok(src)
     }
 
     /// 读回收站里的某一份。UI 要预览内容，测试要验证"两次删除各自完整"。
@@ -601,6 +676,36 @@ impl Vault {
             path: src.display().to_string(),
             source: e,
         })
+    }
+
+    /// 预览用的前缀读：最多读 `limit` 字节，返回 `(前缀, 是不是还有更多)`。
+    ///
+    /// 预览不该把整份大文件搬进内存再过 IPC——前端那个 64 KB 是**显示**上限，
+    /// 挡不住"读盘 + `String` + JSON 序列化"这三份完整副本。多读 1 字节只为
+    /// 判断"还有没有"，不会把文件读全。
+    pub fn read_from_trash_prefix(
+        &self,
+        batch: &str,
+        rel: &str,
+        limit: u64,
+    ) -> Result<(Vec<u8>, bool)> {
+        let src = self.trash_path(batch, rel)?;
+        let file = std::fs::File::open(&src).map_err(|e| Error::Io {
+            path: src.display().to_string(),
+            source: e,
+        })?;
+        let mut buf = Vec::new();
+        file.take(limit.saturating_add(1))
+            .read_to_end(&mut buf)
+            .map_err(|e| Error::Io {
+                path: src.display().to_string(),
+                source: e,
+            })?;
+        let truncated = buf.len() as u64 > limit;
+        if truncated {
+            buf.truncate(limit as usize);
+        }
+        Ok((buf, truncated))
     }
 
     /// 从回收站移回原位。原位已有文件时**拒绝**，不覆盖——那说明用户又建了同名笔记。
@@ -625,7 +730,101 @@ impl Vault {
         })
     }
 
-    /// 改名或换目录。两者是同一个原语：目标已存在就报错，绝不静默覆盖。
+    /// 永久删除回收站里的一份。**只动 `.note/trash/`**：原位若有同名笔记，不受影响。
+    ///
+    /// 删完顺手把空掉的目录一路收回到批次目录：`notes/sub/a.md` 删掉之后
+    /// `notes/sub`、`notes` 与整个批次都空了，留着就是一层层空壳——回收站
+    /// 只增不减正是"删掉的笔记永远占着盘"的来源。
+    pub fn purge_from_trash(&self, batch: &str, rel: &str) -> Result<()> {
+        let src = self.trash_path(batch, rel)?;
+        if !src.is_file() {
+            return Err(Error::NotFound(rel.to_string()));
+        }
+        std::fs::remove_file(&src).map_err(|e| Error::Io {
+            path: src.display().to_string(),
+            source: e,
+        })?;
+        let batch_dir = self.trash_batch_dir(batch)?;
+        // `remove_dir` 只删空目录，别人刚放进去的东西不会被误伤；删不动就停。
+        let mut dir = src.parent();
+        while let Some(d) = dir {
+            if std::fs::remove_dir(d).is_err() {
+                break;
+            }
+            if d == batch_dir {
+                break;
+            }
+            dir = d.parent();
+        }
+        Ok(())
+    }
+
+    /// 清空回收站：删掉 `.note/trash/` 底下所有批次与散落文件，返回删掉的文件数。
+    /// 根目录留着（下次删除还要往里放），清单自然是空的。
+    ///
+    /// 批次目录是应用自己建的，这里只按目录边界删；不走 `purge_from_trash`
+    /// 逐条删，是因为清单里可能有读不出来的坏档，清空不该被它们卡住。
+    pub fn empty_trash(&self) -> Result<u64> {
+        let root = self.checked_trash_root()?;
+        if !root.is_dir() {
+            return Ok(0);
+        }
+        let entries = std::fs::read_dir(&root).map_err(|e| Error::Io {
+            path: root.display().to_string(),
+            source: e,
+        })?;
+        // 先把清单收完再删：边枚举边删目录项，在 Windows 上可能漏掉后面的条目。
+        let mut targets = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| Error::Io {
+                path: root.display().to_string(),
+                source: e,
+            })?;
+            let file_type = entry.file_type().map_err(|e| Error::Io {
+                path: entry.path().display().to_string(),
+                source: e,
+            })?;
+            targets.push((entry.path(), file_type));
+        }
+        let mut removed = 0u64;
+        for (path, file_type) in targets {
+            // **链接只删链接本身**。目录链接（Windows 的 junction / symlink）
+            // 要用 remove_dir 才删得掉，文件链接用 remove_file；先试目录再退文件，
+            // 两种情况都不会顺着链接去动目标里的东西。
+            if file_type.is_symlink() {
+                std::fs::remove_dir(&path)
+                    .or_else(|_| std::fs::remove_file(&path))
+                    .map_err(|e| Error::Io {
+                        path: path.display().to_string(),
+                        source: e,
+                    })?;
+                removed += 1;
+                continue;
+            }
+            if file_type.is_dir() {
+                removed += walkdir::WalkDir::new(&path)
+                    .follow_links(false)
+                    .follow_root_links(false)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .count() as u64;
+            } else if file_type.is_file() {
+                removed += 1;
+            }
+            let out = if file_type.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            out.map_err(|e| Error::Io {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+        }
+        Ok(removed)
+    }
+
     pub fn move_file(&self, rel: &str, new_rel: &str) -> Result<()> {
         let src = self.resolve(rel)?;
         let dst = self.resolve(new_rel)?;
@@ -680,6 +879,20 @@ fn trash_batch() -> String {
     )
 }
 
+/// 从批次名解析删除时刻。批次名形如 `20261024-101500-12345678`：
+/// 前 15 位是本地时间 `%Y%m%d-%H%M%S`，后面是亚秒与序号。
+///
+/// **不能拿文件 mtime 冒充删除时间**：`rename` 保留 mtime，那读出来是"最后编辑"，
+/// 删一篇上周写好的笔记会显示成"上周删除"。
+fn batch_deleted_ms(name: &str) -> Option<i64> {
+    let head = name.get(..15)?;
+    let naive = chrono::NaiveDateTime::parse_from_str(head, "%Y%m%d-%H%M%S").ok()?;
+    naive
+        .and_local_timezone(chrono::Local)
+        .earliest()
+        .map(|t| t.timestamp_millis())
+}
+
 fn sibling_tmp(target: &Path) -> PathBuf {
     let name = target
         .file_name()
@@ -731,16 +944,9 @@ fn 是排除名(s: &str) -> bool {
 /// 往它们**里面**建子目录是另一回事（`notes/工作/` 完全正常）。
 fn is_reserved_top(rel: &str) -> bool {
     !rel.contains('/')
-        && [
-            META_DIR,
-            INBOX_DIR,
-            NOTES_DIR,
-            ARCHIVE_DIR,
-            VIEWS_DIR,
-            ATTACHMENTS_DIR,
-        ]
-        .iter()
-        .any(|n| 同名(rel, n))
+        && [META_DIR, INBOX_DIR, NOTES_DIR, VIEWS_DIR, ATTACHMENTS_DIR]
+            .iter()
+            .any(|n| 同名(rel, n))
 }
 
 /// 侧栏里该出现的目录，也是"能往里建笔记/建子目录"的唯一判据。
@@ -875,13 +1081,12 @@ pub fn resolve_in(root: &Path, rel: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// 目录推导状态。`archive/` 子树整体归档；`inbox/` 待整理；其余在用。
+/// 目录推导状态。`inbox/` 待整理；其余在用。`.note/` 不索引。
 pub fn status_of_rel(rel: &str) -> Option<NoteStatus> {
     let rel = rel.replace('\\', "/");
     // 首段按大小写不敏感比：盘上真有一个 `Inbox/` 的话，它就是 `inbox/`。
     match rel.split_once('/') {
         Some((首, _)) if 同名(首, INBOX_DIR) => Some(NoteStatus::Inbox),
-        Some((首, _)) if 同名(首, ARCHIVE_DIR) => Some(NoteStatus::Archived),
         Some((首, _)) if 同名(首, META_DIR) => None,
         _ => Some(NoteStatus::Active),
     }

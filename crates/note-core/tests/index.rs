@@ -2,7 +2,7 @@
 //! 索引层测试：docs/05 的 M0 验收项在这里落地。
 //! ②删库重建逐表一致 ⑤无孤儿索引行 以及中文检索、隐私硬门、视图排除。
 
-use note_core::index::{rebuild_links, Index};
+use note_core::index::{rebuild_links, Index, LIST_NOTES_SQL};
 use note_core::vault::Vault;
 
 const PRIVATE_BODY: &str = "---\nid: n-priv0001\ntitle: 私人账户备忘\nai:\n  private: true\n---\n\n银行卡尾号 4321 的校验位是 77。\n";
@@ -22,7 +22,7 @@ fn fixture() -> tempfile::TempDir {
         .unwrap();
     v.write_atomic(
         "archive/旧笔记.md",
-        "---\nid: n-old00001\n---\n归档里的内容不该出现在默认结果。\n".as_bytes(),
+        "---\nid: n-old00001\n---\n普通目录里的内容也该出现在默认结果。\n".as_bytes(),
     )
     .unwrap();
     v.write_atomic("views/待整理的想法.md", VIEW_BODY.as_bytes())
@@ -127,6 +127,63 @@ fn 中文分词后能命中词组() {
 }
 
 #[test]
+fn 关键词命中带顶层块序号() {
+    // 界面点搜索结果要跳到命中的那一块，靠的是**顶层块序号**（编辑器只装顶层块）。
+    // 命中的若是嵌套子项，全树 preorder 会多算一层，落点就漂到后面去。
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    v.write_atomic(
+        "notes/序号.md",
+        "---\nid: n-ordinal01\ntitle: 顶层序号\n---\n\n# 标题\n\n- 甲\n  - 子项含针眼\n- 乙\n"
+            .as_bytes(),
+    )
+    .unwrap();
+    let idx = Index::open(&v).unwrap();
+    idx.rebuild_all(&v).unwrap();
+
+    let hits = idx.search_keyword("针眼", 10).unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(
+        hits[0].block_ordinal, 2,
+        "嵌套子项占全树 ordinal 3，但它所在的顶层块是第 2 块"
+    );
+}
+
+#[test]
+fn 一篇长文命中很多次也不许把别的笔记挤出结果() {
+    // 侧栏先取一批命中、再按篇去重。按块截断时，一篇长文里同一个词命中几十次就能
+    // 占满整个 limit，去重之后只剩它一行——别的匹配笔记一条都不出现。
+    let dir = tempfile::tempdir().unwrap();
+    let v = Vault::open(dir.path()).unwrap();
+    let idx = Index::open(&v).unwrap();
+    let mut 长文 = String::from("---\nid: n-long00001\ntitle: 长文\n---\n\n");
+    // 每块都很短：同词频下块越短 BM25 越高，长文才会真的把前几名占满
+    for i in 0..40 {
+        长文.push_str(&format!("分节渲染 {i}\n\n"));
+    }
+    v.write_atomic("notes/长文.md", 长文.as_bytes()).unwrap();
+    v.write_atomic(
+        "notes/短篇.md",
+        format!(
+            "---\nid: n-short0001\ntitle: 短篇\n---\n\n只提一次分节渲染。{}\n",
+            "别的字".repeat(30)
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    idx.rebuild_all(&v).unwrap();
+
+    // limit 比长文的命中块数小得多：修之前这里只会捞到长文的 5 块（探针实测过），
+    // 短篇被整篇挤掉
+    let hits = idx.search_keyword("分节渲染", 5).unwrap();
+    let 篇: Vec<&str> = hits.iter().map(|h| h.note_id.as_str()).collect();
+    assert!(篇.contains(&"n-short0001"), "长文把短篇挤出了结果：{篇:?}");
+    let 唯一: std::collections::HashSet<_> = 篇.iter().copied().collect();
+    assert_eq!(hits.len(), 唯一.len(), "同一篇占了多行：{篇:?}");
+    assert_eq!(hits.len(), 2, "limit 数的是篇：{篇:?}");
+}
+
+#[test]
 fn 隐私硬门在SQL层生效() {
     let dir = fixture();
     let (v, idx) = open(dir.path());
@@ -148,23 +205,23 @@ fn 隐私硬门在SQL层生效() {
 }
 
 #[test]
-fn 归档默认排除但已索引() {
+fn 普通目录里的笔记照样能搜到() {
     let dir = fixture();
     let (v, idx) = open(dir.path());
     idx.rebuild_all(&v).unwrap();
     let n: i64 = idx
         .conn()
         .query_row(
-            "SELECT count(*) FROM notes WHERE status='archived'",
+            "SELECT count(*) FROM notes WHERE path='archive/旧笔记.md' AND status='active'",
             [],
             |r| r.get(0),
         )
         .unwrap();
     assert_eq!(n, 1);
-    let hits = idx.search_keyword("归档里的内容", 20).unwrap();
+    let hits = idx.search_keyword("普通目录里的内容", 20).unwrap();
     assert!(
-        hits.iter().all(|h| h.status != "archived"),
-        "归档笔记不该出现在默认结果"
+        hits.iter().any(|h| h.path == "archive/旧笔记.md"),
+        "放在普通目录里的笔记不该从搜索里消失: {hits:?}"
     );
 }
 
@@ -516,7 +573,7 @@ fn 视图文件不进反链面板() {
 }
 
 #[test]
-fn 归档笔记的入链照收但带着状态() {
+fn 普通目录里的笔记入链照收() {
     let dir = tempfile::tempdir().unwrap();
     let v = Vault::open(dir.path()).unwrap();
     v.write_atomic("notes/甲.md", "---\nid: n-a1\n---\n甲的内容。\n".as_bytes())
@@ -529,8 +586,8 @@ fn 归档笔记的入链照收但带着状态() {
     let idx = Index::open(&v).unwrap();
     idx.rebuild_all(&v).unwrap();
     let (入, _, _, _) = idx.note_links("notes/甲.md", 50).unwrap();
-    assert_eq!(入.len(), 1, "归档是真结构，藏起来面板就说谎: {入:?}");
-    assert_eq!(入[0].status, "archived", "但要带着状态，界面好淡化");
+    assert_eq!(入.len(), 1, "普通目录里的入链不该被藏起来: {入:?}");
+    assert_eq!(入[0].status, "active");
 }
 
 #[test]
@@ -1066,4 +1123,51 @@ fn 上下标不进检索正文且行首不判成HTML块() {
         })
         .unwrap();
     assert_eq!(html, 0);
+}
+
+#[test]
+fn 侧栏列表按更新时间取前N篇不再整表排序() {
+    // 每次保存后的那次刷新都会走 `list_notes(300)`。没有为 ORDER BY 准备的索引时，
+    // SQLite 先全表扫描再建临时 B 树排序，最后才截断——库越大这一步越慢，而它正好
+    // 挂在保存之后。这里既钉顺序口径（非视图在前、更新时间倒序），也钉查询计划。
+    let dir = fixture();
+    let (v, idx) = open(dir.path());
+    idx.rebuild_all(&v).unwrap();
+    // 给每篇一个确定的更新时间，并让视图成为"最新"的那一篇——顺序仍该把它排到最后。
+    idx.conn()
+        .execute_batch(
+            "UPDATE notes SET updated_at = 1000 - rowid * 10;
+             UPDATE notes SET updated_at = 9999 WHERE note_kind='view';",
+        )
+        .unwrap();
+
+    let rows = idx.list_notes(3).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter().all(|r| r.kind != "view"),
+        "视图不是内容，不该挤进前排：{rows:?}"
+    );
+    assert!(
+        rows.windows(2).all(|w| w[0].updated_ms >= w[1].updated_ms),
+        "不是按更新时间倒序：{rows:?}"
+    );
+
+    let plan = {
+        // 用**实现里那条 SQL**钉计划：抄一份的话，查询改了测试还按旧 SQL 绿着。
+        let sql = format!("EXPLAIN QUERY PLAN {LIST_NOTES_SQL}");
+        let mut stmt = idx.conn().prepare(&sql).unwrap();
+        let details = stmt.query_map([300i64], |r| r.get::<_, String>(3)).unwrap();
+        details
+            .filter_map(|x| x.ok())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        plan.contains("notes_recent_idx"),
+        "列表排序没走索引，每次刷新都在整表排序：{plan}"
+    );
+    assert!(
+        !plan.contains("TEMP B-TREE"),
+        "列表排序仍在建临时 B 树：{plan}"
+    );
 }

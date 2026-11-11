@@ -3,12 +3,12 @@ import type { ListNotes, SiblingOrder } from "../ipc/types";
 /**
  * 侧栏目录树：从 `list_notes` 的 `rel` 路径推出来，**不另开一条 IPC 拿树**。
  *
- * 为什么在前端拼而不是 Rust 侧返回一棵树：库里那份真相就是目录结构（[02] §Vault 目录结构，
- * 归档状态 = 所在目录），`rel` 已经是全部所需信息。多一个后端形状就多一处会与盘上事实
+ * 为什么在前端拼而不是 Rust 侧返回一棵树：库里那份真相就是目录结构，
+ * `rel` 已经是全部所需信息。多一个后端形状就多一处会与盘上事实
  * 分叉的地方。**唯一补进来的是空目录**：它不在任何 `rel` 里，所以后端另外给一份扁平的
  * 目录清单（`dir_list`），前端按路径接回树——形状仍只在这里拼。
  *
- * 顶层三条是**有语义的默认序**（[02]：`notes/` 正式、`inbox/` 待整理、`archive/` 归档），
+ * 顶层两条是**有语义的默认序**（`notes/` 正式、`inbox/` 待整理），
  * 用户自己建的目录排在后面按名字走。库根上直接躺着的 `.md` 不塞进假目录——
  * `is_indexable_rel` 认它，界面就得显示它，藏起来等于让用户以为文件没了。
  *
@@ -17,12 +17,16 @@ import type { ListNotes, SiblingOrder } from "../ipc/types";
  * 默认序降级为"没拖过时长什么样"，而不是"不许拖成什么样"。
  */
 
-/** 与 crates/note-core/src/vault.rs 的常量对齐；改那边要改这里 */
-const PINNED: { dir: string; 标签: string }[] = [
+/**
+ * 语义顶层。**树钉位与树菜单共用这一份**，别再各写一个数组——两边漏掉一个目录，
+ * 就会出现"树把它钉成语义目录、右键却给出改名/删除"的错位。
+ * 与 `crates/note-core/src/vault.rs` 的 `NOTES_DIR` / `INBOX_DIR` 对齐。
+ */
+export const 钉位: { dir: string; 标签: string }[] = [
   { dir: "notes", 标签: "笔记" },
   { dir: "inbox", 标签: "收件箱" },
-  { dir: "archive", 标签: "归档" },
 ];
+const PINNED = 钉位;
 
 export type NoteBranch = {
   kind: "note";
@@ -34,7 +38,7 @@ export type NoteBranch = {
 
 export type DirBranch = {
   kind: "dir";
-  /** 显示名：顶层三条走中文标签，其余是目录本名 */
+  /** 显示名：顶层两条走中文标签，其余是目录本名 */
   name: string;
   /** 从库根算起的路径，折叠态按它记（不受显示名影响） */
   path: string;
@@ -63,7 +67,7 @@ export const parentOf = (p: string) => {
   return 段.join("/");
 };
 
-/** 条目在自己那层里的名字：目录用路径末段（不是显示名，顶层那三条显示成中文） */
+/** 条目在自己那层里的名字：目录用路径末段（不是显示名，顶层那两条显示成中文） */
 export const 层名 = (b: Branch) => (b.kind === "dir" ? 名(b.path) : 名(b.rel));
 
 /** 父目录 → (条目名 → 第几个)。同一层存重了以**第一条**为准（与 Rust 侧合并重复条目的规矩一致） */
@@ -154,19 +158,22 @@ function 转成树(
   return [...目录, ...笔记].sort(同层比较(路径, 位次, 路径 === ""));
 }
 
+/** 语义顶层按大小写不敏感比：NTFS / APFS 上 `Notes` 与 `notes` 是同一个目录 */
+const 同名 = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
 /**
  * 一层的比较器。三条规矩，按优先级：
  * 1. 用户排过的条目优先，且**可以跨"目录/笔记"那道界**——拖拽的意义就是让人说了算；
  *    排过的排在没排过的前面，两个都排过按位次。
  * 2. 都没排过时：目录在笔记前面（Notion / Obsidian 都是这个次序）。
- * 3. 同为目录按名字，同为笔记按更新时间倒序；顶层那三条 pinned 目录再往前插。
+ * 3. 同为目录按名字，同为笔记按更新时间倒序；顶层那两条 pinned 目录再往前插。
  */
 function 同层比较(父: string, 位次: 位次表, 顶层: boolean) {
   const 层 = 位次.get(父);
   const 类 = (b: Branch) => (b.kind === "dir" ? 0 : 1);
   const 默认档 = (b: Branch) => {
     if (!顶层 || b.kind !== "dir") return 0;
-    const 序 = PINNED.findIndex((p) => p.dir === b.path);
+    const 序 = PINNED.findIndex((p) => 同名(p.dir, b.path));
     return 序 < 0 ? PINNED.length : 序; // 用户自建目录不配插队
   };
   return (a: Branch, b: Branch): number => {
@@ -190,7 +197,7 @@ function 序(a: string, b: string): number {
 }
 
 const 顶层显示名 = (路径: string, 本名: string) =>
-  路径 === 本名 ? PINNED.find((p) => p.dir === 本名)?.标签 ?? 本名 : 本名;
+  同名(路径, 本名) ? PINNED.find((p) => 同名(p.dir, 本名))?.标签 ?? 本名 : 本名;
 
 /**
  * `目录们` 是后端 `dir_list` 给的全部目录：**空目录不会出现在任何一篇的 `rel` 里**，

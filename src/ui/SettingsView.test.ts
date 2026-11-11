@@ -30,7 +30,6 @@ const 信息: AppInfo = {
   schemaVersion: 3,
   backupDir: null,
   backupDisabled: false,
-  backupUnconfigured: true,
   backupLastAt: null,
 };
 
@@ -258,10 +257,10 @@ it("输入框里的 Esc 把这一格退回盘上那份，不是死键", () => {
 
 it("备份行的「现在」说的是盘上生效那份，不是输入框里的草稿", () => {
   // 按完「不备份」之后输入框还留着旧路径：屏幕上唯一那条路径恰好是不再生效的那条
-  const 有 = 挂({ info: { ...信息, backupDir: "D:\bak", backupUnconfigured: false } });
-  expect(有.根.textContent).toContain("现在：D:\bak");
+  const 有 = 挂({ info: { ...信息, backupDir: "D:\\bak" } });
+  expect(有.根.textContent).toContain("现在：D:\\bak");
   有.拆();
-  const 关 = 挂({ info: { ...信息, backupDisabled: true, backupDir: "D:\bak" } });
+  const 关 = 挂({ info: { ...信息, backupDisabled: true, backupDir: "D:\\bak" } });
   expect(关.根.textContent).toContain("现在：不备份");
   关.拆();
 });

@@ -20,6 +20,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::RwLock;
 
 use rusqlite::params;
 
@@ -208,7 +209,7 @@ fn 删行连blob(index: &Index, id: i64, blob_rel: &str) -> Result<()> {
 /// 换路径时把版本历史一起搬过去。
 ///
 /// **钥匙是路径**，所以路径一换，历史就"掉"在旧路径上了——撤销会找不到落点，
-/// 用户改过的那些版本也就看不见了。改名、归档、从回收站放回都走这里。
+/// 用户改过的那些版本也就看不见了。改名、从回收站放回都走这里。
 ///
 /// 先按内容去重再改钥匙：新路径上可能已经有同内容的一行（那篇以前在这个路径上
 /// 存在过，又被换回来），`UNIQUE(path, content_hash)` 会撞。
@@ -216,16 +217,19 @@ pub fn 搬家(index: &Index, 老路径: &str, 新路径: &str) -> Result<()> {
     if 老路径 == 新路径 {
         return Ok(());
     }
-    index.conn().execute(
-        "DELETE FROM note_versions WHERE path=?2 AND content_hash IN
-           (SELECT content_hash FROM note_versions WHERE path=?1)",
-        params![老路径, 新路径],
-    )?;
-    index.conn().execute(
-        "UPDATE note_versions SET path=?2 WHERE path=?1",
-        params![老路径, 新路径],
-    )?;
-    Ok(())
+    // 两条语句都要在闸里：中间让清扫插进来，按老路径删行的查询会读到半搬的状态。
+    写事务(|| {
+        index.conn().execute(
+            "DELETE FROM note_versions WHERE path=?2 AND content_hash IN
+               (SELECT content_hash FROM note_versions WHERE path=?1)",
+            params![老路径, 新路径],
+        )?;
+        index.conn().execute(
+            "UPDATE note_versions SET path=?2 WHERE path=?1",
+            params![老路径, 新路径],
+        )?;
+        Ok(())
+    })
 }
 
 /// 某一篇的历史（新的在前）。
@@ -268,7 +272,9 @@ pub fn 读回(root: &Path, 行: &版本行) -> Result<Vec<u8>> {
 ///
 /// `ai_applied` 与 `before_delete` **永不删**：它们是撤销与恢复的落点，
 /// 留着是因为留着才有意义，不是"忘了清"。
-pub fn 清理(index: &Index, 上限: usize) -> Result<usize> {
+///
+/// 私有的理由：它要跟 [`清扫`] 一起拿写闸，单独暴露出去迟早有人在锁外调它。
+fn 清理(index: &Index, 上限: usize) -> Result<usize> {
     let 路径集: Vec<String> = {
         let mut s = index
             .conn()
@@ -297,10 +303,43 @@ pub fn 清理(index: &Index, 上限: usize) -> Result<usize> {
     Ok(删了)
 }
 
+/// 版本库的写闸：**读闸 = 有一个会写版本行的事务在跑；写闸 = 清扫在跑。**
+///
+/// 落快照是"先写 blob、再插行"，而插进去的行要等**外层事务提交**别人才看得见。
+/// 清扫按"行里有没有人指着"判孤儿——两件事撞上，刚写好的 blob 会被当成孤儿删掉，
+/// 随后提交的行就指向一个不存在的文件。所以闸必须罩到**提交**为止，
+/// 不能只罩 `落一条`（它返回时事务还没提交）。
+///
+/// 以前清扫在开库那一刻同步跑，不可能与保存重叠，用不着这把闸；现在它挪到了
+/// 界面起来之后的后台，重叠就成了常态。
+static 写闸: RwLock<()> = RwLock::new(());
+
+/// 把一个**会写版本行**的事务包进读闸，事务提交后才放行。
+pub fn 写事务<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _闸 = 写闸.read().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
+/// 空闲清扫：两件事一起做——`manual` 超上限的删掉，没有行指着的 blob 删掉。
+///
+/// **不在开库时同步跑**：`清孤儿` 要遍历整个 `.note/versions/`，而每篇最多留
+/// 上百份，库用久了这个目录会有很多文件。它也不是正确性的一环（多留几份快照、
+/// 几个孤儿文件只是占盘），所以壳在界面起来之后才把它丢进后台。
+///
+/// 整趟拿写闸（见 `写闸`）：清扫期间进来的版本写事务会等它做完。等的是
+/// 后台补索引，不是界面的读命令——读走的是另一条只读连接。
+pub fn 清扫(index: &Index) -> Result<(usize, usize)> {
+    let _闸 = 写闸.write().unwrap_or_else(|e| e.into_inner());
+    let 删行 = 清理(index, 手工保留上限)?;
+    let 删文件 = 清孤儿(index)?;
+    Ok((删行, 删文件))
+}
+
 /// 清掉没有行指着的 blob（写完 blob、还没插上行就断了的那种残留）。
 ///
-/// 只在开库那一刻跑：它要扫整个 `.note/versions/`，不是能塞进 8ms 的活。
-pub fn 清孤儿(index: &Index) -> Result<usize> {
+/// 它是全目录遍历，只该在空闲清扫（[`清扫`]）里跑，不要塞进开库路径。
+/// 私有同 [`清理`]：锁外的调用就是"把刚落下的 blob 当孤儿删掉"那条 bug。
+fn 清孤儿(index: &Index) -> Result<usize> {
     let 根 = index.root().join(".note/versions");
     if !根.is_dir() {
         return Ok(0);
@@ -544,10 +583,12 @@ mod tests {
 
     /// **重开一次库，快照不许丢**。
     ///
-    /// 开库那一刻会清孤儿（没有行指着的 blob 删掉）。这条钉的是"清孤儿"与
-    /// "行里存的 blob 路径"两边口径一致：曾经一边存库根相对、另一边比
-    /// `.note/versions/` 相对，于是**每一份快照都被当成孤儿删掉**——
-    /// 而撤销的落点正是这些文件。行还在、文件没了，读回当场报错。
+    /// 清扫里的"清孤儿"（没有行指着的 blob 删掉）钉的是"行里存的 blob 路径"
+    /// 与目录遍历两边口径一致：曾经一边存库根相对、另一边比 `.note/versions/`
+    /// 相对，于是**每一份快照都被当成孤儿删掉**——而撤销的落点正是这些文件。
+    /// 行还在、文件没了，读回当场报错。
+    ///
+    /// 开库本身不扫（见 `Hub::清扫版本历史`），所以这里显式跑一趟。
     #[test]
     fn 重开库之后快照还在() {
         let (d, mut hub) = 造库();
@@ -556,8 +597,8 @@ mod tests {
         let 行 = 列(&hub, "notes/甲.md");
         assert_eq!(行.len(), 1, "{行:?}");
         drop(hub);
-        // 重开：清孤儿在开库这一刻跑
         let 重开的 = Hub::open(d.path()).unwrap();
+        重开的.清扫版本历史().unwrap();
         let 行 = 列(&重开的, "notes/甲.md");
         assert_eq!(行.len(), 1, "行不该被清掉：{行:?}");
         assert_eq!(
@@ -568,8 +609,11 @@ mod tests {
     }
 
     /// 真的没有行指着的 blob 该被清掉（写完 blob、还没插行就断了的残留）。
+    ///
+    /// 同时钉住"开库不做清扫"：重开之后残留还在，清扫跑完才消失——
+    /// 否则这个目录遍历又悄悄回到了冷启动路径上。
     #[test]
-    fn 没有行指着的blob会被清掉() {
+    fn 没有行指着的blob要等清扫才被清掉() {
         let (d, mut hub) = 造库();
         写(&mut hub, "notes/甲.md", "第一版\n");
         写(&mut hub, "notes/甲.md", "第二版\n");
@@ -577,7 +621,9 @@ mod tests {
         std::fs::create_dir_all(残留.parent().unwrap()).unwrap();
         std::fs::write(&残留, "没人要的东西").unwrap();
         drop(hub);
-        let _重开的 = Hub::open(d.path()).unwrap();
+        let 重开的 = Hub::open(d.path()).unwrap();
+        assert!(残留.exists(), "开库不该同步扫版本目录");
+        重开的.清扫版本历史().unwrap();
         assert!(!残留.exists(), "没人指着的残留该被清掉");
     }
 

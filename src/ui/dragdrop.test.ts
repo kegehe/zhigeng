@@ -26,7 +26,7 @@ const 现有: Record<string, string[]> = {
   inbox: ["丁.md"],
   "notes/工作": ["一.md"],
 };
-/** notes 与库根被用户排过；工作/归档那两层没有自己的 [[order]] 条目 */
+/** notes 与库根被用户排过；工作那一层没有自己的 [[order]] 条目 */
 const 存过的 = new Set(["", "notes"]);
 const 读层 = (父: string) => ({ 序列: 现有[父] ?? [], 存过: 存过的.has(父) });
 
@@ -162,6 +162,9 @@ describe("算动作", () => {
     const 被拖 = 笔记行("notes/甲.md");
     expect(判落点(被拖, 目录行("views/日报"), null, 20, 高)).toBeNull();
     expect(判落点(被拖, 目录行("views"), null, 20, 高)).toBeNull();
+    // 后端按大小写不敏感判首段：`Views/` 同样是视图层，不能从这个入口漏过去
+    expect(判落点(被拖, 目录行("Views"), null, 20, 高)).toBeNull();
+    expect(判落点(被拖, 目录行("VIEWS/日报"), null, 20, 高)).toBeNull();
     // 从 views 里拖出来是允许的（那是回到普通笔记）
     expect(判落点(笔记行("views/日报/周一.md"), 笔记行("notes/乙.md"), null, 5, 高)).toEqual({
       kind: "gap",

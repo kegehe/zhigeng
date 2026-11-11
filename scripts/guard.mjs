@@ -111,7 +111,7 @@ const rules = [
     "Tailwind 的 outline-none 与 outline: none 同等对待（[06] §4）：去掉描边要在同一处给另一种看得见的指示，那种指示得写在 CSS 里",
   ],
   [
-    /-(?:p|px|py|pt|pr|pb|pl|m|mx|my|mt|mr|mb|ml|gap|gap-x|gap-y|space-x|space-y)-[0-9]+\.5\b/,
+    /(?:^|[\s"'`:=])-?(?:px|py|pt|pr|pb|pl|mx|my|mt|mr|mb|ml|gap-x|gap-y|space-x|space-y|gap|p|m)-[0-9]+\.5\b/,
     "半格间距（2/6/10/14px）不在 4px 栅格上（[06] §2）",
   ],
   [/https?:\/\/(?!127\.0\.0\.1|localhost)[^\s'"`)]*\.(?:woff2?|js|css)\b/, "联网取字体/脚本"],

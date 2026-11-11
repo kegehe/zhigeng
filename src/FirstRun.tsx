@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./ipc/commands";
 import type { AppInfo } from "./ipc/types";
+import { 首启档 } from "./ui/firstrun";
 import { 是回车提交 } from "./ui/keys";
 
 const btnPrimary =
@@ -16,20 +17,32 @@ const inputCls =
  * 2. 备份放哪儿。docs/03 §备份 的判据是"唯一副本 = 没有副本"，所以这一步不能省：
  *    要么给一个**别的盘上**的目录，要么显式选"我不备份"。没答过之前每次启动都会再问。
  */
-export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
+export function FirstRun({
+  已有库 = null,
+  onOpened,
+}: {
+  /**
+   * 库已经开好了、只差备份那一步（上次首启没答完就关掉了，或从设置里换到了一个
+   * 没配过备份的库）。非空时直接从第二步开始，不再问一遍库放哪儿。
+   */
+  已有库?: AppInfo | null;
+  onOpened: (info: AppInfo) => void;
+}) {
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   /** 非空 = 库已经选好了，现在停在第二步 */
-  const [vault, setVault] = useState<AppInfo | null>(null);
+  const [vault, setVault] = useState<AppInfo | null>(已有库);
   const [backup, setBackup] = useState("");
 
   useEffect(() => {
+    // 库已经有了，这一步不关它的事；去问默认路径只会白打一趟 IPC
+    if (已有库) return;
     api
       .vaultDefaultPath()
       .then(setPath)
       .catch((e) => setErr(String(e)));
-  }, []);
+  }, [已有库]);
 
   const open = async () => {
     const target = path.trim();
@@ -38,7 +51,8 @@ export function FirstRun({ onOpened }: { onOpened: (info: AppInfo) => void }) {
     setErr(null);
     try {
       const info = await api.vaultOpen(target);
-      if (info.backupUnconfigured) {
+      // 与启动时同一条判据：库开好了，备份还没答过就停在这里
+      if (首启档(info) === "选备份") {
         setVault(info);
         setBackup("");
       } else {

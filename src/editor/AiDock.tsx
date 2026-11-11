@@ -4,6 +4,7 @@ import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from "rea
 
 import { api, describeError, inTauri } from "../ipc/commands";
 import type { DocEditBlock, DocEditPlan, DocEditTurn } from "../ipc/types";
+import { btn, btnDanger, btnPrimary } from "../ui/controls";
 import { 是回车提交 } from "../ui/keys";
 import { 应用整篇编辑, 计划预览, 收集整篇 } from "./docEdit";
 import { 工具图标 } from "./icons";
@@ -204,14 +205,6 @@ function 整理历史(轮们: 轮[]): DocEditTurn[] {
   }
   return 取;
 }
-
-/** 与工具栏同一套按钮基线；这里只差字号，不另发明一套 */
-const 钮 =
-  "rounded-md border border-line px-2 py-0.5 text-xs text-fg-2 transition-colors duration-(--dur-1) hover:bg-hover active:translate-y-px disabled:opacity-55";
-const 主钮 =
-  "rounded-md bg-accent px-3 py-1 text-xs text-on-accent transition-colors duration-(--dur-1) hover:bg-accent-hover active:translate-y-px disabled:opacity-55";
-const 危钮 =
-  "rounded-md border border-danger px-2 py-0.5 text-xs text-danger transition-colors duration-(--dur-1) hover:bg-danger-soft active:translate-y-px disabled:opacity-55";
 
 export const AiDock = memo(function AiDock({
   editor,
@@ -1049,7 +1042,7 @@ export const AiDock = memo(function AiDock({
                           <>
                             <button
                               type="button"
-                              className={主钮}
+                              className={btnPrimary}
                               disabled={t.已落}
                               onClick={() => 落(t)}
                               title={
@@ -1062,7 +1055,7 @@ export const AiDock = memo(function AiDock({
                             </button>
                             <button
                               type="button"
-                              className={钮}
+                              className={btn}
                               onClick={() => void 复制(t.答)}
                             >
                               复制
@@ -1089,7 +1082,7 @@ export const AiDock = memo(function AiDock({
                         <>
                           <button
                             type="button"
-                            className={危钮}
+                            className={btnDanger}
                             onClick={() => 删(t)}
                             title="删除锚定的这段文字（Ctrl+Z 可撤销）"
                           >
@@ -1097,7 +1090,7 @@ export const AiDock = memo(function AiDock({
                           </button>
                           <button
                             type="button"
-                            className={钮}
+                            className={btn}
                             onClick={() => set待确认删(null)}
                           >
                             取消
@@ -1106,7 +1099,7 @@ export const AiDock = memo(function AiDock({
                       ) : (
                         <button
                           type="button"
-                          className={危钮}
+                          className={btnDanger}
                           onClick={() => set待确认删(t.id)}
                           title="只删这一轮锚定的那段文字，不会动别处"
                         >
@@ -1116,7 +1109,7 @@ export const AiDock = memo(function AiDock({
                     ) : null}
                     {/* 整篇清空轮不带模型锚点，重试没有意义；重新说一句就是了 */}
                     {t.目标 !== null ? (
-                      <button type="button" className={主钮} onClick={() => void 重发(t)}>
+                      <button type="button" className={btnPrimary} onClick={() => void 重发(t)}>
                         重试
                       </button>
                     ) : null}
@@ -1134,7 +1127,7 @@ export const AiDock = memo(function AiDock({
                         <>
                           <button
                             type="button"
-                            className={危钮}
+                            className={btnDanger}
                             onClick={() => 清整整篇(t)}
                             title="清空整篇正文（Ctrl+Z 可撤销）"
                           >
@@ -1142,7 +1135,7 @@ export const AiDock = memo(function AiDock({
                           </button>
                           <button
                             type="button"
-                            className={钮}
+                            className={btn}
                             onClick={() => set待确认删(null)}
                           >
                             取消
@@ -1151,7 +1144,7 @@ export const AiDock = memo(function AiDock({
                       ) : (
                         <button
                           type="button"
-                          className={危钮}
+                          className={btnDanger}
                           onClick={() => set待确认删(t.id)}
                           title="只清空这篇正文，front-matter 保留"
                         >
@@ -1199,11 +1192,11 @@ export const AiDock = memo(function AiDock({
                     ) : null}
                     <div className="ai-turn-actions">
                       {t.计划.edits.length ? (
-                        <button type="button" className={主钮} onClick={() => 应用整篇(t)}>
+                        <button type="button" className={btnPrimary} onClick={() => 应用整篇(t)}>
                           应用修改
                         </button>
                       ) : null}
-                      <button type="button" className={钮} onClick={() => 取消整篇(t)}>
+                      <button type="button" className={btn} onClick={() => 取消整篇(t)}>
                         {t.计划.edits.length ? "取消" : "知道了"}
                       </button>
                       {t.量 ? (
@@ -1265,7 +1258,7 @@ export const AiDock = memo(function AiDock({
               />
               <button
                 type="button"
-                className={主钮 + " ai-dock-send"}
+                className={btnPrimary + " ai-dock-send"}
                 aria-label="发送"
                 disabled={忙 || !草稿.trim()}
                 onClick={() => void 发()}

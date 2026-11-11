@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -16,6 +17,7 @@ import {
   FolderPlus,
   Minus,
   MoreHorizontal,
+  PanelLeftOpen,
   Plus,
   RotateCw,
   Settings,
@@ -23,6 +25,8 @@ import {
   X,
 } from "lucide-react";
 import { FirstRun } from "./FirstRun";
+import { 首启档 } from "./ui/firstrun";
+import { PropsView } from "./ui/PropsView";
 import { AiDock } from "./editor/AiDock";
 import { BlockEditor } from "./editor/BlockEditor";
 import { docToMarkdown } from "./editor/blocks";
@@ -30,11 +34,11 @@ import { OutlineEdge } from "./editor/OutlineEdge";
 import type { Editor } from "@tiptap/core";
 import { api, describeError, inTauri, 设库根 } from "./ipc/commands";
 import { 可对话 } from "./ui/ai";
-import { btn, btnOn, btnPrimary } from "./ui/controls";
-import { PropsView } from "./ui/PropsView";
+import { btn, btnDanger, btnOn, btnPrimary } from "./ui/controls";
 import { SettingsView } from "./ui/SettingsView";
 import { 判备份, type AI忙, type AI表单 } from "./ui/settings";
 import { 来源徽章, 走了那句, 面板标题 } from "./ui/search";
+import { use分栏, 右栏下限, 左栏上限, 轨宽 } from "./ui/split";
 import {
   buildTree,
   dirsOf,
@@ -57,6 +61,7 @@ import {
   type 菜单键,
 } from "./ui/tree-menu";
 import { 是回车提交 } from "./ui/keys";
+import { 下一步永久删除, 删后选中, 删除时刻, 回收站键, 预览上限, 预览正文 } from "./ui/trash";
 import { LinkPanelView } from "./ui/Links";
 import { CommandPalette } from "./ui/CommandPalette";
 import type { PaletteItem } from "./ui/palette";
@@ -105,6 +110,8 @@ type Mode =
 type Opened = { rel: string; title: string };
 /** 引用落点。nonce 让"同一块再点一次"也能重新滚动，而不是因为值没变被 React 忽略 */
 type 块定位 = { ordinal: number; nonce: number };
+/** 侧栏一行。`ordinal` 只有搜索结果才有：点它要落到命中的那一块，而不是整篇从头显示 */
+type 侧栏行 = { rel: string; title: string; sub: string; ms: number; ordinal?: number };
 /**
  * 侧栏目录上正在等输入的那一个动作。只留一个：同一时刻树里只该有一行是输入框，
  * 两行同时开着等于让用户猜回车会落到哪一行。
@@ -225,6 +232,8 @@ function relativeTime(ms: number): string {
 }
 
 const baseOf = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1);
+/** 停手多久才自动保存。唯一的消费者是 `排自动保存`；effect 与 `备好这篇` 都从那里排 */
+const 自动保存毫秒 = 800;
 /** 文件名去掉扩展名——改名框里不该让用户自己处理 `.md` */
 const stemOf = (rel: string) =>
   baseOf(rel)
@@ -251,6 +260,12 @@ export function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [notes, setNotes] = useState<ListNotes | null>(null);
   const [selected, setSelected] = useState<Opened | null>(null);
+  /**
+   * 当前篇的 rel。改名 / 移动 / 回收后**先在这里换掉**：`selected` 要等下一次渲染，
+   * 而 `note://indexed` 可能在那之前带着旧路径到达，拿旧 rel 去 `readRaw` 会误报
+   * 「找不到」——盘上那篇只是换了名字。
+   */
+  const 当前rel = useRef<string | null>(null);
   const [query, setQuery] = useState("");
   /** 侧栏目录树折叠了哪些目录。记路径不记显示名（显示名会随顶层标签变） */
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -306,12 +321,28 @@ export function App() {
    * 长文的滚动位置、撤销栈与图片解码全丢——"切个外观"不该付这份钱。
    */
   const [presenting, setPresenting] = useState(false);
+  /** 文件树宽度。拖动只改 DOM，松手才进这里，避免每一拍重画编辑器与对话 */
+  const 分栏 = use分栏();
   /** 演示浮层（篇名 + 退出）。指针/键盘动一下亮，停手 2.4 秒自己收 */
   const [hud, setHud] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [newTitle, setNewTitle] = useState("");
   const [creating, setCreating] = useState(false);
   const [trash, setTrash] = useState<TrashRow[]>([]);
+  /** 预览的是哪一条（`回收站键`）。条目本身从 `trash` 里现取，列表刷新后不会指着旧对象 */
+  const [trashSel, setTrashSel] = useState<string | null>(null);
+  const [trashPreview, setTrashPreview] = useState<{
+    key: string;
+    text: string;
+    truncated: boolean;
+    /** 读盘失败时把话说在预览格子里；留着"正在读取…"会像是永远读不完 */
+    error?: string;
+  } | null>(null);
+  /** 永久删除的两步确认：单条用 `回收站键`，清空用 `"__empty__"` */
+  const [trashConfirm, setTrashConfirm] = useState<string | null>(null);
+  const [trashBusy, setTrashBusy] = useState(false);
+  /** 连续点不同条目时，只让最后一次读盘的结果落到界面上 */
+  const 预览请求 = useRef(0);
   const [flash, setFlash] = useState<string | null>(null);
   const [baseHash, setBaseHash] = useState("");
   const [savedDraft, setSavedDraft] = useState("");
@@ -397,6 +428,21 @@ export function App() {
   const { 行距, set行距 } = use行距();
   const searchTimer = useRef<number | null>(null);
   const saveTimer = useRef<number | null>(null);
+  /** 每有一次真编辑 +1：落盘期间用户又敲了字时，靠它判断不能把 dirty 清掉 */
+  const 稿本 = useRef(0);
+  /** 正在飞的那一笔落盘。失焦与点击管理按钮会前后脚各调一次 persist，别再发第二笔 */
+  const 落盘中 = useRef<Promise<boolean> | null>(null);
+  /** 最新的 `排自动保存`。persist 内部要补排时用它，避免把 scheduler 塞进自己的依赖形成环 */
+  const 排自动保存用 = useRef<(() => void) | null>(null);
+  /** 上一笔落盘失败的种类：`备好这篇` 据此决定要不要补排（冲突应等用户选，重试没意义） */
+  const 上次失败 = useRef<"conflict" | "other" | null>(null);
+  /** 这一轮失败是否已经补排过一次：新一轮编辑复位，避免持久 IO 错误无限重试 */
+  const 已补排 = useRef(false);
+  /**
+   * 一篇新建正在飞。双击「新建这篇并打开」或连按回车不该在盘上落下两篇同名笔记——
+   * 后端给重名加 `-1` 后缀，不会报错，于是两篇都是"成功"的，事后只能靠人去回收站捡。
+   */
+  const 建笔记中 = useRef(false);
   /** 行内模式的 Markdown 只在落盘那一刻取一次：整篇序列化是 O(块数) 的 */
   const editApi = useRef<(() => string) | null>(null);
   /** 进演示前的窗口状态。退出时按它还原——用户本来就在全屏，就别顺手把他踢出全屏 */
@@ -418,6 +464,12 @@ export function App() {
   const unsaved = editing && dirty;
   /** 备份那一格的判据只有一份（`判备份`）：设置页与备份面板都从它取 */
   const 备份格 = 判备份(info);
+  /**
+   * 首启向导停在哪儿。**备份那一步没答完也停**：`vault_open` 一确认就把库路径
+   * 写进了 last-vault，只判 `vaultPath` 的话，用户在那一步关掉应用后就再也没人
+   * 提醒备份了。判据收在 `ui/firstrun.ts`，那里有测试。
+   */
+  const 首启 = 首启档(info);
 
   const apply = useCallback(async (app: AppInfo) => {
     setInfo(app);
@@ -579,22 +631,29 @@ export function App() {
       if (!alive) return;
       void refresh();
       const rels = e.payload ?? [];
-      // 面板跟着索引走。**不按 rels 过滤**：改名 / 归档的负载里只有"被搬走的那一篇"，
+      // 面板跟着索引走。**不按 rels 过滤**：改名的负载里只有那一篇的旧/新路径，
       // 而它的一批入链方（可能正是眼前这篇）不在名单里——只认"库里刚补过索引"这件事。
       // 静默刷新：不清空重画，避免每存一次面板闪一下。
-      if (selected) loadLinks(selected.rel, true);
-      if (!unsaved && selected && rels.includes(selected.rel)) {
+      const 现在 = 当前rel.current;
+      if (现在) loadLinks(现在, true);
+      if (!unsaved && 现在 && rels.includes(现在)) {
         // **先比内容，再决定要不要重装载**。自己按下保存也会绕一圈回到这里，而重装载是
         // 整棵编辑器重挂载：光标、撤销栈、正开着的菜单全丢。真机就是这么暴露的——
         // 打 `/` 唤出块菜单，1.5 秒后菜单自己没了，因为那次保存的事件回来了。
         void api
-          .readRaw(selected.rel)
+          .readRaw(现在)
           .then((src) => {
-            if (!alive) return;
+            // 等 readRaw 回来时这篇可能已经改名 / 被切走：别再拿旧 rel 重装载
+            if (!alive || 当前rel.current !== 现在) return;
             if (src.content === savedDraft) return; // 就是我们刚存下去的那份
-            void loadNote(selected.rel).catch((err) => setError(describeError(err).message));
+            void loadNote(现在).catch((err) => setError(describeError(err).message));
           })
-          .catch((err) => setError(describeError(err).message));
+          .catch((err) => {
+            // 事件比改名 / 回收的返回值先到时，旧 rel 已经不在盘上。当前 rel 已经
+            // 换走就说明那不是"文件消失"，别在顶上刷一条假错误。
+            if (!alive || 当前rel.current !== 现在) return;
+            setError(describeError(err).message);
+          });
       }
     }).then((f) => {
       if (alive) un = f;
@@ -671,19 +730,25 @@ export function App() {
   }, [flash]);
 
   const list = notes?.notes ?? [];
+  /** 回收站里预览的那一条：从清单现取，删掉 / 恢复之后自然不会指回已经不存在的行 */
+  const 选中回收件 = trash.find((t) => 回收站键(t) === trashSel) ?? null;
   const searching = query.trim().length > 0;
   /**
    * 搜索态直接渲染命中，不能拿它去和启动时缓存的列表求交集——
-   * 那样刚速记进来的笔记（列表里没有）永远搜不到。一块命中一条笔记，按笔记去重。
+   * 那样刚速记进来的笔记（列表里没有）永远搜不到。一块命中一条笔记。
+   * 后端已经按篇配了额（`Index::search_keyword` 一篇只交它最好的那块，`limit` 数的是篇），
+   * 这里的按篇去重只是兜底：万一后端又按块给，界面也不至于同一篇占满整张表。
    */
-  const rows = useMemo(() => {
+  const rows = useMemo<侧栏行[]>(() => {
     if (searching) {
       const seen = new Set<string>();
-      const out: { rel: string; title: string; sub: string; ms: number }[] = [];
+      const out: 侧栏行[] = [];
       for (const h of hits) {
         if (seen.has(h.path)) continue;
         seen.add(h.path);
-        out.push({ rel: h.path, title: h.title, sub: h.snippet, ms: 0 });
+        // `blockOrdinal` 与引用落点是同一个序号（后端数的是顶层块）：
+        // 点搜索结果与点引用走同一条定位，不会只把整篇从头打开
+        out.push({ rel: h.path, title: h.title, sub: h.snippet, ms: 0, ordinal: h.blockOrdinal });
       }
       return out;
     }
@@ -723,10 +788,23 @@ export function App() {
    * 防抖窗口里用户又手改了同一篇，那一笔仍按 AI 记——前像只有一份，不假装拆得开。
    */
   const AI落笔待存 = useRef(false);
-  const aiApplied = useCallback(() => {
-    AI落笔待存.current = true;
+  /** AI 落笔的次数。落盘期间又落了一笔 AI 时，不能把新一笔的标记当成上一笔清掉 */
+  const AI落笔序号 = useRef(0);
+  /**
+   * 记一次真编辑。`inlineRev` 与 `稿本` 必须一起涨：前者驱动 dirty / 自动保存，
+   * 后者让落盘知道"我存下去的那一版之后用户又改了没有"。
+   */
+  const 记一稿 = useCallback(() => {
+    稿本.current += 1;
+    // 新一轮编辑值得再给一次失败重试的机会
+    已补排.current = false;
     setInlineRev((n) => n + 1);
   }, []);
+  const aiApplied = useCallback(() => {
+    AI落笔待存.current = true;
+    AI落笔序号.current += 1;
+    记一稿();
+  }, [记一稿]);
   const aiNotice = useCallback((文: string) => setFlash(文), []);
   /** 面包屑：把当前篇的 rel 拆成 目录/…/文件名（反斜杠统一成正斜杠，与 tree.ts 同一口径） */
   const 路径段 = selected ? selected.rel.replace(/\\/g, "/").split("/") : [];
@@ -866,37 +944,28 @@ export function App() {
       序列: 层内名字(tree, 父),
       存过: order.some((条) => 条.parent === 父),
     }));
-    if (!作) return;
+    if (!落 || !作) return;
     const 层们 = 作.类型 === "移动" ? 作.层 : [作.层];
     if (作.类型 === "移动") {
+      const 新路径 = 作.新路径;
       /**
        * 拖的正是眼前这篇、而且手上还有没落盘的改动：**先存回原路径再搬**。
-       * 自动保存的定时器揣着旧 rel，移动之后它一触发就在原目录又写出一份——磁盘上没这个
-       * 文件时后端是放行的（`save_note_write`：新建的文件没有旧版本可比对），于是一份笔记
-       * 变两份、内容还不一样。顺带把待触发的定时器撤掉，别让它在 await 期间抢一次。
+       * 落盘与撤自动保存定时器都走 `备好这篇`，这里只负责失败时说句话。
+       * 没改动就不必付整篇序列化的钱（3000 块实测 29ms，而拖拽是最常见的路径）。
        */
-      if (selected?.rel === 被拖.自身) {
-        if (dirty && !(await persist())) {
-          setFlash("这篇还没保存——先处理冲突或错误提示");
-          return;
-        }
-        if (saveTimer.current !== null) {
-          window.clearTimeout(saveTimer.current);
-          saveTimer.current = null;
-        }
+      if (selected?.rel === 被拖.自身 && dirty && !(await 备好这篇(被拖.自身))) {
+        setFlash("这篇还没保存——先处理冲突或错误提示");
+        return;
       }
       try {
-        await api.noteMove(被拖.自身, 作.新路径);
+        await api.noteMove(被拖.自身, 新路径);
       } catch (err) {
         setError(describeError(err).message);
         return;
       }
-      revealPath(作.新路径); // 拖进折叠着的目录，就得让它当场露出来
-      /**
-       * 编辑器仍指着**旧路径**，得跟着搬过去：侧栏「归档」那个按钮走的就是
-       * `afterChange(新路径)`，拖拽要同一处理，不然接着打的字还是往旧 rel 上写。
-       */
-      if (selected?.rel === 被拖.自身) await afterChange(作.新路径);
+      revealPath(新路径); // 拖进折叠着的目录，就得让它当场露出来
+      // 编辑器仍指着旧路径，得跟着搬过去，不然接着打的字还是往旧 rel 上写。
+      if (selected?.rel === 被拖.自身) await afterChange(新路径);
     }
     // 先按新序重画再写盘：G7 要"任何动作 100ms 内有反馈"，而落盘是另一趟往返
     setOrder((旧) => 合并层(旧, 层们));
@@ -918,66 +987,174 @@ export function App() {
   });
 
   /**
+   * 撤掉还没到点的自动保存。
+   *
+   * 那个定时器揣着**旧 `baseHash` 与旧 rel**：显式落盘 / 搬文件时若让它照常触发，
+   * 两笔会拿同一个哈希并发写盘，后到的那笔被后端判成冲突（用户明明没在别处改）；
+   * 搬完文件后它还会往旧路径再写一份。所有显式保存入口都先过这一下。
+   */
+  const 撤自动保存 = useCallback(() => {
+    if (saveTimer.current !== null) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+  }, []);
+
+  /**
    * 把当前正文写盘。自动保存、Ctrl+S、失焦、切笔记前都走这一个入口。
    * 带 `baseHash` 去存，磁盘上已经不是那份就报冲突——**冲突时不覆盖**，
    * 让用户选留哪份（docs/02 §写入与外部修改：绝不静默覆盖）。
    */
   const persist = useCallback(
-    async (force = false): Promise<boolean> => {
-      // 浏览态永不落盘：打开一篇看看就写文件，等于把"看"变成"改"。读一篇笔记永远不该动它
-      if (mode === "view") return true;
-      // 现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）。
-      // 编辑器还没挂上时退回上一次落盘的字节——没有源码框之后，屏幕上没有第二份可写的草稿。
-      const md = editApi.current ? editApi.current() : savedDraft;
-      if (!selected) return true;
-      if (md === savedDraft) {
-        /**
-         * 要写的字节与盘上那份一模一样 = **没有东西要存**，把状态归零。不归零就出不来：
-         * `dirty` 只剩 `inlineRev > 0` 在响，而它清不掉。真测过两例——文末的代码块按 `↓`
-         * 会补一个**不落盘**的空段落、纯光标移动会被账本守卫改一下邻居块的属性，两例字节
-         * 都没变。卡住的不只是那一行保存状态：`unsaved` 还挡着外部改动重载（Obsidian /
-         * 同步盘改这篇永远看不见）。
-         */
-        setInlineRev(0);
-        setSaveState("clean");
-        // 没东西要存 = 那一次 AI 落笔没进盘（多半被 Ctrl+Z 撤掉了），标记得跟着清
-        AI落笔待存.current = false;
-        return true;
-      }
-      setSaveState("saving");
-      try {
-        const h = await api.saveNote(
-          selected.rel,
-          md,
-          force ? undefined : baseHash,
-          AI落笔待存.current,
+    (force = false): Promise<boolean> => {
+      /**
+       * 同一篇只允许一笔在飞。编辑器失焦（`onBlur`）与紧接着的管理按钮点击会前后脚
+       * 各调一次 persist：两笔拿同一个 `baseHash` 并发写盘，后到的那笔会被后端判成
+       * 冲突（内容其实已经存进去了）。已经在存就把同一笔的结果交出去——两处问的
+       * 都是"这篇存好了没有"，答案一样。
+       *
+       * **强制保存不能被并掉**：冲突横幅上的「仍然存我这份」点下去时，失焦可能已经
+       * 先起了一笔普通保存，而它还会撞同一个旧哈希。等那一笔落地，再按用户的
+       * 选择强写一次（`expect_hash=None`）。
+       */
+      if (落盘中.current) {
+        if (!force) return 落盘中.current;
+        const 前 = 落盘中.current;
+        return 前.then(
+          () => persist(true),
+          () => persist(true),
         );
-        setBaseHash(h);
-        // 只在真落成功之后清：冲突/出错时那一笔还挂在文档里，下次重试仍算 AI 落的
-        AI落笔待存.current = false;
-        setSavedDraft(md);
-        setInlineRev(0);
-        setSaveState("saved");
-        return true;
-      } catch (e) {
-        const { kind, message } = describeError(e);
-        if (kind === "conflict") setSaveState("conflict");
-        else setError(message);
-        return false;
       }
+
+      const 跑 = (async (): Promise<boolean> => {
+        // 谁先来谁撤掉对方：显式保存与自动保存不能拿同一份旧哈希并发写同一篇
+        撤自动保存();
+        上次失败.current = null;
+        // 浏览态永不落盘：打开一篇看看就写文件，等于把"看"变成"改"。读一篇笔记永远不该动它
+        if (mode === "view") return true;
+        // 现取现拼：击键路径上不做整篇序列化（3000 块实测 29ms，会把 G6 顶穿）。
+        // 编辑器还没挂上时退回上一次落盘的字节——没有源码框之后，屏幕上没有第二份可写的草稿。
+        const md = editApi.current ? editApi.current() : savedDraft;
+        if (!selected) return true;
+        // `force` 是冲突横幅上的"仍然存我这份"：哪怕字节与上次落盘相同，也得按用户
+        // 的选择覆盖盘上那份（外部改过之后，savedDraft 已经不能代表"盘上是什么"）。
+        if (!force && md === savedDraft) {
+          /**
+           * 要写的字节与盘上那份一模一样 = **没有东西要存**，把状态归零。不归零就出不来：
+           * `dirty` 只剩 `inlineRev > 0` 在响，而它清不掉。真测过两例——文末的代码块按 `↓`
+           * 会补一个**不落盘**的空段落、纯光标移动会被账本守卫改一下邻居块的属性，两例字节
+           * 都没变。卡住的不只是那一行保存状态：`unsaved` 还挡着外部改动重载（Obsidian /
+           * 同步盘改这篇永远看不见）。
+           */
+          setInlineRev(0);
+          setSaveState("clean");
+          // 没东西要存 = 那一次 AI 落笔没进盘（多半被 Ctrl+Z 撤掉了），标记得跟着清
+          AI落笔待存.current = false;
+          已补排.current = false;
+          return true;
+        }
+        setSaveState("saving");
+        let 已存 = md;
+        let 当前hash = baseHash;
+        try {
+          /**
+           * 落盘期间用户可能接着敲字。那几笔不在 `md` 里：成功后若无条件
+           * `setInlineRev(0)`，界面会谎报"已保存"，新字也不会再排自动保存。
+           * 所以存完对一下稿本——变了就现取新内容、用刚拿到的 hash 再存一轮。
+           * 最多 5 轮：真到 5 轮说明用户一直在写，留给自动保存那一路，不在这里空转。
+           */
+          for (let 轮 = 0; 轮 < 5; 轮++) {
+            const 存时稿本 = 稿本.current;
+            const 存时AI序号 = AI落笔序号.current;
+            const h = await api.saveNote(
+              selected.rel,
+              已存,
+              轮 === 0 && force ? undefined : 当前hash,
+              AI落笔待存.current,
+            );
+            当前hash = h;
+            setBaseHash(h);
+            setSavedDraft(已存);
+            if (稿本.current === 存时稿本) {
+              // 这一版就是眼前这份：那一笔 AI 标记已经被这次落盘消费掉
+              AI落笔待存.current = false;
+              已补排.current = false;
+              setInlineRev(0);
+              setSaveState("saved");
+              return true;
+            }
+            const 新稿 = editApi.current ? editApi.current() : 已存;
+            if (新稿 === 已存) {
+              // 稿本动了但字节回到原样（撤销）：算干净，别再白存一遍
+              AI落笔待存.current = false;
+              已补排.current = false;
+              setInlineRev(0);
+              setSaveState("saved");
+              return true;
+            }
+            /**
+             * 保存期间落了新字，要再存一轮：
+             * - 没落新 AI 笔：上一版的 AI 标记已经记进那一版了，清掉；
+             * - 落了新 AI 笔：标记留给下一轮，不能被这次的成功清走。
+             */
+            if (AI落笔序号.current === 存时AI序号) AI落笔待存.current = false;
+            已存 = 新稿;
+          }
+          // 连续改了 5 轮还没停：dirty 留着让自动保存接着排。
+          // 状态回到 clean——屏幕上没有一笔在飞，别让"保存中…"一直挂着。
+          setSaveState("clean");
+          return false;
+        } catch (e) {
+          const { kind, message } = describeError(e);
+          上次失败.current = kind === "conflict" ? "conflict" : "other";
+          if (kind === "conflict") setSaveState("conflict");
+          else {
+            // IO / 权限之类：屏幕上的"保存中…"必须收掉，等下一次重试再亮
+            setSaveState("clean");
+            setError(message);
+          }
+          // 非冲突失败（多半是临时 IO）补排一次，别让这篇停在"有改动但没有定时器"
+          // 的状态里。**自动保存那一路也算**（它触发时自己的 ref 已经是空的）。
+          // 冲突要等用户选，重试没有意义；同一轮失败只补一次，防止持久 IO 错误无限重试。
+          if (kind !== "conflict" && !已补排.current) {
+            已补排.current = true;
+            排自动保存用.current?.();
+          }
+          return false;
+        }
+      })();
+
+      落盘中.current = 跑;
+      const 收尾 = () => {
+        if (落盘中.current === 跑) 落盘中.current = null;
+      };
+      跑.then(收尾, 收尾);
+      return 跑;
     },
-    [selected, mode, savedDraft, baseHash],
+    [selected, mode, savedDraft, baseHash, 撤自动保存],
   );
+
+  /** 停手一档就存。定时器的所有权只在 `saveTimer` 一处，effect 与 `备好这篇` 都从这儿排 */
+  const 排自动保存 = useCallback(() => {
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      // 先清 ref 再落盘：这一笔是"已经到点"的，失败时不该再按"显式保存撤了活定时器"补排
+      saveTimer.current = null;
+      void persist();
+    }, 自动保存毫秒);
+  }, [persist]);
+
+  // 让 `persist` 内部（失败补排）也用同一份排程；passive effect 在用户下一次事件前跑
+  useEffect(() => {
+    排自动保存用.current = 排自动保存;
+  });
 
   // 停手 800ms 就存。手动 Ctrl+S 仍然留着——有人不信自动保存
   useEffect(() => {
     if (!editing || !dirty) return;
-    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => void persist(), 800);
-    return () => {
-      if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
-    };
-  }, [inlineRev, dirty, editing, persist]);
+    排自动保存();
+    return 撤自动保存;
+  }, [inlineRev, dirty, editing, 排自动保存, 撤自动保存]);
 
   // "已自动保存"是一次性反馈，不是常驻状态：1.5s 后回 clean，右下角那条提示自己走
   useEffect(() => {
@@ -1013,6 +1190,7 @@ export function App() {
   const loadNote = async (rel: string, title?: string) => {
     setBlockFocus(null);
     const [src, blocks] = await Promise.all([api.readRaw(rel), api.noteEditDoc(rel)]);
+    当前rel.current = rel;
     setSelected({
       rel,
       title: title ?? (selected?.rel === rel ? selected.title : undefined) ?? stemOf(rel),
@@ -1055,6 +1233,8 @@ export function App() {
 
   /** 管理动作之后：列表 + 当前篇都要跟着变（改名会换 rel，所以传进来） */
   const afterChange = async (rel?: string | null) => {
+    // 先同步换掉 rel，再 await：索引事件可能比 refresh / loadNote 先到
+    当前rel.current = rel ?? null;
     await refresh();
     setFlash(null);
     if (!rel) {
@@ -1110,6 +1290,11 @@ export function App() {
       backToNote();
       return;
     }
+    // 改名会换路径再按盘上内容重装编辑器。没先落盘，框里没存的字会被读回来的旧文件盖掉。
+    if (!(await 备好这篇(selected.rel))) {
+      setFlash("这篇还没保存——先处理冲突或错误提示");
+      return;
+    }
     try {
       const newRel = await api.noteRename(selected.rel, next);
       backToNote();
@@ -1122,31 +1307,38 @@ export function App() {
 
   /**
    * 树上的行操作按 rel 走，不要求先把那一篇打开；但**正开着的那一篇先落盘**——
-   * 改名 / 归档 / 回收都会换路径或搬文件，揣着没存的内容去搬就是搬丢。
+   * 改名 / 回收 / 拖拽都会换路径或搬文件，揣着没存的内容去搬就是搬丢。
    */
   const 备好这篇 = async (rel: string) => {
-    if (editing && selected?.rel === rel) return await persist();
-    return true;
-  };
-
-  /** 归档与否看它**现在**在不在 `archive/`（[02]：归档状态 = 所在目录） */
-  const 归档这篇 = async (rel: string) => {
-    if (!(await 备好这篇(rel))) return;
-    const 归档中 = rel.startsWith("archive/");
-    const target = 归档中 ? `notes/${baseOf(rel)}` : `archive/${baseOf(rel)}`;
-    try {
-      await api.noteMove(rel, target);
-      if (selected?.rel === rel) await afterChange(target);
-      else await refresh();
-      setFlash(归档中 ? "已移出归档" : "已归档");
-    } catch (e) {
-      const { kind, message } = describeError(e);
-      setError(kind === "conflict" ? "目标目录里已经有同名笔记了，没动你的文件" : message);
-    }
+    // 没打开这篇，或手里没有未落盘的字：不用写，也不用付整篇序列化的钱
+    // （3000 块实测 29ms，而拖拽 / 改名是最常见的路径）。
+    // 改名输入框把 `mode` 拨离 inline 之后编辑器还挂着，脏字仍在——判据是 `dirty`，
+    // 不是 `editing`：只认 `editing` 会直接当成功，接着改名 / 回收 / 拖走就把那截字丢了。
+    if (selected?.rel !== rel || !dirty) return true;
+    // 浏览态的 `persist` 会直接报成功、一个字节都不写。这种时候还有改动，就不能接着搬。
+    if (mode === "view") return false;
+    /**
+     * **先撤定时器再落盘**：自动保存那个定时器会和这次 `persist` 拿同一个旧哈希同时写盘，
+     * 后到的那笔被后端判成冲突（用户明明没在别处改）。它揣着的还是**旧 rel**，搬完之后
+     * 一触发就会往原路径再写一份——磁盘上刚搬走，`save_note_write` 对不存在的旧文件是
+     * 放行的，于是一篇变两份。`persist` 入口也会撤一次，这里先撤是为了在调用点就守住顺序。
+     */
+    撤自动保存();
+    if (await persist()) return true;
+    /**
+     * 落盘失败（冲突 / IO）：IO 失败把自动保存重新排上；冲突不能重排——
+     * 用户还在横幅上选留哪份，再撞一次同一个旧哈希只是白序列化一次。
+     */
+    if (上次失败.current !== "conflict") 排自动保存();
+    return false;
   };
 
   const 回收这篇 = async (rel: string) => {
-    if (!(await 备好这篇(rel))) return;
+    if (!(await 备好这篇(rel))) {
+      // 与改名入口同一句话：没落盘就不能搬，也不能一声不吭
+      setFlash("这篇还没保存——先处理冲突或错误提示");
+      return;
+    }
     const 名 = stemOf(rel);
     try {
       await api.noteTrash(rel);
@@ -1156,16 +1348,6 @@ export function App() {
     } catch (e) {
       setError(describeError(e).message);
     }
-  };
-
-  const toggleArchive = async () => {
-    if (!selected) return;
-    await 归档这篇(selected.rel);
-  };
-
-  const trashNote = async () => {
-    if (!selected) return;
-    await 回收这篇(selected.rel);
   };
 
   /** 重建目录清单。建/改名/删之后都要来一次：树里那一份是后端遍历出来的，改不了乐观值 */
@@ -1239,7 +1421,11 @@ export function App() {
         await 刷新目录();
         setOrder(await api.treeOrder());
       } else if (动作.类型 === "改名笔记") {
-        if (!(await 备好这篇(动作.rel))) return;
+        // 冲突 / IO 时不能接着搬：输入框留在原地，也要说清楚为什么没动
+        if (!(await 备好这篇(动作.rel))) {
+          setFlash("这篇还没保存——先处理冲突或错误提示");
+          return;
+        }
         const 新 = await api.noteRename(动作.rel, 文);
         // 改的正是眼前这篇：跟着新路径走（不然下一次保存会写回旧文件名）
         if (selected?.rel === 动作.rel) await afterChange(新);
@@ -1256,12 +1442,15 @@ export function App() {
   };
 
   const createNote = async (标题?: string, parent?: string): Promise<boolean> => {
+    // 在第一个 await 之前就把闸放下：两击之间没有机会让第二击看到"还没开始"
+    if (建笔记中.current) return false;
     const title = (标题 ?? newTitle).trim();
     if (!title) return false;
-    // 建完就 `startEdit(rel)`，属性页会跟着卸载；没保存的草稿得先问一句
+    // 建完就进正文，属性页会跟着卸载；没保存的草稿得先问一句
     if (!可弃属性()) return false;
-    if (editing && !(await persist())) return false;
+    建笔记中.current = true;
     try {
+      if (editing && !(await persist())) return false;
       const rel = await api.noteCreate(title, parent);
       setNewTitle("");
       setCreating(false);
@@ -1277,6 +1466,8 @@ export function App() {
     } catch (e) {
       setError(describeError(e).message);
       return false;
+    } finally {
+      建笔记中.current = false;
     }
   };
 
@@ -1336,6 +1527,11 @@ export function App() {
     if (editing && !(await persist())) return;
     try {
       setTrash(await api.listTrash());
+      // 每次进来都从"没选中、没确认"开始：上一次离开时挂着的确认不该跟进来
+      setTrashSel(null);
+      setTrashPreview(null);
+      setTrashConfirm(null);
+      setError(null);
       setMode("trash");
     } catch (e) {
       setError(describeError(e).message);
@@ -1356,12 +1552,18 @@ export function App() {
     // 而面板不会因此重挂，草稿留在屏幕上却再也不拦离开
     if (mode === "props") return;
     if (!selected) return;
+    const 目标 = selected.rel;
     if (editing && !(await persist())) return;
+    // 落盘期间可能已经切到别的笔记：别把 A 的属性面板开到 B 上
+    if (当前rel.current !== 目标) return;
     setPropsDirty(false);
     setPropsConflict(false);
     setPropsError(null);
     try {
-      setMetaView(await api.noteMeta(selected.rel));
+      const 视图 = await api.noteMeta(目标);
+      // 读属性期间也可能切走（或这一篇刚被改名）
+      if (当前rel.current !== 目标) return;
+      setMetaView(视图);
       setMode("props");
     } catch (e) {
       setError(describeError(e).message);
@@ -1434,7 +1636,7 @@ export function App() {
     }
   };
 
-  /** 备份面板：状态 + 最近几份 + 当前这篇的历史，一次拉齐 */
+  /** 备份面板：状态 + 最近几份 + 当前这篇在备份里的那几份，一次拉齐 */
   const openBackup = async () => {
     if (!可弃属性()) return;
     if (editing && !(await persist())) return;
@@ -1469,11 +1671,16 @@ export function App() {
       const made = await api.backupRun();
       await refresh();
       setSnapshots(await api.backupRecent(20));
-      // 当前这篇的历史也要跟着刷：不刷的话"立即备份"之后列表还是旧的，
+      // 当前这篇在备份里的那几份也要跟着刷：不刷的话"立即备份"之后列表还是旧的，
       // 刚备份完却看不到那一份，用户只会以为没备份上
       setHistory(selected ? await api.backupHistory(selected.rel) : []);
+      // `backup_run` 走的是 force：它**不会**因为"今天已经备份过"而返回 null。
+      // null 只有一个来由——备份根本没开（目录没配，或用户显式选了不备份）。
+      // 文案与托盘菜单那条路一字不差：两处说的是同一件事，不许一处说"已经备份过"。
       setFlash(
-        made ? `已备份，这次收了 ${made.copiedFiles} 个文件` : "今天已经备份过了，什么都没做",
+        made
+          ? `已备份，这次收了 ${made.copiedFiles} 个文件`
+          : "备份未开启：去设置页 → 备份选一个目录",
       );
     } catch (e) {
       setError(describeError(e).message);
@@ -1510,17 +1717,145 @@ export function App() {
     }
   };
 
+  /**
+   * 重读回收站清单。删 / 恢复之后唯一该做的收尾。
+   *
+   * **失败时保留上一份清单**：把它换成空表等于替后端断言"回收站是空的"，
+   * 而文件其实还在。错误照报，让用户知道这一趟没读上。
+   */
+  const 重读回收站 = async () => {
+    try {
+      setTrash(await api.listTrash());
+    } catch (e) {
+      setError(describeError(e).message);
+    }
+  };
+
+  /**
+   * 点开一条看它删之前写了什么。读盘是异步的，连点两条时用序号丢掉先回来的那一份，
+   * 否则慢的那次会把后点的那条覆盖掉——预览与选中行对不上是最容易误删的现场。
+   */
+  const 预览回收站 = async (t: TrashRow, 清掉确认 = true) => {
+    const 键 = 回收站键(t);
+    setTrashSel(键);
+    if (清掉确认) setTrashConfirm(null);
+    const 序 = ++预览请求.current;
+    setTrashPreview(null);
+    try {
+      const p = await api.readTrash(t.batch, t.rel);
+      if (预览请求.current !== 序) return;
+      // 服务端按字节截过一次，前端再按字符截一次；任一层截断都要说出来
+      const 本地 = 预览正文(p.content);
+      setTrashPreview({
+        key: 键,
+        text: 本地.text,
+        truncated: p.truncated || 本地.truncated,
+      });
+    } catch (e) {
+      if (预览请求.current !== 序) return;
+      setTrashPreview({
+        key: 键,
+        text: "",
+        truncated: false,
+        error: describeError(e).message,
+      });
+    }
+  };
+
   const restore = async (t: TrashRow) => {
+    setTrashBusy(true);
+    let 已移回 = false;
     try {
       await api.noteRestore(t.batch, t.rel);
+      已移回 = true;
       await refresh();
       setFlash(`已恢复 ${t.rel}`);
     } catch (e) {
       const { kind, message } = describeError(e);
-      // 原位被同名笔记占住是正常结果，报出来就行
-      setError(kind === "conflict" ? `原位已经有 ${t.rel} 了，先给那边改名或删掉` : message);
+      if (kind === "not-found") {
+        // 别处已经删掉/恢复掉了：不是失败，重读清单把真相带回来就行
+        setFlash("这一条已经不在回收站里了");
+        const 键 = 回收站键(t);
+        setTrash((rows) => rows.filter((r) => 回收站键(r) !== 键));
+        setTrashSel((选中) => (选中 === 键 ? null : 选中));
+        setTrashPreview((p) => (p?.key === 键 ? null : p));
+      } else {
+        // 原位被同名笔记占住是正常结果，报出来就行
+        setError(kind === "conflict" ? `原位已经有 ${t.rel} 了，先给那边改名或删掉` : message);
+      }
     } finally {
-      setTrash(await api.listTrash().catch(() => []));
+      // 用函数式更新：恢复期间用户可能已经点开了另一条，拿这次渲染的 `trashSel`
+      // 去清会把新的选中一起清掉。失败（比如原位被占）时别清——用户还要看着
+      // 这份正文决定是改名还是永久删除。
+      if (已移回) {
+        const 键 = 回收站键(t);
+        // 先把这一行从本地拿掉：重读清单若失败，界面也不该继续展示已经恢复的那条
+        setTrash((rows) => rows.filter((r) => 回收站键(r) !== 键));
+        setTrashSel((选中) => (选中 === 键 ? null : 选中));
+        setTrashPreview((p) => (p?.key === 键 ? null : p));
+      }
+      setTrashConfirm(null);
+      await 重读回收站();
+      setTrashBusy(false);
+    }
+  };
+
+  /** 永久删除一条。第一次点只翻成确认态；这一步不做任何磁盘操作 */
+  const purge = async (t: TrashRow) => {
+    const 键 = 回收站键(t);
+    const 下一步 = 下一步永久删除(trashConfirm, 键);
+    setTrashConfirm(下一步.确认中);
+    if (!下一步.执行) return;
+    const 下一条 = 删后选中(trash, 键);
+    setTrashBusy(true);
+    try {
+      await api.trashPurge(t.batch, t.rel);
+      setFlash(`已永久删除「${stemOf(t.rel)}」`);
+      setError(null);
+      // 先在本地摘掉这条：重读清单若失败，界面不该再摆着已经删掉的行
+      setTrash((rows) => rows.filter((r) => 回收站键(r) !== 键));
+      // 先清掉已被删掉的那条预览，再由下一条接手；列表刷新前就发起读盘也没关系，
+      // 读的是盘上还在的下一份。
+      setTrashSel(下一条 ? 回收站键(下一条) : null);
+      setTrashPreview(null);
+      if (下一条) void 预览回收站(下一条, false);
+    } catch (e) {
+      const { kind, message } = describeError(e);
+      if (kind === "not-found") {
+        // 别处已经删掉了：目的已经达成，别把"不存在"喊成失败
+        setFlash("这一条已经不在回收站里了");
+        setTrash((rows) => rows.filter((r) => 回收站键(r) !== 键));
+        setTrashSel((选中) => (选中 === 键 ? null : 选中));
+        setTrashPreview((p) => (p?.key === 键 ? null : p));
+      } else {
+        setError(message);
+      }
+    } finally {
+      await 重读回收站();
+      setTrashBusy(false);
+    }
+  };
+
+  /** 清空回收站：两步确认；确认后一次删掉 `.note/trash/` 下所有文件 */
+  const emptyTrash = async () => {
+    const 下一步 = 下一步永久删除(trashConfirm, "__empty__");
+    setTrashConfirm(下一步.确认中);
+    if (!下一步.执行) return;
+    setTrashBusy(true);
+    try {
+      const 数 = await api.trashEmpty();
+      setFlash(`已永久删除回收站里的 ${数} 份文件`);
+      setError(null);
+      // 同上：清空成功之后本地先清掉，重读失败也不显示已经不存在的条目
+      setTrash([]);
+      setTrashSel(null);
+      setTrashPreview(null);
+      setTrashConfirm(null);
+    } catch (e) {
+      setError(describeError(e).message);
+    } finally {
+      await 重读回收站();
+      setTrashBusy(false);
     }
   };
 
@@ -1534,13 +1869,9 @@ export function App() {
     if (进演示中.current || presenting || mode !== "inline" || !selected || !editDoc) return;
     进演示中.current = true;
     try {
-      // 停手 800ms 的自动保存可能还挂在计时器上。它和下面这次 persist 会拿同一个
-      // 旧哈希同时写盘，后到的那笔被后端判成冲突。这一笔由我们同步存掉，计时器撤掉。
-      if (saveTimer.current !== null) {
-        window.clearTimeout(saveTimer.current);
-        saveTimer.current = null;
-      }
-      if (!(await persist())) {
+      // 停手 800ms 的自动保存可能还挂在计时器上；先撤定时器再落盘的顺序由
+      // `备好这篇` 与 `persist` 入口共同保证，别在这里再抄一份。
+      if (!(await 备好这篇(selected.rel))) {
         setFlash("这篇还没保存——先处理冲突或错误提示");
         return;
       }
@@ -1642,7 +1973,7 @@ export function App() {
   /**
    * 命令面板。`Ctrl+K` 唤起（Cmd 一并认，Mac 用户也在）。
    *
-   * 只放**不需要二次确认**的动作：改名 / 归档 / 删除在界面上都带着确认或冲突处理，
+   * 只放**不需要二次确认**的动作：改名 / 删除在界面上都带着确认或冲突处理，
    * 把它们塞进"打字 + 回车"的入口等于绕过那道确认。
    *
    * 列表**开着面板才现搭**：300 篇笔记的数组每次渲染都建一遍的话，正文里每敲一个字
@@ -1893,6 +2224,7 @@ export function App() {
     setError(null);
     try {
       const 新 = await api.vaultOpen(路径);
+      当前rel.current = null;
       setSelected(null);
       setEditDoc(null);
       setSavedDraft("");
@@ -2194,11 +2526,25 @@ export function App() {
         <div className="border-b border-line bg-danger-soft px-4 py-2 text-sm text-fg">{error}</div>
       ) : null}
 
-      {info && !info.vaultPath ? (
-        <FirstRun onOpened={(app) => void apply(app)} />
+      {首启 ? (
+        <FirstRun
+          已有库={首启 === "选备份" ? info : null}
+          onOpened={(app) => void apply(app)}
+        />
       ) : (
-        <div className="flex min-h-0 flex-1">
-          <aside className="flex w-72 shrink-0 flex-col border-r border-line bg-raised">
+        <div
+          ref={分栏.根}
+          className="split"
+          data-tree={分栏.折起 ? "closed" : "open"}
+          style={
+            {
+              "--split-w": `${分栏.列宽}px`,
+              "--split-right-min": `${右栏下限}px`,
+            } as CSSProperties
+          }
+        >
+          <aside className="split-side">
+            <div className="split-side-open">
             <div className="flex gap-2 p-2">
               <input
                 className="min-w-0 flex-1 rounded-md border border-line bg-page px-2 py-1 text-sm focus-visible:border-accent"
@@ -2295,7 +2641,7 @@ export function App() {
                     return (
                       <button
                         key={n.rel}
-                        onClick={() => void openNote(n.rel, n.title)}
+                        onClick={() => void openNote(n.rel, n.title, n.ordinal)}
                         onContextMenu={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -2505,7 +2851,7 @@ export function App() {
                         return 新篇.slice(0, 5).map((h) => (
                           <button
                             key={h.chunkId}
-                            onClick={() => void openNote(h.path, h.title)}
+                            onClick={() => void openNote(h.path, h.title, h.blockOrdinal)}
                             className="block w-full px-3 py-1 text-left text-sm transition-colors duration-(--dur-1) hover:bg-hover"
                           >
                             <span className="flex items-baseline gap-2">
@@ -2605,13 +2951,11 @@ export function App() {
                       set树菜单(null);
                       if (键 === "打开") void openNote(rel);
                       else if (键 === "改名笔记") 开树动作({ 类型: "改名笔记", rel });
-                      // 归档与取消归档是同一个动作，按它在不在 `archive/` 自己判
-                      else if (键 === "归档" || 键 === "取消归档") void 归档这篇(rel);
                       else if (键 === "回收") void 回收这篇(rel);
                     };
                     return (
                       <div className="tree-menu" role="menu" style={位}>
-                        {渲染(笔记菜单(rel), 做)}
+                        {渲染(笔记菜单(), 做)}
                       </div>
                     );
                   }
@@ -2664,12 +3008,37 @@ export function App() {
                 问答
               </button>
             </div>
+            </div>
+            <button
+              type="button"
+              className="split-side-shut"
+              aria-label="展开文件树"
+              title="展开文件树"
+              onClick={分栏.展开}
+            >
+              <PanelLeftOpen aria-hidden="true" />
+            </button>
           </aside>
+          <div
+            ref={分栏.分隔}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整文件树宽度"
+            aria-valuemin={轨宽}
+            aria-valuemax={左栏上限}
+            aria-valuenow={分栏.列宽}
+            aria-valuetext={分栏.折起 ? "文件树已折起" : `${分栏.列宽}像素`}
+            title="拖动调整文件树宽度"
+            tabIndex={0}
+            className="split-sash"
+            onPointerDown={分栏.按下}
+            onKeyDown={分栏.按键}
+          />
 
           {/* 布局三（2026-10-30 起，方案 G）：主区只剩正文列。大纲不再是右侧常驻栏，
               改成正文列**左缘**的把手 + 悬停浮层（OutlineEdge，也挂在 editor-pane 里）；
               空文档没有大纲。liveEditor 为 null（其它面板 / 装载中）时正文列整个不渲染 */}
-          <div className="flex min-w-0 flex-1">
+          <div className="flex h-full min-h-0 min-w-0">
             {/* 正文列自己夹一层：底部 AI 对话框要挂在**滚动容器之外**，否则它跟着正文一起滚走 */}
             <div className="editor-pane relative flex min-h-0 min-w-0 flex-1 flex-col">
             <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
@@ -2762,7 +3131,11 @@ export function App() {
                 <div className="measure-ui px-6 py-8">
                   {/* flash 原本只在正文那一支渲染：结果"立即备份"的反馈在它自己的面板里看不见 */}
                   {flash ? <p className="mb-4 text-sm text-fg-2">{flash}</p> : null}
-                  <h2 className="text-xl text-fg">备份与历史版本</h2>
+                  {/* 标题只说「备份」：这一页列的全是备份目录里的每日快照。
+                      「历史版本」会让用户以为每次保存另留的那份（note_versions 前像）
+                      也在这里——那块还没有界面（docs/03 §版本快照那一档），
+                      两件事不能借同一个词说 */}
+                  <h2 className="text-xl text-fg">备份</h2>
                   <p className="mt-2 text-sm text-fg-2">
                     每天第一次启动时，把库里
                     <span className="text-fg">变化过的文件</span>
@@ -2789,7 +3162,7 @@ export function App() {
                     >
                       立即备份
                     </button>
-                    {/* 目录与"不备份"是**配置**，搬进了设置页；这一格留的是"看历史、找回某一版"。
+                    {/* 目录与"不备份"是**配置**，搬进了设置页；这一格留的是"看备份、找回某一版"。
                       没备份的人在这儿点一下就到改的地方，不用自己去找齿轮 */}
                     <button className={btn} onClick={() => void openSettings()}>
                       改目录 / 不备份 → 设置
@@ -2798,12 +3171,16 @@ export function App() {
 
                   <h3 className="mt-8 text-sm text-fg-2">
                     {selected
-                      ? `这篇的历史版本 · ${selected.title}`
-                      : "选一篇笔记，就能看它的历史版本"}
+                      ? `这篇在备份里存过哪几份 · ${selected.title}`
+                      : "选一篇笔记，就能看它在备份里存过哪几份"}
                   </h3>
                   <div className="mt-2 flex flex-col gap-1">
                     {selected && history.length === 0 ? (
-                      <div className="text-sm text-fg-disabled">备份里还没有这一篇。</div>
+                      <div className="text-sm text-fg-disabled">
+                        {备份格.档 === "开着"
+                          ? "备份里还没有这一篇。备份按天做，刚改的内容要等下一次备份，或者现在点「立即备份」。"
+                          : "备份还没开启，所以这里没有记录。开启之后，这篇在哪些备份里存过就会列在这里。"}
+                      </div>
                     ) : null}
                     {selected
                       ? history.map((r) => (
@@ -2822,17 +3199,17 @@ export function App() {
                               disabled={backupBusy}
                               onClick={() => void restoreFrom(r.id)}
                             >
-                              恢复成这一版
+                              恢复成这一份
                             </button>
                           </div>
                         ))
                       : null}
                   </div>
 
-                  <h3 className="mt-8 text-sm text-fg-2">最近的版本</h3>
+                  <h3 className="mt-8 text-sm text-fg-2">最近的备份</h3>
                   <div className="mt-2 flex flex-col gap-1">
                     {snapshots.length === 0 ? (
-                      <div className="text-sm text-fg-disabled">还没有版本。</div>
+                      <div className="text-sm text-fg-disabled">还没有备份。</div>
                     ) : null}
                     {snapshots.map((r) => (
                       <div
@@ -2932,7 +3309,7 @@ export function App() {
                       {流字 ? (
                         <p className="mt-2 whitespace-pre-wrap text-sm text-fg">
                           {流字}
-                          <span className="ml-0.5 inline-block h-4 w-px animate-pulse bg-fg-2 align-middle" />
+                          <span className="ml-1 inline-block h-4 w-px animate-pulse bg-fg-2 align-middle" />
                         </p>
                       ) : null}
                     </div>
@@ -3048,30 +3425,107 @@ export function App() {
                 )
               ) : mode === "trash" ? (
                 <div className="measure-ui px-6 py-8">
-                  <h2 className="text-xl text-fg">回收站</h2>
-                  <p className="mt-2 text-sm text-fg-2">
-                    删掉的笔记存在 <span className="font-mono text-mono">.note/trash/</span>
-                    ，恢复即移回原路径。清空这个目录才是真删。
-                  </p>
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <h2 className="text-xl text-fg">回收站</h2>
+                      <p className="mt-2 text-sm text-fg-2">
+                        删掉的笔记存在{" "}
+                        <span className="font-mono text-mono">.note/trash/</span>
+                        。点一条看它删之前写了什么；恢复即移回原路径，永久删除会把回收站里这一份从盘上删掉、不能撤销。
+                      </p>
+                    </div>
+                    <button
+                      className={btnDanger + " shrink-0"}
+                      disabled={trash.length === 0 || trashBusy}
+                      onClick={() => void emptyTrash()}
+                    >
+                      {trashConfirm === "__empty__"
+                        ? `确认清空全部 ${trash.length} 项`
+                        : "清空回收站"}
+                    </button>
+                  </div>
+                  {flash ? <p className="mt-4 text-sm text-fg-2">{flash}</p> : null}
                   <div className="mt-6 flex flex-col gap-1">
                     {trash.length === 0 ? (
                       <div className="text-sm text-fg-disabled">是空的。</div>
                     ) : null}
-                    {trash.map((t) => (
-                      <div
-                        key={t.batch + t.rel}
-                        className="flex items-baseline gap-3 rounded-md border border-line bg-raised px-3 py-2"
-                      >
-                        <span className="min-w-0 flex-1 truncate text-sm">{stemOf(t.rel)}</span>
-                        <span className="shrink-0 font-mono text-xs text-fg-2">
-                          {t.rel} · {relativeTime(t.updatedMs)}
-                        </span>
-                        <button className={btnPrimary} onClick={() => void restore(t)}>
-                          恢复
-                        </button>
-                      </div>
-                    ))}
+                    {trash.map((t) => {
+                      const 键 = 回收站键(t);
+                      const 选中 = 键 === trashSel;
+                      const 确认中 = 键 === trashConfirm;
+                      return (
+                        <div
+                          key={键}
+                          className={
+                            "flex items-center gap-3 rounded-md border px-3 py-2 " +
+                            (选中 ? "border-accent bg-active" : "border-line bg-raised")
+                          }
+                        >
+                          <button
+                            type="button"
+                            className="min-w-0 flex-1 text-left"
+                            onClick={() => void 预览回收站(t)}
+                          >
+                            <span className="block truncate text-sm text-fg">{stemOf(t.rel)}</span>
+                            <span className="mt-1 block truncate font-mono text-xs text-fg-2">
+                              {t.rel} · {t.size < 1024 ? `${t.size} B` : `${Math.round(t.size / 1024)} KB`}{" "}
+                              · {relativeTime(删除时刻(t))}
+                            </span>
+                          </button>
+                          <button
+                            className={btnPrimary}
+                            disabled={trashBusy}
+                            onClick={() => void restore(t)}
+                          >
+                            恢复
+                          </button>
+                          <button
+                            className={btnDanger + " shrink-0"}
+                            disabled={trashBusy}
+                            onClick={() => void purge(t)}
+                          >
+                            {确认中 ? "确认永久删除" : "永久删除"}
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
+                  {选中回收件 ? (
+                    <div className="mt-6">
+                      <div className="flex items-baseline justify-between gap-3">
+                        <h3 className="min-w-0 truncate text-sm text-fg">
+                          {stemOf(选中回收件.rel)}
+                        </h3>
+                        <span className="shrink-0 font-mono text-xs text-fg-2">
+                          {relativeTime(删除时刻(选中回收件))} 删除
+                        </span>
+                      </div>
+                      <div className="mt-2 rounded-md border border-line bg-sunken">
+                        {trashPreview?.key === 回收站键(选中回收件) ? (
+                          trashPreview.error ? (
+                            <div className="px-3 py-2 text-sm text-danger">
+                              {trashPreview.error}
+                            </div>
+                          ) : (
+                            <>
+                              <pre className="max-h-[24rem] overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-mono text-fg-2">
+                                {trashPreview.text || "（这一份是空的）"}
+                              </pre>
+                              {trashPreview.truncated ? (
+                                <div className="border-t border-line px-3 py-1 text-xs text-fg-disabled">
+                                  只显示开头 {预览上限 / 1024} K 个字符；恢复之后能看全文。
+                                </div>
+                              ) : null}
+                            </>
+                          )
+                        ) : (
+                          <div className="px-3 py-2 text-sm text-fg-disabled">正在读取…</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : trash.length > 0 ? (
+                    <p className="mt-6 text-sm text-fg-disabled">点一条看它删之前写了什么。</p>
+                  ) : null}
                 </div>
               ) : (
                 <div
@@ -3127,7 +3581,10 @@ export function App() {
                             </nav>
                             {/* 没有"编辑/完成"了：打开就是可编辑的。管理动作压在右上角，
                               平时半透明，指针靠近或拿到键盘焦点才实——它们不是正文的一部分，
-                              但也不该在用户写字时占住注意力。 */}
+                              但也不该在用户写字时占住注意力。
+                              笔记的删除也要留在这里：侧栏只吃前 300 篇，搜索打开的旧笔记
+                              在树上不一定有行，只靠右键就再也移不进回收站。
+                              目录的删除仍然只从文件树右键进去。 */}
                             <span className="ml-auto flex shrink-0 items-center gap-1 opacity-90 transition-opacity duration-(--dur-1) hover:opacity-100 focus-within:opacity-100">
                               <button
                                 className={btn}
@@ -3142,18 +3599,27 @@ export function App() {
                               <button
                                 className={btn}
                                 onClick={() => {
-                                  setNameDraft(stemOf(selected.rel));
-                                  setMode("rename");
+                                  const 目标 = selected.rel;
+                                  void (async () => {
+                                    // 先落盘再进改名：一切过去，自动保存的定时器会跟着 editing 被清掉，
+                                    // 还没写上的字就只活在内存里，确认改名时再搬文件就丢了。
+                                    if (!(await 备好这篇(目标))) {
+                                      setFlash("这篇还没保存——先处理冲突或错误提示");
+                                      return;
+                                    }
+                                    // 落盘期间可能已经切到别的笔记：别把 A 的文件名套到 B 的正文上
+                                    if (当前rel.current !== 目标) return;
+                                    setNameDraft(stemOf(目标));
+                                    setMode("rename");
+                                  })();
                                 }}
                               >
                                 改名
                               </button>
-                              <button className={btn} onClick={() => void toggleArchive()}>
-                                {selected.rel.startsWith("archive/") ? "取消归档" : "归档"}
-                              </button>
                               <button
-                                className={btn + " text-danger"}
-                                onClick={() => void trashNote()}
+                                className={btnDanger}
+                                onClick={() => void 回收这篇(selected.rel)}
+                                title="移到回收站"
                               >
                                 删除
                               </button>
@@ -3164,12 +3630,19 @@ export function App() {
                       {saveState === "conflict" ? (
                         <div className="mb-4 rounded-md border border-danger bg-danger-soft px-3 py-2 text-sm">
                           这篇在你编辑期间被别处改过（Obsidian、另一个窗口，或同步）。
-                          你写的还在框里，还没保存——选一个：
+                          你写的还在正文里，还没保存——选一个：
                           <div className="mt-3 flex gap-2">
                             <button className={btn} onClick={() => void reloadDisk()}>
                               丢掉我的，用磁盘版本
                             </button>
-                            <button className={btn} onClick={() => void persist(true)}>
+                            <button
+                              className={btn}
+                              onClick={() => {
+                                // 入口处留下的"还没保存"到这里就不成立了，别让它挂着
+                                setFlash(null);
+                                void persist(true);
+                              }}
+                            >
                               仍然存我这份
                             </button>
                           </div>
@@ -3202,7 +3675,7 @@ export function App() {
                             editable={mode === "inline" && !presenting}
                             locked={presenting}
                             onEditStart={() => setMode("inline")}
-                            onEdit={() => setInlineRev((n) => n + 1)}
+                            onEdit={记一稿}
                             onNotice={(文) => setFlash(文)}
                             editApi={editApi}
                             focusBlock={blockFocus}
@@ -3223,6 +3696,7 @@ export function App() {
                         <LinkPanelView
                           panel={links}
                           onOpen={(rel, title) => void openNote(rel, title)}
+                          onCreate={(title) => void createNote(title)}
                         />
                       ) : null}
                       {/* 保存状态挪到右下角，1.5 秒自己消失。它以前是顶栏上的一行常驻文字，

@@ -90,10 +90,26 @@ describe("演示模式的接线", () => {
     expect(主窗).toContain("退演示用.current();");
     expect(主窗).toMatch(/进演示中\.current \|\| presenting/);
     expect(主窗).toContain("presenting || e.repeat");
-    // 待触发的自动保存先撤掉，别和进入前那次 persist 抢同一个 baseHash
+    // 待触发的自动保存先撤掉，别和进入前那次 persist 抢同一个 baseHash。
+    // 撤定时器与落盘的顺序由 `备好这篇` 和 `persist` 入口共同保证，
+    // 这里只确认演示的入口确实走了它。
     expect(主窗).toMatch(
-      /进演示中\.current = true;[\s\S]*?window\.clearTimeout\(saveTimer\.current\)/,
+      /进演示中\.current = true;[\s\S]*?备好这篇\(selected\.rel\)/,
     );
+  });
+
+  it("搬文件前先撤自动保存定时器，再落盘", () => {
+    const 起 = 主窗.indexOf("const 备好这篇");
+    const 段 = 主窗.slice(起, 主窗.indexOf("const 回收这篇", 起));
+    expect(段).toContain("撤自动保存()");
+    expect(段.indexOf("撤自动保存()")).toBeLessThan(段.indexOf("await persist()"));
+  });
+
+  it("显式落盘自己先撤自动保存：切笔记 / 建笔记 / 开面板不必各记一遍", () => {
+    const 起 = 主窗.indexOf("const persist = useCallback");
+    const 段 = 主窗.slice(起, 主窗.indexOf("const 排自动保存", 起));
+    expect(段).toContain("撤自动保存();");
+    expect(段.indexOf("撤自动保存();")).toBeLessThan(段.indexOf('setSaveState("saving")'));
   });
 
   it("键盘只留 Esc / F11 两条出入口，且 Esc 不被别的浮层吞掉", () => {

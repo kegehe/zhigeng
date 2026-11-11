@@ -22,8 +22,8 @@ const 目 = (path: string, depth = 0): DirBranch => ({
 const 键 = (项: 菜单项[]) => 项.flatMap((i) => (i.类 === "动作" ? [i.键] : []));
 
 describe("目录菜单", () => {
-  it("语义顶层三条能建东西，但不给改名/删除（哪怕是空的）", () => {
-    for (const 路径 of ["notes", "inbox", "archive", "Notes"]) {
+  it("语义顶层两条能建东西，但不给改名/删除（哪怕是空的）", () => {
+    for (const 路径 of ["notes", "inbox", "Notes"]) {
       const 项 = 目录菜单(目(路径, 0), true);
       expect(键(项)).toEqual(["建子目录", "建笔记"]);
     }
@@ -47,23 +47,10 @@ describe("目录菜单", () => {
 });
 
 describe("笔记菜单", () => {
-  it("普通笔记给打开/改名/归档/回收，回收是危险项且在最后", () => {
-    const 项 = 笔记菜单("notes/甲.md");
-    expect(键(项)).toEqual(["打开", "改名笔记", "归档", "回收"]);
+  it("普通笔记给打开/改名/回收，回收是危险项且在最后", () => {
+    const 项 = 笔记菜单();
+    expect(键(项)).toEqual(["打开", "改名笔记", "回收"]);
     expect(项.at(-1)).toMatchObject({ 键: "回收", 危险: true });
-  });
-
-  it("已经在归档里的笔记，那一项变成取消归档", () => {
-    const 项 = 笔记菜单("archive/旧事.md");
-    expect(键(项)).toContain("取消归档");
-    expect(键(项)).not.toContain("归档");
-    expect(项.find((i) => i.类 === "动作" && i.键 === "取消归档")).toMatchObject({
-      字样: "取消归档",
-    });
-  });
-
-  it("反斜杠路径也认得出归档", () => {
-    expect(键(笔记菜单("archive\\旧事.md"))).toContain("取消归档");
   });
 });
 
@@ -96,8 +83,11 @@ describe("菜单坐标", () => {
 });
 
 describe("是语义顶层", () => {
-  it("只认库根那三条，子目录同名不算", () => {
+  it("只认库根那两条，子目录同名不算，archive 也不算", () => {
     expect(是语义顶层(目("notes", 0))).toBe(true);
+    expect(是语义顶层(目("inbox", 0))).toBe(true);
     expect(是语义顶层(目("notes/notes", 1))).toBe(false);
+    expect(是语义顶层(目("archive", 0))).toBe(false);
+    expect(是语义顶层(目("Archive", 0))).toBe(false);
   });
 });

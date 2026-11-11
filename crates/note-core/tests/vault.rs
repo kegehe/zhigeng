@@ -46,10 +46,7 @@ fn 扫描排除规则把应用私有目录挡在外面() {
 #[test]
 fn 状态由目录推导而不是frontmatter() {
     assert_eq!(status_of_rel("inbox/x.md"), Some(NoteStatus::Inbox));
-    assert_eq!(
-        status_of_rel("archive/2024/x.md"),
-        Some(NoteStatus::Archived)
-    );
+    assert_eq!(status_of_rel("archive/2024/x.md"), Some(NoteStatus::Active));
     assert_eq!(status_of_rel("notes/x.md"), Some(NoteStatus::Active));
     assert_eq!(status_of_rel(".note/trash/x.md"), None);
     assert_eq!(kind_of_rel("views/待补清单.md"), NoteKind::View);
@@ -129,6 +126,210 @@ fn 回收站移动与恢复() {
     v.restore_from_trash(&trash[0].batch, "notes/a.md").unwrap();
     assert!(v.list_trash().unwrap().is_empty());
     assert_eq!(v.scan().unwrap().len(), 1, "恢复后要重新被扫描到");
+}
+
+#[test]
+fn 回收站预览只读前缀并报告截断() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    let 大 = "a".repeat(2048);
+    touch(&v, "notes/大.md", &大);
+    v.move_to_trash("notes/大.md").unwrap();
+    let t = v.list_trash().unwrap().remove(0);
+
+    let (前缀, 截断) = v.read_from_trash_prefix(&t.batch, &t.rel, 1024).unwrap();
+    assert!(截断);
+    assert_eq!(前缀.len(), 1024, "预览读了超过上限的字节");
+
+    let (全文, 截断) = v.read_from_trash_prefix(&t.batch, &t.rel, 4096).unwrap();
+    assert!(!截断);
+    assert_eq!(全文.len(), 大.len());
+}
+
+#[test]
+fn 回收站记录的是删除时刻而不是文件最后编辑时刻() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    touch(&v, "notes/旧.md", "写于很久以前\n");
+    // 把 mtime 压到 1970 年附近：删除时刻仍应是现在
+    let p = dir.path().join("notes/旧.md");
+    let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+    f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+        .unwrap();
+    drop(f);
+
+    v.move_to_trash("notes/旧.md").unwrap();
+    let t = v.list_trash().unwrap().remove(0);
+    assert!(t.mtime_ms < 1_000_000_000_000, "前置：mtime 应是很久以前");
+    let now = note_core::versions::现在();
+    assert!(
+        (now - t.deleted_ms).abs() < 60_000,
+        "deleted_ms={} 不是删除时刻（now={now}）",
+        t.deleted_ms
+    );
+}
+
+#[test]
+fn 回收站可以永久删除一份且不留空壳() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    std::fs::create_dir_all(dir.path().join("notes/sub")).unwrap();
+    touch(&v, "notes/sub/a.md", "甲\n");
+    touch(&v, "notes/b.md", "乙\n");
+    v.move_to_trash("notes/sub/a.md").unwrap();
+    v.move_to_trash("notes/b.md").unwrap();
+
+    let trash = v.list_trash().unwrap();
+    assert_eq!(trash.len(), 2, "{trash:?}");
+    let a = trash
+        .iter()
+        .find(|t| t.rel == "notes/sub/a.md")
+        .unwrap()
+        .clone();
+    let a_batch = v.meta_dir().join("trash").join(&a.batch);
+    assert!(a_batch.is_dir());
+
+    v.purge_from_trash(&a.batch, &a.rel).unwrap();
+    assert!(!a_batch.exists(), "批次目录空了却还留在盘上");
+    assert!(
+        v.read_from_trash(&a.batch, &a.rel).is_err(),
+        "永久删除之后还能读出正文"
+    );
+    assert_eq!(v.list_trash().unwrap().len(), 1, "另一批不该被一起删掉");
+    assert!(
+        !dir.path().join("notes/sub/a.md").exists(),
+        "永久删除不是恢复，文件不该回到原位"
+    );
+
+    // 来自 UI 的参数照样要过边界校验
+    let b = v.list_trash().unwrap().remove(0);
+    assert!(v.purge_from_trash("..", &b.rel).is_err());
+    assert!(v.purge_from_trash(&b.batch, "../outside.md").is_err());
+}
+
+#[test]
+fn 清空回收站删掉所有批次并报出文件数() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    touch(&v, "notes/a.md", "甲\n");
+    touch(&v, "notes/b.md", "乙\n");
+    v.move_to_trash("notes/a.md").unwrap();
+    v.move_to_trash("notes/b.md").unwrap();
+    // 回收站根上散落的坏档也要清掉：清空不该被读不出来的东西卡住
+    std::fs::write(v.meta_dir().join("trash").join("遗留.md"), "x").unwrap();
+
+    assert_eq!(v.empty_trash().unwrap(), 3);
+    assert!(v.list_trash().unwrap().is_empty());
+    let root = v.meta_dir().join("trash");
+    assert!(root.is_dir(), "根目录要留着，下次删除还要往里放");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+}
+
+/// Windows 上 junction 不需要管理员权限就能建，正好拿来验"链接一律拒绝"。
+/// 建不出来（非 Windows / 系统策略）就跳过，不让环境问题冒充失败。
+#[cfg(windows)]
+#[test]
+fn 回收站根是junction时拒绝清空列举与删除() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    touch(&v, "notes/a.md", "甲\n");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("外面的.md"), "不能动\n").unwrap();
+    std::fs::create_dir_all(v.meta_dir()).unwrap();
+    let link = v.meta_dir().join("trash");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(outside.path())
+        .output()
+        .map(|s| s.status.success())
+        .unwrap_or(false);
+    if !made {
+        eprintln!("跳过：这个环境建不出 junction");
+        return;
+    }
+
+    assert!(v.empty_trash().is_err(), "链接根上不许清空");
+    assert!(v.list_trash().is_err(), "链接根上不许列举");
+    assert!(v.move_to_trash("notes/a.md").is_err(), "链接根上不许入站");
+    assert!(
+        outside.path().join("外面的.md").exists(),
+        "清空/入站动到了链接目标里的文件"
+    );
+    assert!(v.scan().unwrap().iter().any(|f| f.rel == "notes/a.md"));
+}
+
+/// 批次目录本身是链接时：清单不能把链接目标里的文件当成回收件，
+/// 预览 / 永久删除也不能顺着链接作用到库外。
+#[cfg(windows)]
+#[test]
+fn 回收站批次是junction时不列举也拒绝删除() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("外面的.md"), "不能动\n").unwrap();
+    std::fs::create_dir_all(v.meta_dir().join("trash")).unwrap();
+    let link = v.meta_dir().join("trash").join("假批次");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(outside.path())
+        .output()
+        .map(|s| s.status.success())
+        .unwrap_or(false);
+    if !made {
+        eprintln!("跳过：这个环境建不出 junction");
+        return;
+    }
+
+    assert!(v.list_trash().unwrap().is_empty(), "批次链接被列成回收件了");
+    assert!(v.purge_from_trash("假批次", "外面的.md").is_err());
+    assert!(v.read_from_trash("假批次", "外面的.md").is_err());
+    assert!(
+        outside.path().join("外面的.md").exists(),
+        "删除/预览顺着批次链接动到了库外"
+    );
+}
+
+/// 批次目录本身是真的，但里面的 `notes/` 被换成指向库外的 junction：
+/// 预览 / 永久删除都不能顺着它读或删外面的文件。
+#[cfg(windows)]
+#[test]
+fn 批次内部的junction不能把预览和删除带出去() {
+    let dir = tmp_vault();
+    let v = Vault::open(dir.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("外面的.md"), "不能动\n").unwrap();
+    let batch = v.meta_dir().join("trash").join("假批次");
+    std::fs::create_dir_all(&batch).unwrap();
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(batch.join("notes"))
+        .arg(outside.path())
+        .output()
+        .map(|s| s.status.success())
+        .unwrap_or(false);
+    if !made {
+        eprintln!("跳过：这个环境建不出 junction");
+        return;
+    }
+
+    assert!(matches!(
+        v.read_from_trash("假批次", "notes/外面的.md"),
+        Err(note_core::Error::OutsideVault(_))
+    ));
+    assert!(matches!(
+        v.read_from_trash_prefix("假批次", "notes/外面的.md", 1024),
+        Err(note_core::Error::OutsideVault(_))
+    ));
+    assert!(matches!(
+        v.purge_from_trash("假批次", "notes/外面的.md"),
+        Err(note_core::Error::OutsideVault(_))
+    ));
+    assert!(
+        outside.path().join("外面的.md").exists(),
+        "预览/删除顺着批次内部的链接动到了库外"
+    );
 }
 
 #[test]
@@ -251,7 +452,7 @@ fn 保留名与排除名不看大小写() {
     // 的顶层目录，树里从此两行指同一份。
     let 空库 = tempfile::tempdir().unwrap();
     let v = Vault::open(空库.path()).unwrap();
-    for name in ["NOTES", "Notes", "INBOX", "Archive", "Attachments", "VIEWS"] {
+    for name in ["NOTES", "Notes", "INBOX", "Attachments", "VIEWS"] {
         assert!(
             matches!(v.create_dir("", name), Err(note_core::Error::Invalid(_))),
             "{name} 是保留名，大小写不同也不行"
@@ -410,7 +611,7 @@ fn 空目录能改名能删非空一律拒() {
     assert!(!dir.path().join("notes/新名").exists());
 
     // 保留目录既不能改名也不能删；树外目录同样不行
-    for rel in ["notes", "inbox", "archive"] {
+    for rel in ["notes", "inbox"] {
         assert!(matches!(
             v.rename_dir(rel, "别的"),
             Err(note_core::Error::Invalid(_))

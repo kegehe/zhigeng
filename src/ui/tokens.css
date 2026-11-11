@@ -11,15 +11,16 @@
 :root {
   color-scheme: light;
 
-  /* ---- 面（素笺墨字体系，2026-10-27；与铜版画图标同一世界观：暖纸 + 墨字。
-     色值都换算过 WCAG：primary 12.5:1、secondary 5.2:1、accent 11:1（均 raised 上）---- */
-  --bg-base: #f4f2ec; /* 暖纸。正文页、输入框底 */
-  --bg-raised: #faf9f5; /* 卡片/侧栏/浮层。不用纯白（硬规定 1） */
-  /* 沉底色要一眼是"凹下去的一块"：与页面底约 1.16:1。行内码与代码块的骨架屏那档同一条 */
-  --bg-sunken: #edeae0;
-  /* 交互反馈底：raised 上约 1.22:1——侧栏行、工具栏按钮、窗口键 */
-  --bg-hover: #eae7dc;
-  --bg-active: #e1ddd0; /* raised 上约 1.38:1 */
+  /* ---- 面（朱砂纸本体系，2026-11-06；墨白纸本·V1 朱砂。
+     暖纸白 + 墨字 + 朱砂一点红：accent 不再是墨本身，而是批注的朱。
+     色值都换算过 WCAG：primary 17:1、secondary 5.1:1、accent 上白字 5.2:1（均 raised 上）---- */
+  --bg-base: #fafaf7; /* 纸白。正文页、输入框底 */
+  --bg-raised: #fdfcf9; /* 卡片/侧栏/浮层。不用纯白（硬规定 1） */
+  /* 沉底色要一眼是"凹下去的一块"：与页面底约 1.08:1。行内码与代码块的骨架屏那档同一条 */
+  --bg-sunken: #f1f0ea;
+  /* 交互反馈底：raised 上约 1.2:1——侧栏行、工具栏按钮、窗口键 */
+  --bg-hover: #ebe7db;
+  --bg-active: #e0dbcb; /* raised 上约 1.3:1 */
   --bg-backdrop: rgb(42 40 34 / 0.35);
   /* 纸上光晕：静态两层径向渐变（不动画、不滚动），由 base.css 的 .app-bg 取用。
      素笺体系里没有极光蓝——一层极淡的墨晕 + 一层纸光，亮面都压得很低 */
@@ -27,23 +28,24 @@
   --aurora-warm: rgb(186 164 108 / 0.05);
 
   /* ---- 文 ---- */
-  --text-primary: #262a36; /* 墨。raised 上 12.5:1 */
-  --text-secondary: #6d7180; /* raised 上 5.2:1、sunken 上 4.6:1 */
-  --text-disabled: #a3a6b0; /* 豁免位，不得用在真内容上 */
-  --text-on-accent: #faf9f5; /* accent 上 11.6:1 */
+  --text-primary: #1a1a18; /* 墨。raised 上 17:1 */
+  --text-secondary: #6e6c62; /* raised 上 5.1:1、sunken 上 4.6:1 */
+  --text-disabled: #b0aea4; /* 豁免位，不得用在真内容上 */
+  --text-on-accent: #ffffff; /* accent 上 5.2:1 */
 
-  /* ---- 强调与状态（素笺墨字：accent 就是墨本身，零彩色）---- */
-  --accent: #2b2f3d; /* 墨。raised 上 11.4:1（图标 3:1 线 ✓） */
-  --accent-hover: #454b5c;
-  /* 选中态（当前行 / 框住的格子 / ::selection）只有这一层颜色，raised 上 1.24:1 */
-  --accent-soft: rgb(43 47 61 / 0.14);
+  /* ---- 强调与状态（朱砂纸本：accent = 朱批的一点红，深到能扛 AA）---- */
+  --accent: #c43b30; /* 朱砂。raised 上 5.1:1（图标 3:1 线 ✓） */
+  --accent-hover: #a83228;
+  /* 选中态（当前行 / 框住的格子 / ::selection）只有这一层颜色，raised 上约 1.26:1
+     （硬规定 4 要求 ≥1.25，0.14 时实测 1.23，不够） */
+  --accent-soft: rgb(196 59 48 / 0.16);
   /* 整块选中的底要比 soft 淡一档：代码卡本来就有底色，
      压重了就从"这块被选了"变成"这块在发光"。亮面的选中主信号是那条 accent 边，
      淡底只服务暗面——口径与 [06] §硬规定 6 一致 */
-  --accent-faint: rgb(43 47 61 / 0.10);
+  --accent-faint: rgb(196 59 48 / 0.09);
   /* 高亮（`==文字==`）。它**不是**调色板里的一档：用户挑的颜色存在文件里（内联 style），
-     而"高亮"是我们自己的语义色，跟着主题走。亮面纸底上压一层暖黄，别压成荧光笔 */
-  --md-mark: rgb(208 162 62 / 0.32);
+     而"高亮"是我们自己的语义色，跟着主题走。亮面纸底上压一层朱批淡印，别压成荧光笔 */
+  --md-mark: rgb(196 59 48 / 0.16);
   --success: oklch(55% 0.13 155);
   --warning: oklch(66% 0.14 78);
   --danger: oklch(55% 0.2 25);
@@ -51,22 +53,24 @@
   --warning-soft: oklch(66% 0.14 78 / 0.14);
   --danger-soft: oklch(55% 0.2 25 / 0.1);
 
-  /* ---- 代码着色（亮面：饱和度压住，别和正文抢注意力）---- */
-  --code-key: oklch(48% 0.19 295);
-  --code-str: oklch(45% 0.13 152);
-  --code-num: oklch(50% 0.12 62);
-  /* 注释在沉底灰的卡片上，L 58% 实测只有 3.84:1，不过 [06] §2 那条 AA 4.5 的线；压到 50% = 5.37:1 */
-  --code-com: oklch(50% 0.012 260);
-  --code-fn: oklch(52% 0.15 248);
-  --code-type: oklch(48% 0.11 190);
-  --code-tag: oklch(50% 0.19 22);
-  --code-var: oklch(46% 0.09 320);
+  /* ---- 代码着色（亮面：朱砂本 + 松烟绿 + 赭石，全部降饱和，别和正文抢注意力）---- */
+  --code-key: #c43b30;
+  --code-str: #3d6b5e;
+  --code-num: #96561f;
+  /* 注释在沉底灰的卡片上要过 AA 4.5：#6b695e 实测 4.83:1 */
+  --code-com: #6b695e;
+  --code-fn: #34527a;
+  --code-type: #2e6e62;
+  --code-tag: #a3472e;
+  --code-var: #5f5276;
 
   /* ---- 线与环 ---- */
-  /* 亮面下卡片与页面底只差 1.03:1，边界几乎全靠这条线承担 */
-  --border-subtle: #dedacd; /* raised 上约 1.25:1 */
-  --border-strong: #cbc5b4;
-  --focus-ring: rgb(43 47 61 / 0.5);
+  /* 亮面下卡片与页面底只差 1.02:1，边界几乎全靠这条线承担 */
+  --border-subtle: #e3e1d6; /* sunken 上约 1.15:1、raised 上约 1.28:1 */
+  --border-strong: #d6d4c8;
+  /* 焦点环 / 拖拽落位线。WCAG 1.4.11 要求非文本对照 ≥3:1：
+     accent 压 75% 时 raised 上 3.39:1、base 上 3.35:1（0.45 时只有 2.0） */
+  --focus-ring: rgb(196 59 48 / 0.75);
 
   /* ---- 品牌徽标（铜版画知更，public/zhigeng.png；尺寸字面量按 docs/06 §4 只在此登记）---- */
   --icon-brand-bar: 20px; /* 标题栏徽标 */
@@ -90,6 +94,9 @@
      只有正文编辑区读这一档——代码块仍走 `--leading-code`，标题仍走 1.35 */
   --leading-note: var(--leading-body);
   --font-ui: "Inter Variable", "Inter", "Noto Sans SC", system-ui, sans-serif;
+  /* 朱砂纸本：笔记标题与正文标题走衬线（纸上的刻本感）。装了思源宋体/Noto Serif
+     用真衬线，没装落到 SimSun 也不是黑体，气质不塌 */
+  --font-serif: "Source Han Serif SC", "Noto Serif SC", "STZhongsong", SimSun, serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
 
   /* ---- 间距：只用 4px 栅格，出现 13/15px 即为缺陷 ---- */
@@ -165,31 +172,31 @@ html[data-leading="loose"] {
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --bg-base: #24231e; /* 夜墨：暖炭纸底。不是纯黑（硬规定 1），带一点灯下的暖 */
-  --bg-raised: #2c2a24; /* 玻璃卡的实体化：白 5% 叠在 base 上的不透明等价值 */
+  --bg-base: #202124; /* 夜墨：冷纸黑底。不是纯黑（硬规定 1） */
+  --bg-raised: #26282c; /* 玻璃卡的实体化：白 5% 叠在 base 上的不透明等价值 */
   /* 暗面往下沉能拿到的对比很有限（近黑处 WCAG 的 +0.05 吃掉了一切）：
      沉底比 base 更暗一档——"看得见的标记"在暗面一律往上提，
      沉底块的边界一律靠边框（硬规定 5），不靠底色 */
-  --bg-sunken: #1e1d19;
-  --bg-hover: #37352c; /* raised 上约 1.18:1、base 上约 1.36:1 */
-  --bg-active: #403d33; /* raised 上约 1.36:1 */
+  --bg-sunken: #1b1c1f;
+  --bg-hover: #303237; /* raised 上约 1.16:1、base 上约 1.3:1 */
+  --bg-active: #3a3c42; /* raised 上约 1.35:1 */
   --bg-backdrop: rgb(8 8 6 / 0.5);
-  /* 夜里的光晕：右上一点烛光暖晕 + 左下更淡的一层，仍是静态的 */
-  --aurora-cool: rgb(201 162 94 / 0.06);
-  --aurora-warm: rgb(160 130 80 / 0.05);
+  /* 夜里的光晕：右上一点朱烛暖晕 + 左下更淡的一层，仍是静态的 */
+  --aurora-cool: rgb(233 106 88 / 0.05);
+  --aurora-warm: rgb(120 100 70 / 0.04);
 
-  --text-primary: #e6e2d6; /* 纸字。raised 上约 11.5:1 */
-  --text-secondary: #a09c8e; /* raised 上约 5.6:1、sunken 上约 7:1 */
-  --text-disabled: #6f6c60;
-  --text-on-accent: #24231e; /* accent 上约 9:1 */
+  --text-primary: #ecebe6; /* 纸字。raised 上约 12.5:1 */
+  --text-secondary: #9d9b92; /* raised 上约 5.2:1、sunken 上约 6:1 */
+  --text-disabled: #6f6d66;
+  --text-on-accent: #202124; /* accent 上约 5.1:1 */
 
-  --accent: #d9d4c5; /* 纸色即强调。raised 上约 9.4:1 */
-  --accent-hover: #e8e4d8;
-  --accent-soft: rgb(217 212 197 / 0.16); /* raised 上约 1.47:1 */
+  --accent: #e96a58; /* 暗面朱砂：提亮到 raised 上约 4.7:1，过 AA */
+  --accent-hover: #f07f6e;
+  --accent-soft: rgb(233 106 88 / 0.18); /* raised 上约 1.28:1 */
   /* 暗面这一层与 sunken 差约 1.4:1，够；再淡就只剩边了 */
-  --accent-faint: rgb(217 212 197 / 0.12);
-  /* 夜底的同一档高亮：色相不动、透明度再压一点——纸色底上 0.32 的黄在夜底会发亮 */
-  --md-mark: rgb(208 162 62 / 0.26);
+  --accent-faint: rgb(233 106 88 / 0.13);
+  /* 夜底的同一档高亮：色相不动、透明度压一点——深底上重了会发亮 */
+  --md-mark: rgb(233 106 88 / 0.24);
   --success: oklch(72% 0.12 155);
   --warning: oklch(78% 0.12 78);
   --danger: oklch(68% 0.16 25);
@@ -197,19 +204,20 @@ html[data-leading="loose"] {
   --warning-soft: oklch(78% 0.12 78 / 0.16);
   --danger-soft: oklch(68% 0.16 25 / 0.14);
 
-  /* ---- 代码着色（暗面：提亮降饱和，14% 的底上比亮面需要更多明度差）---- */
-  --code-key: oklch(78% 0.14 300);
-  --code-str: oklch(82% 0.12 150);
-  --code-num: oklch(82% 0.11 72);
-  --code-com: oklch(58% 0.014 260);
-  --code-fn: oklch(80% 0.11 240);
-  --code-type: oklch(80% 0.1 186);
-  --code-tag: oklch(76% 0.15 22);
-  --code-var: oklch(82% 0.08 320);
+  /* ---- 代码着色（暗面：朱砂/松烟/赭石提亮降饱和，14% 的底上比亮面需要更多明度差）---- */
+  --code-key: #e88a7e;
+  --code-str: #8fbf9f;
+  --code-num: #dfb06a;
+  --code-com: #87857e;
+  --code-fn: #7fb0e0;
+  --code-type: #6cae94;
+  --code-tag: #e08a63;
+  --code-var: #a795c4;
 
-  --border-subtle: #3a382f; /* raised 上约 1.2:1 */
-  --border-strong: #4c4839;
-  --focus-ring: rgb(217 212 197 / 0.55);
+  --border-subtle: #34363a; /* raised 上约 1.2:1 */
+  --border-strong: #43454b;
+  /* 暗面对照：75% 时 raised 上 3.23:1、base 上 3.45:1（0.55 时只有 2.3） */
+  --focus-ring: rgb(233 106 88 / 0.75);
 
   /* 暗面下阴影要更狠才看得见，但仍靠边框承担主要分隔。影色跟着夜墨家族走 */
   --shadow-1: 0 1px 2px oklch(0% 0 0 / 0.4);
@@ -275,6 +283,7 @@ html[data-leading="loose"] {
   --leading-note: var(--leading-note);
 
   --font-ui: var(--font-ui);
+  --font-serif: var(--font-serif);
   --font-mono: var(--font-mono);
 
   --spacing: 4px;

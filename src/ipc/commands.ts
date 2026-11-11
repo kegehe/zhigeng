@@ -23,6 +23,7 @@ import type {
   DocEditPlan,
   DocEditTurn,
   RewriteResult,
+  TrashPreview,
   TrashRow,
 } from "./types";
 
@@ -54,10 +55,18 @@ export const api = {
   captureText: (text: string, sourceUrl?: string) =>
     invoke<CapturedOut>("capture_text", { text, sourceUrl: sourceUrl ?? null }),
   searchKeyword: (query: string, limit = 20) =>
-    invoke<{ blockId: string; noteId: string; path: string; title: string; snippet: string; score: number }[]>(
-      "search_keyword",
-      { query, limit }
-    ),
+    invoke<
+      {
+        blockId: string;
+        /** 命中块所在的顶层块序号（1-based），打开时直接跳过去 */
+        blockOrdinal: number;
+        noteId: string;
+        path: string;
+        title: string;
+        snippet: string;
+        score: number;
+      }[]
+    >("search_keyword", { query, limit }),
   /** 行内编辑器要的块结构：每块带精确源切片，未改动的块由前端原样回写 */
   noteEditDoc: (rel: string) => invoke<EditDoc>("note_edit_doc", { rel }),
   /** 属性面板：标签 / 属性 / AI 开关，带盘上 hash */
@@ -107,6 +116,14 @@ export const api = {
   dirEmpty: (rel: string) => invoke<boolean>("dir_empty", { rel }),
   noteTrash: (rel: string) => invoke<void>("note_trash", { rel }),
   listTrash: () => invoke<TrashRow[]>("list_trash"),
+  /** 回收站里那一份的正文。预览只读盘，不碰索引；服务端最多回 512 KB */
+  readTrash: (batch: string, rel: string) =>
+    invoke<TrashPreview>("read_trash", { batch, rel }),
+  /** 永久删除回收站里的一份；原位若有同名笔记不受影响 */
+  trashPurge: (batch: string, rel: string) =>
+    invoke<void>("trash_purge", { batch, rel }),
+  /** 清空回收站，返回删掉的文件数 */
+  trashEmpty: () => invoke<number>("trash_empty"),
   noteRestore: (batch: string, rel: string) =>
     invoke<void>("note_restore", { batch, rel }),
   /** 备份：设目录（path=null + disabled=true 是"我不备份"），返回新的 app_info */

@@ -24,10 +24,9 @@ export type AppInfo = {
   vaultPath: string | null;
   indexNotes: number;
   schemaVersion: number;
-  /** 备份三态：目录 / 显式关掉 / 还没引导过（界面据此决定要不要提醒） */
+  /** 备份三态由目录 / 显式关掉推出（`判备份` 是唯一判据） */
   backupDir: string | null;
   backupDisabled: boolean;
-  backupUnconfigured: boolean;
   backupLastAt: string | null;
 };
 
@@ -84,7 +83,7 @@ export type LinkRow = {
   /** 对方笔记的路径；悬空出链没有对方，是空串 */
   rel: string;
   title: string;
-  /** active / inbox / archived；悬空出链是 "missing" */
+  /** active / inbox；悬空出链是 "missing" */
   status: string;
   /** 发起这条链的块的文字（已剥语法） */
   snippet: string;
@@ -168,7 +167,16 @@ export type TrashRow = {
   batch: string;
   rel: string;
   size: number;
+  /** 文件最后编辑时间（rename 会保留 mtime） */
   updatedMs: number;
+  /** 移进回收站的时刻；旧批次解析不出时才等于 updatedMs */
+  deletedMs: number;
+};
+
+/** 回收站预览：服务端最多读 512 KB，`truncated` 表示后面还有 */
+export type TrashPreview = {
+  content: string;
+  truncated: boolean;
 };
 
 export type CommandName =
@@ -177,6 +185,9 @@ export type CommandName =
   | "hide_capture"
   | "list_notes"
   | "list_trash"
+  | "read_trash"
+  | "trash_purge"
+  | "trash_empty"
   | "dir_list"
   | "dir_create"
   | "dir_rename"

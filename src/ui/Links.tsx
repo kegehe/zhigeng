@@ -1,34 +1,51 @@
 import type { LinkPanel, LinkRow } from "../ipc/types";
 import { 面板判定 } from "./backlinks";
+import { btn } from "./controls";
 
 /**
  * 反链面板：正文下面那两段——谁链到我，以及我链到谁（含链空的）。
  *
- * 五条口径：
+ * 四条口径：
  * 1. **空了就不占位**。两半都空时整个面板不出现，正文下面不该永远挂两个空标题。
  * 2. **按对方分组**。真库里有一篇把同一个 `[[悬空写法]]` 重复了几十次（长文档性能夹具），
  *    不分组就是一屏重复行；Obsidian 也是按来源笔记归并的。
  * 3. **悬空的那条排前并且带原文**。面板要说的正是"这篇链到了一个不存在的东西"，
- *    `target` 就是为此才进 `links` 表（schema v3）的。它没有可打开的笔记，所以不做成按钮。
- * 4. 归档的来源照收，但标出来。归档是"不主动想起它"，不是"它不存在"。
- * 5. **资产链接（`![[…]]`）说的是盘上的事实**：图在 `attachments/` 里就写"附件在库内"，
+ *    `target` 就是为此才进 `links` 表（schema v3）的。它没有可打开的笔记，所以行本身
+ *    不做成按钮；但**笔记写法**给一个"新建这篇并打开"的入口——那是用户此刻唯一想做的事，
+ *    让他自己去建一篇再回来等于把这条提示变成一句废话。资产写法不给：见第 4 条。
+ * 4. **资产链接（`![[…]]`）说的是盘上的事实**：图在 `attachments/` 里就写"附件在库内"，
  *    真没了才写"文件丢了"。哪一档都不许点开成一篇笔记——它没有对方笔记。
  *    "在不在"由后端查盘算（`note_core::assets::exists`），这儿只负责措辞（`面板判定`）。
  */
 export function LinkPanelView({
   panel,
   onOpen,
+  onCreate,
 }: {
   panel: LinkPanel;
   onOpen: (rel: string, title: string) => void;
+  /** 悬空的笔记写法就地补一篇。参数是用户写下的原文（`target`），也是新笔记的标题 */
+  onCreate: (title: string) => void;
 }) {
   const 入 = 分组(panel.incoming);
   const 出 = 分组(panel.outgoing);
   if (!入.length && !出.length) return null;
   return (
     <section className="mt-10 flex flex-col gap-5 border-t border-line pt-4">
-      <LinkGroup label="反向链接" rows={入} 截断={panel.incomingTruncated} onOpen={onOpen} />
-      <LinkGroup label="我链接到的" rows={出} 截断={panel.outgoingTruncated} onOpen={onOpen} />
+      <LinkGroup
+        label="反向链接"
+        rows={入}
+        截断={panel.incomingTruncated}
+        onOpen={onOpen}
+        onCreate={onCreate}
+      />
+      <LinkGroup
+        label="我链接到的"
+        rows={出}
+        截断={panel.outgoingTruncated}
+        onOpen={onOpen}
+        onCreate={onCreate}
+      />
     </section>
   );
 }
@@ -62,12 +79,14 @@ function LinkGroup({
   rows,
   截断,
   onOpen,
+  onCreate,
 }: {
   label: string;
   rows: 面板行[];
   /** 后端多取一条探到的"还有没有"。不说就等于把截断藏起来 */
   截断?: boolean;
   onOpen: (rel: string, title: string) => void;
+  onCreate: (title: string) => void;
 }) {
   if (!rows.length) return null;
   return (
@@ -80,56 +99,73 @@ function LinkGroup({
         {rows.map((g) => {
           const l = g.row;
           const 判 = 面板判定(l);
+          // 两种行共用这一块：可点的是一枚整行按钮，悬空的笔记写法是一块带新建入口的卡片
+          const 框 =
+            "block w-full rounded-md border px-3 py-2 text-left text-sm transition-colors duration-(--dur-1) ";
+          const 内 = (
+            <>
+              <span className="flex items-baseline gap-2">
+                <span className="min-w-0 flex-1 truncate text-fg">{l.title}</span>
+                {g.次数 > 1 ? (
+                  <span className="shrink-0 font-mono text-xs text-fg-2">×{g.次数}</span>
+                ) : null}
+                {判.尾注 ? (
+                  <span
+                    className={
+                      "shrink-0 text-xs " + (判.标红 ? "text-danger" : "text-fg-2")
+                    }
+                  >
+                    {判.尾注}
+                  </span>
+                ) : null}
+                {g.全到块 ? (
+                  <span className="shrink-0 text-xs text-fg-2">到块</span>
+                ) : null}
+                {l.status === "inbox" ? (
+                  <span className="shrink-0 text-xs text-fg-2">待整理</span>
+                ) : null}
+              </span>
+              {(() => {
+                // 资产行的标题已经是那个路径了，再抄一遍就是两行一样的字
+                const 副 = 判.是资产
+                  ? (l.rel === l.title ? "" : l.rel)
+                  : l.broken
+                    ? `[[${l.target}]]`
+                    : l.snippet || l.rel;
+                return 副 ? (
+                  <span className="mt-1 block truncate text-xs text-fg-2">{副}</span>
+                ) : null;
+              })()}
+            </>
+          );
           return (
             <li key={g.key}>
-              <button
-                // 悬空的那条没有笔记可开，资产那一条开的不是笔记。
-                // 给它一个"点了没反应"的按钮比不给按钮更坏
-                disabled={!判.可打开}
-                onClick={() => onOpen(l.rel, l.title)}
-                className={
-                  "block w-full rounded-md border px-3 py-2 text-left text-sm transition-colors duration-(--dur-1) " +
-                  (判.标红
-                    ? "cursor-default border-danger bg-danger-soft"
-                    : "border-line hover:bg-hover focus-visible:border-accent")
-                }
-              >
-                <span className="flex items-baseline gap-2">
-                  <span className="min-w-0 flex-1 truncate text-fg">{l.title}</span>
-                  {g.次数 > 1 ? (
-                    <span className="shrink-0 font-mono text-xs text-fg-2">×{g.次数}</span>
-                  ) : null}
-                  {判.尾注 ? (
-                    <span
-                      className={
-                        "shrink-0 text-xs " + (判.标红 ? "text-danger" : "text-fg-2")
-                      }
-                    >
-                      {判.尾注}
-                    </span>
-                  ) : null}
-                  {g.全到块 ? (
-                    <span className="shrink-0 text-xs text-fg-2">到块</span>
-                  ) : null}
-                  {l.status === "archived" ? (
-                    <span className="shrink-0 text-xs text-fg-2">已归档</span>
-                  ) : null}
-                  {l.status === "inbox" ? (
-                    <span className="shrink-0 text-xs text-fg-2">待整理</span>
-                  ) : null}
-                </span>
-                {(() => {
-                  // 资产行的标题已经是那个路径了，再抄一遍就是两行一样的字
-                  const 副 = 判.是资产
-                    ? (l.rel === l.title ? "" : l.rel)
-                    : l.broken
-                      ? `[[${l.target}]]`
-                      : l.snippet || l.rel;
-                  return 副 ? (
-                    <span className="mt-1 block truncate text-xs text-fg-2">{副}</span>
-                  ) : null;
-                })()}
-              </button>
+              {判.可新建 ? (
+                <div className={框 + "border-danger bg-danger-soft"}>
+                  {内}
+                  <button
+                    type="button"
+                    onClick={() => onCreate(l.target)}
+                    className={btn + " mt-2"}
+                  >
+                    新建这篇并打开
+                  </button>
+                </div>
+              ) : (
+                <button
+                  // 资产那一条开的不是笔记，悬空又补不了的也不该做成一枚"点了没反应"的按钮
+                  disabled={!判.可打开}
+                  onClick={() => onOpen(l.rel, l.title)}
+                  className={
+                    框 +
+                    (判.标红
+                      ? "cursor-default border-danger bg-danger-soft"
+                      : "border-line hover:bg-hover focus-visible:border-accent")
+                  }
+                >
+                  {内}
+                </button>
+              )}
             </li>
           );
         })}

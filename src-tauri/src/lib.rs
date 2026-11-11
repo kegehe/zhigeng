@@ -9,7 +9,7 @@ use note_core::meta_edit::{MetaPatch, MetaView};
 use note_core::service::{
     apply_external, reindex_captured, reindex_moved, reindex_note, snapshot_vault, unindex,
     AppInfo, EditDoc, HitRow, Hub, LinkPanel, NoteDetail, NoteList, NoteSource, SnapshotRow,
-    TrashRow,
+    TrashPreview, TrashRow,
 };
 use note_core::vault::Vault;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -87,6 +87,9 @@ fn werr(e: note_core::Error) -> WriteErr {
         note_core::Error::Conflict(_) => "conflict",
         note_core::Error::Unavailable(_) => "unavailable",
         note_core::Error::EmptyAnswer(_) => "empty-answer",
+        // 回收站的"这一条已经不在了"是正常结果（别处删掉了 / 双击了两次），
+        // 界面不该把它当成一次失败喊出来。
+        note_core::Error::NotFound(_) => "not-found",
         _ => "error",
     };
     WriteErr {
@@ -139,6 +142,25 @@ fn reindex_async<F>(app: AppHandle, rels: Vec<String>, job: F)
 where
     F: FnOnce(&Vault, &Index) -> note_core::Result<()> + Send + 'static,
 {
+    reindex_async_with(app, rels, job, false);
+}
+
+/// 速记窗的索引回执。**必须带 `rel`**：事件没有别的关联 id，两笔速记挨得近时
+/// 只靠"路径列表 / 空数组"分不清是谁的。`ok=false` 就是这篇没补上索引。
+#[derive(Clone, serde::Serialize)]
+struct CaptureIndexed {
+    rel: String,
+    ok: bool,
+}
+
+/// 同 `reindex_async`；`capture_event` 为真时额外发一条速记专用事件。
+///
+/// 速记窗必须听自己的事件：`note://indexed` 的空数组可能是**任何**窗口、任何一篇
+/// 补索引失败，速记窗拿着它去对刚存的那一条，就会把别人的失败算到自己头上。
+fn reindex_async_with<F>(app: AppHandle, rels: Vec<String>, job: F, capture_event: bool)
+where
+    F: FnOnce(&Vault, &Index) -> note_core::Result<()> + Send + 'static,
+{
     tauri::async_runtime::spawn_blocking(move || {
         let handles = app
             .state::<Shared>()
@@ -146,15 +168,39 @@ where
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|h| (h.vault().clone(), h.indexer())));
+        let 速记rel = rels.first().cloned().unwrap_or_default();
         let done: Vec<String> = match handles {
             Some((vault, bg)) => match bg.lock() {
-                Ok(index) if job(&vault, &index).is_ok() => rels,
-                _ => Vec::new(),
+                Ok(index) => match job(&vault, &index) {
+                    Ok(()) => rels,
+                    Err(e) => {
+                        // 空名单就是"没补上"（收尾那个 emit）：速记窗据此提醒用户。
+                        // 日志也留一条——失败不能只活在界面的一行小字里。
+                        log::warn!("后台补索引失败（这些篇暂时搜不到）：{e}");
+                        Vec::new()
+                    }
+                },
+                Err(e) => {
+                    log::warn!("后台补索引跳过：索引那条连接被毒化（{e}）");
+                    Vec::new()
+                }
             },
-            None => Vec::new(),
+            None => {
+                log::warn!("后台补索引跳过：Vault 未打开");
+                Vec::new()
+            }
         };
-        // 前端靠它把"已存"变成"已可搜"；失败时下次 reindex 会兜底
-        let _ = app.emit("note://indexed", done);
+        // 通用事件：主窗列表 / 反链面板 / 正文重装载都靠它；空数组 = 失败
+        if capture_event {
+            let ok = !done.is_empty();
+            let _ = app.emit("note://indexed", done);
+            let _ = app.emit(
+                "note://capture-indexed",
+                CaptureIndexed { rel: 速记rel, ok },
+            );
+        } else {
+            let _ = app.emit("note://indexed", done);
+        }
     });
 }
 
@@ -250,6 +296,46 @@ fn snapshot_daily(app: AppHandle) {
     });
 }
 
+/// 清扫版本历史：`manual` 超保留上限的快照与没人指着的 blob。
+///
+/// **启动后跑，不挡启动**：`清孤儿` 要遍历整个 `.note/versions/`，每篇最多留
+/// 上百份，用久了是成千上万个文件；放在开库那一刻会把冷启动明显拖长，而不扫
+/// 也不影响正确性（多几份快照只是占盘）。
+///
+/// 清扫走一条**自己的连接**：后台那条正在补索引，清扫不该排在它后面，
+/// 更不该把后台连接锁住整趟。失败只记日志，不当成用户可见的错误。
+fn cleanup_versions_async(app: AppHandle) {
+    let bg = match app
+        .state::<Shared>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|h| h.indexer()))
+    {
+        Some(bg) => bg,
+        None => return, // 还没选库，没什么可扫
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        // 只借后台锁一瞬开一条新连接；清扫本身不占那把锁。
+        let 连接 = match bg.lock() {
+            Ok(g) => match g.fork() {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("清扫版本历史：开不出独立连接，跳过：{e}");
+                    return;
+                }
+            },
+            Err(_) => return,
+        };
+        match note_core::versions::清扫(&连接) {
+            Ok((删行, 删文件)) => {
+                log::debug!("清扫版本历史：删 {删行} 条超额快照、{删文件} 个残留文件");
+            }
+            Err(e) => log::warn!("清扫版本历史失败：{e}"),
+        }
+    });
+}
+
 /// 取后台任务的句柄：`Vault` 克隆 + 索引那条独立连接。
 /// **只在取句柄的一瞬锁主锁**——拿着主锁做长任务就是上一版"保存后读命令等 3.26 秒"的病。
 fn bg_handles(
@@ -295,7 +381,11 @@ async fn import_apply(app: AppHandle, src: String) -> Result<ImportReport, Strin
     .await
     .map_err(|e| e.to_string())??;
     let rels = report.notes.clone();
-    let _ = handle.emit("note://indexed", rels);
+    // 一篇都没导入 = 盘上什么都没变，不必广播。更重要的是：空数组在速记窗那边
+    // 是"后台补索引失败"的信号，不能让"导入 0 篇"冒充失败去误伤刚存的那一条。
+    if !rels.is_empty() {
+        let _ = handle.emit("note://indexed", rels);
+    }
     Ok(report)
 }
 
@@ -517,9 +607,12 @@ fn capture_text(
     })?;
     let rel = cap.rel.clone();
     let content = cap.content.clone();
-    reindex_async(app, vec![rel.clone()], move |vault, index| {
-        reindex_captured(vault, index, &rel, &content)
-    });
+    reindex_async_with(
+        app,
+        vec![rel.clone()],
+        move |vault, index| reindex_captured(vault, index, &rel, &content),
+        true,
+    );
     Ok(cap)
 }
 
@@ -687,6 +780,8 @@ fn vault_open(
     *state.0.lock().map_err(|e| e.to_string())? = Some(hub);
     *state.1.lock().map_err(|e| e.to_string())? = watcher;
     write_last_vault(&app, std::path::Path::new(&path));
+    // 换库之后同样在后台扫一次；开库同步路径上没有它。
+    cleanup_versions_async(app.clone());
     Ok(info)
 }
 
@@ -826,6 +921,29 @@ fn note_trash(app: AppHandle, state: State<'_, Shared>, rel: String) -> Result<(
 #[tauri::command]
 fn list_trash(state: State<'_, Shared>) -> Result<Vec<TrashRow>, String> {
     with_hub(&state, |h| h.list_trash())
+}
+
+/// 回收站里那一份的正文。面板要在恢复前让人看清删的是哪一版。
+/// 只回前 512 KB（带截断标记），大文件不整份过 IPC。
+#[tauri::command]
+fn read_trash(
+    state: State<'_, Shared>,
+    batch: String,
+    rel: String,
+) -> Result<TrashPreview, String> {
+    with_hub(&state, |h| h.read_trash(&batch, &rel))
+}
+
+/// 永久删除回收站里的一份。只动 `.note/trash/`，不动索引与原位。
+#[tauri::command]
+fn trash_purge(state: State<'_, Shared>, batch: String, rel: String) -> Result<(), WriteErr> {
+    with_hub_write(&state, |h| h.note_purge(&batch, &rel))
+}
+
+/// 清空回收站，返回删掉的文件数。
+#[tauri::command]
+fn trash_empty(state: State<'_, Shared>) -> Result<u64, WriteErr> {
+    with_hub_write(&state, |h| h.empty_trash())
 }
 
 #[tauri::command]
@@ -1292,6 +1410,9 @@ pub fn run() {
             note_move,
             note_trash,
             list_trash,
+            read_trash,
+            trash_purge,
+            trash_empty,
             note_restore,
             backup_set,
             backup_run,
@@ -1326,6 +1447,8 @@ pub fn run() {
                         // 当日还没快照过就补一次（docs/03 §备份）。放在这里而不是
                         // 定时器：规格要的是"当日首次启动后"，不是固定钟点。
                         snapshot_daily(handle.clone());
+                        // 版本历史的清扫同理：界面起来之后在后台跑，不占启动时间。
+                        cleanup_versions_async(handle.clone());
                     }
                     Err(e) => log::warn!("打开上次 Vault 失败 {p:?}: {e}"),
                 }

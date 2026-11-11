@@ -543,22 +543,49 @@ impl Index {
     /// **匹配式与召回共用一份**（`retrieve::匹配式`：各词 OR + 丢高频词）。分成两份的代价
     /// 真机照出来过：同一次搜索里侧栏上面说"没有匹配的笔记"，下面的合并块说这一篇"两路都中"
     /// ——因为一份是短语语义、一份是 OR 语义。
+    ///
+    /// **一篇只交一块（它自己最好的那块）**：`limit` 数的是**篇**，不是块。原来按块截断，
+    /// 一篇 3000 块的长文命中同一个词几十次就能把 30 条结果全占了，侧栏按篇去重之后
+    /// 只剩它一行，别的笔记一条都不显示、也没有"还有更多"的提示。配额在这里做而不是
+    /// 丢给界面：界面拿到的是已经被截断的数组，它再怎么去重也变不出被挤掉的那些篇。
+    /// 这也与召回的 `每篇配额` 同一条口径——关注的是"找到哪些篇"，不是"哪几块出现了"。
     pub fn search_keyword(&self, query: &str, limit: usize) -> Result<Vec<KeywordHit>> {
         let Some(match_expr) =
             crate::retrieve::匹配式(&self.conn, "blocks_fts", "blocks", query)?
         else {
             return Ok(Vec::new());
         };
+        // FTS5 的隐藏列 `rank` 默认就是 bm25 分数，而它**能在 GROUP BY / 窗口函数里用**；
+        // `bm25(blocks_fts)` 不行（会报 "unable to use function bm25 in the requested context"）。
+        // 所以一篇取自己最好的那块就落成一次 `GROUP BY b.note_id` + `MIN(rank)`：
+        // SQL 保证查询里只有一个 min()/max() 聚合时，其它裸列（b.id、b.text、n.*）取自
+        // 那个最小值所在的行——正好是"这篇最相关的一块"。一条语句、一次分组，不再把
+        // 全部命中的宽行物化一遍再去排名。
+        // `block_ordinal` 是**顶层块序号**，不是 `blocks.ordinal`（全树 preorder）：
+        // 编辑器只装顶层块，嵌套子项在父块的 `raw` 里。命中的若是列表子项，落点应是
+        // 它所在的那一整块——所以数 `parent_id IS NULL` 且 ordinal 不超过它的那些块。
+        // 同一套算式在 `retrieve::取详情` 里也有一份（引用落点用），两处口径必须一致。
         let mut stmt = self.conn.prepare(
-            "SELECT b.id, b.note_id, substr(b.text,1,120), bm25(blocks_fts), n.path, n.title, b.type, n.status
-             FROM blocks_fts f
-             JOIN blocks b ON b.rowid = f.rowid
-             JOIN notes  n ON n.id = b.note_id
-             WHERE blocks_fts MATCH ?1
-               AND n.ai_private = 0 AND n.no_ai = 0
-               AND n.status <> 'archived'
-             ORDER BY bm25(blocks_fts)
-             LIMIT ?2",
+            "SELECT g.block_id, g.note_id, g.snippet, g.score, g.path, g.title, g.kind, g.status,
+                    (SELECT COUNT(*) FROM blocks b2
+                      WHERE b2.note_id = g.note_id AND b2.parent_id IS NULL
+                        AND b2.ordinal <= sb.ordinal) AS block_ordinal
+             FROM (
+                 SELECT b.id AS block_id, b.note_id AS note_id,
+                        substr(b.text,1,120) AS snippet, MIN(rank) AS score,
+                        n.path AS path, n.title AS title,
+                        b.type AS kind, n.status AS status
+                 FROM blocks_fts f
+                 JOIN blocks b ON b.rowid = f.rowid
+                 JOIN notes  n ON n.id = b.note_id
+                 WHERE blocks_fts MATCH ?1
+                   AND n.ai_private = 0 AND n.no_ai = 0
+                 GROUP BY b.note_id
+                 ORDER BY score, n.path
+                 LIMIT ?2
+             ) g
+             JOIN blocks sb ON sb.id = g.block_id
+             ORDER BY g.score, g.path",
         )?;
         let rows = stmt.query_map(params![match_expr, limit as i64], |r: &Row| {
             Ok(KeywordHit {
@@ -570,9 +597,10 @@ impl Index {
                 title: r.get(5)?,
                 kind: r.get(6)?,
                 status: r.get(7)?,
+                block_ordinal: r.get(8)?,
             })
         })?;
-        Ok(rows.filter_map(|x| x.ok()).collect())
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// 各表行数，用于"增量结果 == 全量重建结果"的逐表 diff。
@@ -689,6 +717,8 @@ impl RebuildStats {
 #[derive(Debug, Clone)]
 pub struct KeywordHit {
     pub block_id: String,
+    /// 命中块所在的**顶层块**序号（1-based），界面靠它把搜索落点接上引用那一套定位
+    pub block_ordinal: i64,
     pub note_id: String,
     pub snippet: String,
     pub score: f64,
@@ -1437,7 +1467,6 @@ fn status_str(s: NoteStatus) -> &'static str {
     match s {
         NoteStatus::Inbox => "inbox",
         NoteStatus::Active => "active",
-        NoteStatus::Archived => "archived",
     }
 }
 
@@ -1474,6 +1503,14 @@ pub fn segment(text: &str) -> String {
 // 读侧查询：服务层与 UI 用的窄接口。都是单表查询，预算 8ms（G6）。
 // ---------------------------------------------------------------------------
 
+/// 侧栏列表的查询。抽成常量是为了让测试能拿**同一份 SQL** 钉查询计划：
+/// `notes_recent_idx` 的表达式必须与这里的 ORDER BY 逐字一致，否则排序会退回
+/// 整表扫描 + 临时 B 树（保存后每次刷新都要白排一遍全库）。
+pub const LIST_NOTES_SQL: &str = "SELECT path, title, status, note_kind, updated_at
+     FROM notes
+     ORDER BY (note_kind='view'), updated_at DESC
+     LIMIT ?1";
+
 impl Index {
     pub fn count_notes(&self) -> Result<i64> {
         Ok(self
@@ -1491,12 +1528,7 @@ impl Index {
 
     /// 笔记列表：默认按更新时间倒序。视图定义排在最后（它不是内容）。
     pub fn list_notes(&self, limit: usize) -> Result<Vec<crate::service::NoteRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path, title, status, note_kind, updated_at
-             FROM notes 
-             ORDER BY (note_kind='view'), updated_at DESC
-             LIMIT ?1",
-        )?;
+        let mut stmt = self.conn.prepare(LIST_NOTES_SQL)?;
         let rows = stmt.query_map([limit as i64], |r: &Row| {
             Ok(crate::service::NoteRow {
                 rel: r.get(0)?,
@@ -1535,15 +1567,13 @@ impl Index {
 
     /// 一篇的链接图两半：**入链**（谁链到我）与**出链**（我链到谁，含悬空的）。
     ///
-    /// 三条口径：
+    /// 两条口径：
     /// - 视图文件（`note_kind='view'`）不进出链的对方，也不当入链的来源。它不是笔记，
     ///   把它列进面板等于把"查询定义"混进"我的笔记"。
-    /// - **归档的照收，但带着 `status`**。归档是"不主动想起它"，不是"它不存在"——
-    ///   一条来自归档笔记的入链是真结构，藏起来会让面板说谎。界面按状态淡化。
     /// - 悬空出链没有 `to_note`，此时 `target`（用户写下的原文）是唯一还能显示的信息，
     ///   所以 schema v3 把它抄进了 `links`。面板要说的正是"这篇链到了一个不存在的东西"。
     ///
-    /// **第四条：资产链接的存在性在这里现算**（`assets::exists`，docs/02 §资产引用格式）。
+    /// **第三条：资产链接的存在性在这里现算**（`assets::exists`，docs/02 §资产引用格式）。
     /// `links.broken` 里资产那一档是索引期算的缓存，只用来排序；屏幕上那句话以此刻的盘为准。
     /// `to_note` 告诉前端这一行的对方是不是一篇笔记——`[[notes/乙.md]]` 的 `kind` 也是
     /// `asset`（写法里有点），但它该能点开，而 `![[attachments/…]]` 不该。

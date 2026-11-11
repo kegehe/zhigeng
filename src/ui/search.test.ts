@@ -120,6 +120,22 @@ describe("这一趟走了哪几路", () => {
   });
 });
 
+describe("点搜索结果落到命中的那一块", () => {
+  /**
+   * 搜索两条路（关键词 / 检索补充）都拿到了顶层块序号，点开却只把整篇从头显示，
+   * 等于"知道命中在哪却不用"。这条用例钉的是**两端都接上**：命中带 ordinal、
+   * 打开时把它交出去——只接一半（比如映射里漏了字段）就红。
+   */
+  it("关键词那一条把 blockOrdinal 带进侧栏行并交给 openNote", () => {
+    expect(界面源).toContain("ordinal: h.blockOrdinal");
+    expect(界面源).toContain("openNote(n.rel, n.title, n.ordinal)");
+  });
+
+  it("检索补充那一条同样带着 blockOrdinal", () => {
+    expect(界面源).toContain("openNote(h.path, h.title, h.blockOrdinal)");
+  });
+});
+
 describe("侧栏那块的名字", () => {
   it("不配 Key 也出现：面板不再被 ai就绪 挡着", () => {
     // 链接那一路是本地路。用 ai就绪 挡着它，等于把唯一人人都有的一路藏起来

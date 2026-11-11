@@ -112,6 +112,8 @@
   .prose-note h1,
   .prose-note h2,
   .prose-note h3 {
+    /* 朱砂纸本：正文标题走衬线（--font-serif），纸上的刻本感；UI 层仍是黑体 */
+    font-family: var(--font-serif);
     margin: var(--gap-h-top) 0 var(--gap-h-bottom);
     line-height: 1.35;
     text-wrap: balance;
@@ -169,7 +171,9 @@
   .prose-note blockquote {
     margin: 0 0 var(--gap-para);
     padding-inline-start: var(--space-4);
-    border-inline-start: 3px solid var(--border-strong);
+    /* 朱批引用：左线即 accent，一眼与普通段落分层（原为 border-strong） */
+    border-inline-start: 3px solid var(--accent);
+    font-family: var(--font-serif);
     color: var(--text-secondary);
   }
 
@@ -317,7 +321,7 @@
     margin: 0 0 var(--gap-para);
     padding: 0 0 0 var(--space-4);
     border: none;
-    border-inline-start: 3px solid var(--border-strong);
+    border-inline-start: 3px solid var(--accent);
     border-radius: 0;
     background: none;
     color: var(--text-secondary);
@@ -572,6 +576,18 @@
   .block-editor .md-view .callout[data-callout="info"] {
     background: var(--accent-soft);
     border-color: var(--accent);
+  }
+  /*
+   * Callout 的底是语义色淡染。`--text-secondary` 压上去只有 4.1–4.5:1（warning / danger
+   * 那一档更浅），正文、类型牌与链接一律用主文字色；accent 只留下划线与左边线。
+   */
+  .prose-note .callout,
+  .prose-note .callout .cal-badge {
+    color: var(--text-primary);
+  }
+  .prose-note .callout a {
+    color: var(--text-primary);
+    text-decoration-color: var(--accent);
   }
   .block-editor .md-view .mdtable {
     inline-size: 100%;
@@ -869,14 +885,17 @@
    * 整块选中（点到卡片头那一行 / 行号栏 / 块自己的内边距）。标记是 `OpaqueView.selectNode`
    * 写的 `data-md-sel`——与图片卡同一个属性名，同一副样子。
    *
-   * **[06] §2 那条"选中态要比未选中态重一档"在这里落地，但主信号是边、不是底**：
-   * 底色只比未选中的 sunken 淡淡抬一档（`--accent-faint`，暗面 1.31:1、亮面 1.15:1），
-   * 因为代码卡本身就有底色，压重了就从"这块被选了"变成"这块在发光"。
-   * 真正两个主题都成立的是那条 accent 边（暗 9.9:1 / 亮 3.7:1），再加一圈 inset 描边
-   * 照顾没有边框的那些变体（引用 / 公式的源文本形）。
+   * **[06] §2 那条"选中态要比未选中态重一档"在这里落地，但主信号是边、不是底**。
+   * 代码卡自带宽边盒子，再叠 accent 底 + inset 描边就是三层压在一大片面积上，
+   * 真机上看是"整块在发光"而不是"这块被选了"（2026-11-10 复查）——所以它只换边色，
+   * 与图片卡同一档。没有边框的那几种变体（公式 / 引用面）才需要那圈 inset 描边，
+   * 否则选中了屏幕上什么都没变；淡染也只留给他们。
    * 加粗边框（1px→2px）会把块里的内容顶偏一两个像素，与图片卡那条同一判据：不改几何。
    */
-  .block-editor .md-opaque[data-md-sel] {
+  .block-editor .md-opaque[data-md-code][data-md-sel] {
+    border-color: var(--accent);
+  }
+  .block-editor .md-opaque[data-md-sel]:not([data-md-code]) {
     background: var(--accent-faint);
     border-color: var(--accent);
     box-shadow: inset 0 0 0 1px var(--accent);
@@ -997,8 +1016,15 @@
     font-family: var(--font-mono);
     font-size: var(--text-sm);
   }
+  /*
+   * `--accent` 文字压在 `--accent-soft` 底上只有 4.03 / 3.66:1，过不了正文 AA 4.5。
+   * 文字改用主文字色（13.4 / 9.6:1），accent 留给下划线与 chip 底色——链接身份仍明确。
+   */
   .block-editor .md-view .wikilink {
-    color: var(--accent);
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-decoration-color: var(--accent);
+    text-underline-offset: 2px;
     background: var(--accent-soft);
     border-radius: var(--radius-sm);
     padding-inline: var(--space-1);
@@ -1250,7 +1276,7 @@
     display: flex;
     flex: none;
     justify-content: flex-end;
-    gap: 2px;
+    gap: var(--space-1);
     padding: var(--space-1) var(--space-2) 0;
   }
   .ai-dock-ic {
@@ -1263,22 +1289,18 @@
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-secondary);
-    opacity: 0.7;
     cursor: pointer;
     transition:
       background-color var(--dur-1),
-      color var(--dur-1),
-      opacity var(--dur-1);
+      color var(--dur-1);
   }
   .ai-dock-ic:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
-    opacity: 1;
   }
   .ai-dock-ic.on {
     background: var(--bg-active);
     color: var(--accent);
-    opacity: 1;
   }
   .ai-dock-ic svg {
     width: 0.8125rem;
@@ -1429,7 +1451,7 @@
   .ai-doc-plan-list li {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     font-size: var(--text-xs);
     line-height: var(--leading-ui);
   }
@@ -1520,7 +1542,7 @@
   .ai-dock-sel {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--space-1);
     max-height: 5.5rem;
     margin-bottom: var(--space-2);
     padding: var(--space-1) var(--space-2);
@@ -1816,11 +1838,13 @@
   .outline-edge > * {
     pointer-events: auto;
   }
-  /* 把手：14px 宽、120px 高的墨色圆角条，落在正文列左侧页边里、垂直居中。
+  /* 把手：14px 宽、120px 高，落在正文列左侧页边里、垂直居中。
      页边 = `.prose-note` 的 px-6（--space-6，24px）；把手右侧留 --space-2 给正文，
      滚动条占掉正文区十来个像素时最多把这条缝吃到 1–3px，不会压到字上。
-     全圆角（浮在页边里的一枚墨条，不再贴边），箭头朝右暗示"往外滑"。
-     用 --text-primary 反色当底：亮色主题下是墨条，暗色主题下自然翻成亮条 */
+     全圆角，箭头朝右暗示"往外滑"。
+     材质跟右下角那枚气泡同一套：纸面（raised）+ 一条边 + 浅影。
+     以前用 --text-primary 当底，亮色主题会被涂成一条墨条——主题变了，按钮却还是深的。
+     箭头用朱砂，纸面上仍过图标的 3:1；描边用 inset，不把 14px 的命中宽度撑出去。 */
   .outline-edge-handle {
     position: absolute;
     top: 50%;
@@ -1833,16 +1857,20 @@
     padding: 0;
     border: none;
     border-radius: var(--radius-full);
-    background: var(--text-primary);
-    color: var(--bg-raised);
-    opacity: 0.88;
+    background: var(--bg-raised);
+    color: var(--accent);
+    box-shadow:
+      var(--shadow-1),
+      inset 0 0 0 1px var(--border-strong);
     cursor: pointer;
     transition:
-      opacity var(--dur-1) var(--ease-out),
+      background-color var(--dur-1) var(--ease-out),
+      color var(--dur-1) var(--ease-out),
       transform var(--dur-1) var(--ease-out);
   }
   .outline-edge-handle:hover {
-    opacity: 1;
+    background: var(--bg-hover);
+    color: var(--accent-hover);
     transform: translateY(-50%) translateX(1px);
   }
   .outline-edge-handle svg {
@@ -2208,6 +2236,95 @@
     animation: shimmer 1.4s var(--ease-out) infinite;
     border-radius: var(--radius-sm);
   }
+
+  /*
+   * 文件树 | 正文。宽度是 `--split-w`（split.ts），拖动时直接改这个变量，
+   * 不把每一拍写进 React。`--split-cap` 给右栏留 `--split-right-min`，
+   * 窗更窄时这条让步（max(0px, …)），避免整行溢出。
+   * 折起只发生在左边：`data-tree="closed"` 收成轨，右边那一列始终留着。
+   * 默认 288 / 320 与 split.ts 的默认宽、右栏下限一致，行内样式会再盖一次。
+   */
+  .split {
+    --split-w: 288px;
+    --split-right-min: 320px;
+    --split-cap: min(var(--split-w), max(0px, calc(100% - var(--split-right-min))));
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, var(--split-cap)) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    flex: 1 1 0%;
+    min-width: 0;
+    min-height: 0;
+  }
+  .split-side {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg-raised);
+    border-inline-end: 1px solid var(--border-subtle);
+  }
+  .split-side-open {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .split[data-tree="closed"] .split-side-open {
+    display: none;
+  }
+  /* 展开时不占位。关掉时整条轨都是按钮，点空白处也能展开 */
+  .split-side-shut {
+    display: none;
+  }
+  .split[data-tree="closed"] .split-side-shut {
+    display: grid;
+    flex: 1 1 auto;
+    place-items: start center;
+    width: 100%;
+    padding-top: var(--space-2);
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .split[data-tree="closed"] .split-side-shut:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  /*
+   * 分隔条本身不占列宽：绝对定位，8px 命中区骑在两列交界上。
+   * 格子铺满整张网格，但宽度收到 8px，否则会把正文的点击吃掉。
+   * 看得见的只有正中 1px，和侧栏那条边一样粗；8px 只负责好拖。
+   */
+  .split-sash {
+    position: absolute;
+    z-index: var(--z-marker);
+    grid-area: 1 / 1 / -1 / -1;
+    inset-block: 0;
+    inset-inline-start: calc(var(--split-cap) - var(--space-1));
+    inset-inline-end: auto;
+    width: var(--space-2);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    touch-action: none;
+    cursor: col-resize;
+  }
+  .split-sash::before {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: calc(50% - 0.5px);
+    width: 1px;
+    background: transparent;
+  }
+  .split-sash:hover::before,
+  .split-sash:focus-visible::before,
+  .split[data-dragging] .split-sash::before {
+    background: var(--accent);
+  }
 }
 
 @keyframes shimmer {
@@ -2234,8 +2351,9 @@
    同窗全屏、只读、连续滚动。**不是另一个页面**：正文还是那一个 ProseMirror 实例，
    所以滚动位置、图片解码与选区都不必重来。这里只做两件事——收走界面壳、把字放大。
 
-   这一段同样未分层：`aside` 身上带着 Tailwind 的 `flex` 工具类，工具类在 utilities
-   层，分层里的 `display:none` 压不过它（同上面 prosemirror 那段）。 */
+   这一段同样未分层：分层里的 `display:none` 压不过后面层里的 `display`
+   （同上面 prosemirror 那段）。分隔条和分栏的列宽也在这里收——只藏 `aside`
+   的话，网格还留着 `--split-cap` 那一列，全屏左侧会空出一条缝。 */
 [data-present="1"] {
   --text-base: var(--present-text-base);
   --text-lg: var(--present-text-lg);
@@ -2246,6 +2364,7 @@
 }
 [data-present="1"] .titlebar,
 [data-present="1"] aside,
+[data-present="1"] .split-sash,
 [data-present="1"] .note-head,
 [data-present="1"] .editor-tools,
 [data-present="1"] .bubble,
@@ -2253,6 +2372,15 @@
 [data-present="1"] .slash,
 [data-present="1"] .drop-line {
   display: none;
+}
+[data-present="1"] .split {
+  grid-template-columns: minmax(0, 1fr);
+}
+/* 拖动时指针下面常常是带 cursor 工具类的树行或正文。那类声明在 utilities 层，
+   分层里的 cursor 压不过去，光标会在 col-resize 和 grab 之间跳。 */
+body:has(.split[data-dragging]),
+body:has(.split[data-dragging]) * {
+  cursor: col-resize;
 }
 /* 演示里还剩两处"编辑器的手"：图注工具条与 AI 坞。图注输入框在只读时已改成
    `readOnly`，工具条本身没有观看价值，收走；AI 坞**不卸载**（对话轮次与草稿都在

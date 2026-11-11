@@ -891,7 +891,6 @@ fn cmd_scan(path: PathBuf, json: bool) -> Result<()> {
                 match f.status {
                     note_core::vault::NoteStatus::Inbox => "inbox",
                     note_core::vault::NoteStatus::Active => "active",
-                    note_core::vault::NoteStatus::Archived => "archived",
                 },
                 f.size,
                 &f.content_hash[..12],
